@@ -24,6 +24,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    exe.linkFramework("Cocoa");
+    exe.linkFramework("Carbon");
+    exe.linkFramework("CoreServices");
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
@@ -59,6 +63,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    unit_tests.linkFramework("Cocoa");
+    unit_tests.linkFramework("Carbon");
+    unit_tests.linkFramework("CoreServices");
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 

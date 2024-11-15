@@ -2,9 +2,6 @@ const std = @import("std");
 const c = @cImport(@cInclude("Carbon/Carbon.h"));
 const strForKey = @import("echo.zig").strForKey;
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const gpa_allocator = gpa.allocator();
-
 pub extern fn NSApplicationLoad() void;
 pub export fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) c.CGEventRef {
     if (typ != c.kCGEventKeyDown) {
@@ -16,7 +13,7 @@ pub export fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEven
     const flags: c.CGEventFlags = c.CGEventGetFlags(event);
     if (keycode == c.kVK_ANSI_C and flags & c.kCGEventFlagMaskControl != 0) {
         std.debug.print("Ctrl+C pressed\n", .{});
-        std.c.exit(0);
+        std.posix.exit(0);
     }
     if (flags & c.kCGEventFlagMaskShift != 0) {
         std.debug.print("Shift ", .{});
@@ -67,6 +64,17 @@ pub export fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEven
 }
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer {
+        const deinit_status = gpa.deinit();
+        //fail test; can't try in defer as defer is executed after we return
+        if (deinit_status == .leak) {
+            std.log.err("memory leak", .{});
+        }
+    }
+    const alloc = gpa.allocator();
+    _ = alloc;
+
     const mask: u32 = 1 << c.kCGEventKeyDown;
     std.debug.print("mask: 0x{x}\n", .{mask});
 
@@ -75,7 +83,7 @@ pub fn main() !void {
     const enabled = c.CGEventTapIsEnabled(handle);
     if (!enabled) {
         std.debug.print("Failed to enable event tap", .{});
-        std.c.exit(1);
+        std.posix.exit(1);
     }
 
     const loopsource = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, handle, 0);
@@ -86,4 +94,8 @@ pub fn main() !void {
     c.CFRunLoopRun();
 }
 
-const expect = std.testing.expect;
+test {
+    std.testing.refAllDeclsRecursive(@This());
+
+    std.testing.refAllDecls(@import("parse.zig"));
+}

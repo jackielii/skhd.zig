@@ -25,9 +25,6 @@ const Parser = struct {
 };
 
 test "Parse" {
-    var list = std.ArrayList(u21).init(std.testing.allocator);
-    defer list.deinit();
-
     const allocator = std.testing.allocator;
     try parse(allocator, "/Users/jackieli/.config/skhd/skhdrc");
 }

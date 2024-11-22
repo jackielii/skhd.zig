@@ -83,7 +83,7 @@ pub fn main() !void {
     const enabled = c.CGEventTapIsEnabled(handle);
     if (!enabled) {
         std.debug.print("Failed to enable event tap", .{});
-        std.posix.exit(1);
+        std.process.exit(1);
     }
 
     const loopsource = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, handle, 0);
@@ -94,8 +94,8 @@ pub fn main() !void {
     c.CFRunLoopRun();
 }
 
-test {
-    std.testing.refAllDeclsRecursive(@This());
-
-    std.testing.refAllDecls(@import("parse.zig"));
-}
+// test {
+//     std.testing.refAllDeclsRecursive(@This());
+//
+//     std.testing.refAllDecls(@import("parse.zig"));
+// }

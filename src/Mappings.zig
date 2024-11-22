@@ -1,5 +1,6 @@
 const std = @import("std");
 const Mode = @import("./Mode.zig");
+const utils = @import("./utils.zig");
 
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMap(Mode) = undefined,
@@ -42,12 +43,7 @@ pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.Format
     {
         var it = self.mode_map.iterator();
         while (it.next()) |kv| {
-            const string = try std.fmt.allocPrint(self.allocator, "{}", .{kv.value_ptr.*});
-            defer self.allocator.free(string);
-            var parts = std.mem.splitScalar(u8, string, '\n');
-            while (parts.next()) |part| {
-                try writer.print("\n    {s}", .{part});
-            }
+            try utils.indentPrint(self.allocator, writer, 4, "\n{}", kv.value_ptr.*);
         }
     }
     try writer.print("\n  }}", .{});

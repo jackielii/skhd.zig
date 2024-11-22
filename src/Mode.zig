@@ -8,6 +8,8 @@
 // };
 const std = @import("std");
 const Hotkey = @import("./Hotkey.zig");
+const HotkeyMap = Hotkey.HotkeyMap;
+const utils = @import("./utils.zig");
 
 const Mode = @This();
 
@@ -16,7 +18,7 @@ name: []const u8,
 command: ?[]const u8 = null,
 capture: bool,
 initialized: bool,
-hotkey_map: std.AutoArrayHashMap(*Hotkey, void),
+hotkey_map: HotkeyMap,
 
 pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
     return Mode{
@@ -25,7 +27,7 @@ pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
         // .command = allocator.dupe(command),
         .capture = false,
         .initialized = false,
-        .hotkey_map = std.AutoArrayHashMap(*Hotkey, void).init(allocator),
+        .hotkey_map = HotkeyMap.init(allocator),
     };
 }
 
@@ -51,17 +53,11 @@ pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOpti
     try writer.print("\n  command: {?s}", .{self.command});
     try writer.print("\n  capture: {}", .{self.capture});
     try writer.print("\n  initialized: {}", .{self.initialized});
-    try writer.print("\n  hotkey_map: {{", .{});
+    try writer.print("\n  hotkey_map: {{\n", .{});
     {
         var it = self.hotkey_map.iterator();
         while (it.next()) |kv| {
-            const string = try std.fmt.allocPrint(self.allocator, "{}", .{kv.key_ptr.*});
-            defer self.allocator.free(string);
-            var parts = std.mem.splitScalar(u8, string, '\n');
-            while (parts.next()) |part| {
-                try writer.print("\n    {s}", .{part});
-            }
-            // try writer.print("\n    {}", .{kv.key_ptr.*});
+            try utils.indentPrint(self.allocator, writer, 4, "{}", kv.key_ptr.*);
         }
     }
     try writer.print("\n  }}", .{});

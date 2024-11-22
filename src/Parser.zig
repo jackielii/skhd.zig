@@ -1,9 +1,8 @@
 const std = @import("std");
-const print = std.debug.print;
 const Tokenizer = @import("./Tokenizer.zig");
 const Token = Tokenizer.Token;
 const Hotkey = @import("./Hotkey.zig");
-const debug = std.debug.print;
+const print = std.debug.print;
 const assert = std.debug.assert;
 const Mode = @import("./Mode.zig");
 const Mappings = @import("./Mappings.zig");
@@ -111,7 +110,7 @@ fn parse_hotkey(self: *Parser) !void {
     // var found_modifier = false;
 
     const token: Token = self.token orelse return ParserError.@"Expect token";
-    debug("hotkey :: #{d} {{\n", .{self.token.?.line});
+    print("hotkey :: #{d} {{\n", .{self.token.?.line});
 
     if (token.type == .Token_Identifier) {
         try self.parse_mode(hotkey);
@@ -135,7 +134,7 @@ fn parse_mode(self: *Parser, hotkey: *Hotkey) !void {
         return ParserError.@"Mode already exists";
     }
     try hotkey.mode_list.put(mode, {});
-    debug("\tmode: '{s}'\n", .{name});
+    print("\tmode: '{s}'\n", .{name});
     // const token1 = self.advance_token() orelse return ParserError.@"Expected token";
     if (self.advance_match_token(.Token_Comma)) {
         if (self.advance_match_token(.Token_Identifier)) {
@@ -158,12 +157,12 @@ test "Parse" {
     defer parser.deinit();
 
     var mappings = parser.parse("default, default, xxxx") catch |err| {
-        debug("error: {any}, token: {s}\n", .{ err, std.json.fmt(parser.token, .{ .whitespace = .indent_2 }) });
+        print("error: {any}, token: {s}\n", .{ err, std.json.fmt(parser.token, .{ .whitespace = .indent_2 }) });
         return;
     };
     defer mappings.deinit();
 
     const string = try std.fmt.allocPrint(alloc, "{}", .{mappings});
     defer alloc.free(string);
-    debug("mapping: {s}\n", .{string});
+    print("mapping: {s}\n", .{string});
 }

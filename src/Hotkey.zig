@@ -12,10 +12,24 @@
 const std = @import("std");
 const Hotkey = @This();
 const Mode = @import("Mode.zig");
+const utils = @import("./utils.zig");
 
-pub const HotkeyMap = std.ArrayHashMap(Hotkey, void, hotkeyContext, false);
+pub const HotkeyMap = std.ArrayHashMap(*Hotkey, void, hotkeyContext, false);
 
-const hotkeyContext = struct {};
+fn eql(a: *Hotkey, b: *Hotkey) bool {
+    return a.flags == b.flags and a.key == b.key;
+}
+
+const hotkeyContext = struct {
+    pub fn hash(self: @This(), key: *Hotkey) u32 {
+        _ = self;
+        return key.flags ^ key.key;
+    }
+    pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
+        _ = self;
+        return Hotkey.eql(a, b);
+    }
+};
 
 allocator: std.mem.Allocator,
 flags: u32 = undefined,
@@ -93,12 +107,7 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("\n  }}", .{});
     if (self.forwarded_hotkey) |hotkey| {
         try writer.print("\n  forwarded_hotkey: ", .{});
-        const string = try std.fmt.allocPrint(self.allocator, "{}", .{hotkey});
-        defer self.allocator.free(string);
-        var it = std.mem.splitScalar(u8, string, '\n');
-        while (it.next()) |part| {
-            try writer.print("{s}\n  ", .{part});
-        }
+        try utils.indentPrint(self.allocator, writer, 2, "{}", hotkey);
     }
     try writer.print("\n}}", .{});
 }
@@ -115,6 +124,37 @@ pub fn add_command(self: *Hotkey, command: []const u8) !void {
 
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
     try self.mode_list.put(mode, {});
+}
+
+test "hotkey map" {
+    const alloc = std.testing.allocator;
+    var m = HotkeyMap.init(alloc);
+    defer m.deinit();
+
+    var key1 = try Hotkey.create(alloc);
+    defer key1.destroy();
+    key1.flags = 0x1;
+    key1.key = 0x2;
+    try key1.add_process_name("notepad.exe");
+    std.debug.print("{}\n", .{key1});
+
+    var key2 = try Hotkey.create(alloc);
+    key2.flags = 0x1;
+    key2.key = 0x2;
+    defer key2.destroy();
+    std.debug.print("{}\n", .{key2});
+
+    var key1d = try Hotkey.create(alloc);
+    defer key1d.destroy();
+    key1d.flags = 0x2;
+    key1d.key = 0x2;
+    try key1d.add_process_name("notepad.exe");
+    std.debug.print("{}\n", .{key1d});
+
+    try m.put(key1, {});
+    try m.put(key2, {});
+    try m.put(key1d, {});
+    try std.testing.expectEqual(2, m.count());
 }
 
 test "format hotkey" {

@@ -75,10 +75,10 @@ pub fn set_forwarded_hotkey(self: *Hotkey, forwarded_hotkey: *Hotkey) void {
     self.forwarded_hotkey = forwarded_hotkey;
 }
 
-pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    if (fmt.len != 0) {
-        std.fmt.invalidFmtError(fmt, self);
-    }
+pub fn format(self: *const Hotkey, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    // if (fmt.len != 0) {
+    //     std.fmt.invalidFmtError(fmt, self);
+    // }
     try writer.print("Hotkey{{", .{});
     try writer.print("\n  flags: {}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
@@ -173,7 +173,7 @@ test "format hotkey" {
     try hotkey.set_wilecard_command("some wildcard_command");
     hotkey.forwarded_hotkey = try Hotkey.create(alloc);
 
-    const string = try std.fmt.allocPrint(alloc, "{}", .{hotkey});
+    const string = try std.fmt.allocPrint(alloc, "{s}", .{hotkey});
     defer alloc.free(string);
 
     std.debug.print("{s}\n", .{string});

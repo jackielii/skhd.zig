@@ -14,7 +14,8 @@ const ParserError = error{
     @"Expected Identifier",
     @"Mode not found",
     @"Expected identifier",
-    @"Mode already exists",
+    @"Mode already exists in hotkey mode",
+    @"Expected '<'",
 };
 
 const LoadDirective = struct {
@@ -44,7 +45,7 @@ content: []const u8 = undefined,
 load_directives: []LoadDirective = undefined,
 tokenizer: Tokenizer = undefined,
 previous_token: ?Token = undefined,
-token: ?Token = undefined,
+next_token: ?Token = undefined,
 
 pub fn deinit(self: *Parser) void {
     // self.allocator.free(self.filename);
@@ -56,25 +57,22 @@ pub fn init(allocator: std.mem.Allocator) Parser {
     // const f = try std.fs.cwd().openFile(filename, .{});
     // defer f.close();
     // const content = try f.readToEndAlloc(allocator, 1 << 24); // max size 16MB
-    var parser = Parser{
+    return Parser{
         .allocator = allocator,
         // .mappings = &mappings,
         // .filename = allocator.dupe(u8, filename),
         // .content = content,
         // .tokenizer = tokenizer,
     };
-    _ = parser.advance_token();
-    return parser;
 }
 
-pub fn parse(self: *Parser, content: []const u8) !Mappings {
+pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
+    self.mappings = mappings;
     self.content = content;
     self.tokenizer = try Tokenizer.init(content);
+    _ = self.advance();
 
-    var mappings = Mappings.init(self.allocator);
-    self.mappings = &mappings;
-
-    while (self.token) |token| {
+    while (self.peek()) |token| {
         switch (token.type) {
             .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key => {
                 try self.parse_hotkey();
@@ -85,21 +83,33 @@ pub fn parse(self: *Parser, content: []const u8) !Mappings {
         }
         break;
     }
-
-    return mappings;
 }
 
-fn advance_token(self: *Parser) ?Token {
-    self.previous_token = self.token;
-    self.token = self.tokenizer.get_token();
-    return self.token;
+fn peek(self: *Parser) ?Token {
+    return self.next_token;
 }
 
-fn advance_match_token(self: *Parser, typ: Tokenizer.TokenType) bool {
-    if (self.advance_token()) |token| {
-        if (token.type == typ) {
-            return true;
-        }
+fn previous(self: *Parser) Token {
+    return self.previous_token orelse @panic("No previous token");
+}
+
+/// advance token stream
+fn advance(self: *Parser) void {
+    self.previous_token = self.next_token;
+    self.next_token = self.tokenizer.get_token();
+}
+
+/// peek next token and check if it's the expected type
+fn peek_check(self: *Parser, typ: Tokenizer.TokenType) bool {
+    const token = self.peek() orelse return false;
+    return token.type == typ;
+}
+
+/// match next token and move over it
+fn match(self: *Parser, typ: Tokenizer.TokenType) bool {
+    if (self.peek_check(typ)) {
+        self.advance();
+        return true;
     }
     return false;
 }
@@ -109,11 +119,19 @@ fn parse_hotkey(self: *Parser) !void {
     errdefer hotkey.destroy();
     // var found_modifier = false;
 
-    const token: Token = self.token orelse return ParserError.@"Expect token";
-    print("hotkey :: #{d} {{\n", .{self.token.?.line});
+    print("hotkey :: #{d} {{\n", .{self.next_token.?.line});
 
-    if (token.type == .Token_Identifier) {
+    if (self.match(.Token_Identifier)) {
         try self.parse_mode(hotkey);
+    }
+
+    if (hotkey.mode_list.count() > 0) {
+        if (!self.match(.Token_Insert)) {
+            return ParserError.@"Expected '<'";
+        }
+    } else {
+        const default_mode = try self.mappings.get_mode("default") orelse unreachable;
+        try hotkey.mode_list.put(default_mode, {});
     }
 
     var it = hotkey.mode_list.iterator();
@@ -124,20 +142,21 @@ fn parse_hotkey(self: *Parser) !void {
 }
 
 fn parse_mode(self: *Parser, hotkey: *Hotkey) !void {
-    const token: Token = self.token orelse return ParserError.@"Expect token";
+    const token: Token = self.previous();
     assert(token.type == .Token_Identifier);
 
     const name = token.text;
     const mode = try self.mappings.get_mode(name) orelse return ParserError.@"Mode not found";
 
     if (hotkey.mode_list.contains(mode)) {
-        return ParserError.@"Mode already exists";
+        return ParserError.@"Mode already exists in hotkey mode";
     }
     try hotkey.mode_list.put(mode, {});
     print("\tmode: '{s}'\n", .{name});
+
     // const token1 = self.advance_token() orelse return ParserError.@"Expected token";
-    if (self.advance_match_token(.Token_Comma)) {
-        if (self.advance_match_token(.Token_Identifier)) {
+    if (self.match(.Token_Comma)) {
+        if (self.match(.Token_Identifier)) {
             try self.parse_mode(hotkey);
         } else {
             return ParserError.@"Expected identifier";
@@ -156,13 +175,22 @@ test "Parse" {
     var parser = Parser.init(alloc);
     defer parser.deinit();
 
-    var mappings = parser.parse("default, default, xxxx") catch |err| {
-        print("error: {any}, token: {s}\n", .{ err, std.json.fmt(parser.token, .{ .whitespace = .indent_2 }) });
-        return;
-    };
+    var mappings = Mappings.init(alloc);
     defer mappings.deinit();
 
-    const string = try std.fmt.allocPrint(alloc, "{}", .{mappings});
-    defer alloc.free(string);
-    print("mapping: {s}\n", .{string});
+    // try std.testing.expectError(ParserError.@"Mode already exists in hotkey mode", parser.parse(&mappings, "default, default"));
+    //
+    // try std.testing.expectError(ParserError.@"Mode not found", parser.parse(&mappings, "default, xxx"));
+    //
+    // const string = try std.fmt.allocPrint(alloc, "{}", .{mappings});
+    // defer alloc.free(string);
+    //
+    // // print("{s}\n", .{string});
+    // try std.testing.expectEqual(1, mappings.mode_map.count());
+
+    // var tokenizer = try Tokenizer.init("default <");
+    // while (tokenizer.get_token()) |token| {
+    //     print("token: {?}\n", .{token});
+    // }
+    try parser.parse(&mappings, "default <");
 }

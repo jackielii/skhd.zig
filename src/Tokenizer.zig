@@ -66,6 +66,15 @@ pub const Token = struct {
 
     line: usize,
     cursor: usize,
+
+    pub fn format(self: *const Token, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.print("Token{{", .{});
+        try writer.print("\n  line: {d}", .{self.line});
+        try writer.print("\n  cursor: {d}", .{self.cursor});
+        try writer.print("\n  type: {any}", .{self.type});
+        try writer.print("\n  text: {s}", .{self.text});
+        try writer.print("\n}}", .{});
+    }
 };
 
 buffer: []const u8,
@@ -342,4 +351,14 @@ test "tokenize" {
         // print("line: {d}, cursor: {d}, type: {any}, text: {s}\n", .{ token.line, token.cursor, token.type, token.text });
         _ = token;
     }
+}
+
+test "format token" {
+    const token = Token{
+        .line = 1,
+        .cursor = 1,
+        .type = .Token_Identifier,
+        .text = "hello",
+    };
+    std.debug.print("{}\n", .{token});
 }

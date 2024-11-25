@@ -4,32 +4,12 @@ const eql = std.mem.eql;
 const unicode = std.unicode;
 const ascii = std.ascii;
 
+const modifier_flags_str = @import("./consts.zig").modifier_flags_str;
+const literal_keycode_str = @import("./consts.zig").literal_keycode_str;
+
 const identifier_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
 const number_chars = "0123456789";
 const hex_chars = "0123456789abcdefABCDEF";
-
-const modifier_flags_str = [_][]const u8{
-    "alt",   "lalt",   "ralt",
-    "shift", "lshift", "rshift",
-    "cmd",   "lcmd",   "rcmd",
-    "ctrl",  "lctrl",  "rctrl",
-    "fn",    "hyper",  "meh",
-};
-
-const literal_keycode_str = [_][]const u8{
-    "return",          "tab",             "space",             "backspace",
-    "escape",          "delete",          "home",              "end",
-    "pageup",          "pagedown",        "insert",            "left",
-    "right",           "up",              "down",              "f1",
-    "f2",              "f3",              "f4",                "f5",
-    "f6",              "f7",              "f8",                "f9",
-    "f10",             "f11",             "f12",               "f13",
-    "f14",             "f15",             "f16",               "f17",
-    "f18",             "f19",             "f20",               "sound_up",
-    "sound_down",      "mute",            "play",              "previous",
-    "next",            "rewind",          "fast",              "brightness_up",
-    "brightness_down", "illumination_up", "illumination_down",
-};
 
 pub const TokenType = enum {
     Token_Identifier,
@@ -348,8 +328,8 @@ test "tokenize" {
 
     var tokenizer = try init(content);
     while (tokenizer.get_token()) |token| {
-        // print("line: {d}, cursor: {d}, type: {any}, text: {s}\n", .{ token.line, token.cursor, token.type, token.text });
-        _ = token;
+        print("line: {d}, cursor: {d}, type: {any}, text: {s}\n", .{ token.line, token.cursor, token.type, token.text });
+        // _ = token;
     }
 }
 

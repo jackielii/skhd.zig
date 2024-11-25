@@ -58,7 +58,7 @@ pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.Format
     try writer.print("\n}}", .{});
 }
 
-pub fn get_mode(self: *Mappings, mode_name: []const u8) !?*Mode {
+pub fn get_mode_or_create_default(self: *Mappings, mode_name: []const u8) !?*Mode {
     if (std.mem.eql(u8, mode_name, "default")) {
         const key = try self.allocator.dupe(u8, mode_name);
         errdefer self.allocator.free(key);
@@ -77,10 +77,10 @@ pub fn get_mode(self: *Mappings, mode_name: []const u8) !?*Mode {
 test "get_mode default" {
     const alloc = std.testing.allocator;
     var mappings = Mappings.init(alloc);
-    _ = try mappings.get_mode("default");
-    _ = try mappings.get_mode("default");
-    _ = try mappings.get_mode("xxx");
-    _ = try mappings.get_mode("yyy");
+    _ = try mappings.get_mode_or_create_default("default");
+    _ = try mappings.get_mode_or_create_default("default");
+    _ = try mappings.get_mode_or_create_default("xxx");
+    _ = try mappings.get_mode_or_create_default("yyy");
     try std.testing.expectEqual(mappings.mode_map.count(), 1);
     defer mappings.deinit();
 }
@@ -89,7 +89,7 @@ test "format" {
     const alloc = std.testing.allocator;
     var mappings = Mappings.init(alloc);
     defer mappings.deinit();
-    _ = try mappings.get_mode("default");
+    _ = try mappings.get_mode_or_create_default("default");
     std.debug.print("{}\n", .{mappings});
     // try std.json.stringify(mappings, .{ .whitespace = .indent_2 }, string.writer());
 }

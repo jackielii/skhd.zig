@@ -5,14 +5,22 @@ const utils = @import("./utils.zig");
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMap(Mode) = undefined,
 blacklist: std.StringHashMap(void) = undefined,
+shell: []const u8 = undefined,
 
 const Mappings = @This();
 
-pub fn init(allocator: std.mem.Allocator) Mappings {
+pub fn init(alloc: std.mem.Allocator) !Mappings {
+    var shell: []const u8 = "/bin/bash";
+    if (std.posix.getenv("SHELL")) |env| {
+        shell = try alloc.dupe(u8, env);
+    } else {
+        shell = try alloc.dupe(u8, shell);
+    }
     return Mappings{
-        .allocator = allocator,
-        .mode_map = std.StringHashMap(Mode).init(allocator),
-        .blacklist = std.StringHashMap(void).init(allocator),
+        .shell = shell,
+        .allocator = alloc,
+        .mode_map = std.StringHashMap(Mode).init(alloc),
+        .blacklist = std.StringHashMap(void).init(alloc),
     };
 }
 
@@ -30,8 +38,19 @@ pub fn deinit(self: *Mappings) void {
         while (it.next()) |key| self.allocator.free(key.*);
         self.blacklist.deinit();
     }
+    self.allocator.free(self.shell);
 
     self.* = undefined;
+}
+
+pub fn set_shell(self: *Mappings, shell: []const u8) !void {
+    self.allocator.free(self.shell);
+    self.shell = try self.allocator.dupe(u8, shell);
+}
+
+pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
+    const key_dup = try self.allocator.dupe(u8, key);
+    try self.blacklist.put(key_dup, void{});
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -77,7 +96,7 @@ pub fn get_mode_or_create_default(self: *Mappings, mode_name: []const u8) !?*Mod
 
 test "get_mode default" {
     const alloc = std.testing.allocator;
-    var mappings = Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc);
     _ = try mappings.get_mode_or_create_default("default");
     _ = try mappings.get_mode_or_create_default("default");
     _ = try mappings.get_mode_or_create_default("xxx");
@@ -88,7 +107,7 @@ test "get_mode default" {
 
 test "format" {
     const alloc = std.testing.allocator;
-    var mappings = Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
     _ = try mappings.get_mode_or_create_default("default");
     std.debug.print("{}\n", .{mappings});

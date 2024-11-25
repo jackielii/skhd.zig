@@ -26,7 +26,7 @@ pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
         .name = try allocator.dupe(u8, name),
         // .command = allocator.dupe(command),
         .capture = false,
-        .initialized = false,
+        .initialized = true,
         .hotkey_map = HotkeyMap.init(allocator),
     };
 }
@@ -42,6 +42,11 @@ pub fn deinit(self: *Mode) void {
         self.hotkey_map.deinit();
     }
     self.* = undefined;
+}
+
+pub fn set_command(self: *Mode, command: []const u8) !void {
+    if (self.command) |cmd| self.allocator.free(cmd);
+    self.command = try self.allocator.dupe(u8, command);
 }
 
 pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {

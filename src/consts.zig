@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @cImport({
+    @cInclude("Carbon/Carbon.h");
     @cInclude("IOKit/hidsystem/ev_keymap.h");
 });
 
@@ -64,6 +65,7 @@ pub const modifier_flags_value = [_]u32{
     @intFromEnum(hotkey_flag.Hotkey_Flag_Shift),   @intFromEnum(hotkey_flag.Hotkey_Flag_LShift),   @intFromEnum(hotkey_flag.Hotkey_Flag_RShift),
     @intFromEnum(hotkey_flag.Hotkey_Flag_Cmd),     @intFromEnum(hotkey_flag.Hotkey_Flag_LCmd),     @intFromEnum(hotkey_flag.Hotkey_Flag_RCmd),
     @intFromEnum(hotkey_flag.Hotkey_Flag_Control), @intFromEnum(hotkey_flag.Hotkey_Flag_LControl), @intFromEnum(hotkey_flag.Hotkey_Flag_RControl),
+    @intFromEnum(hotkey_flag.Hotkey_Flag_Fn),      @intFromEnum(hotkey_flag.Hotkey_Flag_Hyper),    @intFromEnum(hotkey_flag.Hotkey_Flag_Meh),
 };
 
 pub const literal_keycode_str = [_][]const u8{

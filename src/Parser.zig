@@ -75,11 +75,16 @@ pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
             .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key => {
                 try self.parse_hotkey(mappings);
             },
+            .Token_Decl => {
+                try self.parse_decl(mappings);
+            },
+            .Token_Option => {
+                try self.parse_option(mappings);
+            },
             else => {
-                unreachable;
+                return error.@"Unexpected token";
             },
         }
-        break;
     }
 }
 
@@ -95,7 +100,7 @@ fn previous(self: *Parser) Token {
 fn advance(self: *Parser) void {
     self.previous_token = self.next_token;
     self.next_token = self.tokenizer.get_token();
-    // print("token: {?}\n", .{self.next_token});
+    print("token: {?}\n", .{self.next_token});
 }
 
 /// peek next token and check if it's the expected type
@@ -248,6 +253,7 @@ fn parse_key_hex(self: *Parser) !u32 {
 }
 
 const literal_keycode_str = @import("./consts.zig").literal_keycode_str;
+const literal_keycode_value = @import("./consts.zig").literal_keycode_value;
 
 fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
     const token = self.previous();
@@ -262,7 +268,7 @@ fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
             } else if (i >= consts.KEY_HAS_IMPLICIT_NX_MOD) {
                 flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_NX);
             }
-            keycode = try self.keycodes.get_keycode(literal_key);
+            keycode = literal_keycode_value[i];
             break;
         }
     } else {
@@ -334,6 +340,67 @@ fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
     }
 }
 
+fn parse_decl(self: *Parser, mappings: *Mappings) !void {
+    assert(self.match(.Token_Decl));
+    if (!self.match(.Token_Identifier)) {
+        return error.@"Expected identifier";
+    }
+    const token = self.previous();
+    const mode_name = token.text;
+    var mode = try Mode.init(self.allocator, mode_name);
+
+    if (self.match(.Token_Capture)) {
+        mode.capture = true;
+    }
+
+    if (self.match(.Token_Command)) {
+        try mode.set_command(self.previous().text);
+    }
+
+    if (try mappings.get_mode_or_create_default(mode_name)) |existing_mode| {
+        defer mode.deinit();
+        if (std.mem.eql(u8, existing_mode.name, mode_name)) {
+            return error.@"Mode already exists";
+        }
+        if (std.mem.eql(u8, existing_mode.name, "default")) {
+            existing_mode.initialized = false;
+            existing_mode.capture = mode.capture;
+            if (mode.command) |cmd| try existing_mode.set_command(cmd);
+        }
+    } else {
+        try mappings.mode_map.put(mode_name, mode);
+    }
+}
+
+fn parse_option(self: *Parser, mappings: *Mappings) !void {
+    assert(self.match(.Token_Option));
+    const option = self.previous().text;
+
+    if (std.mem.eql(u8, option, "load")) {
+        @panic("load directive not implemented");
+    } else if (std.mem.eql(u8, option, "blacklist")) {
+        if (self.match(.Token_BeginList)) {
+            while (self.match(.Token_String)) {
+                const token = self.previous();
+                try mappings.add_blacklist(token.text);
+            }
+            if (!self.match(.Token_EndList)) {
+                return error.@"Expected ']'";
+            }
+        } else {
+            return error.@"Expected '['";
+        }
+    } else if (std.mem.eql(u8, option, "SHELL")) {
+        if (self.match(.Token_String)) {
+            try mappings.set_shell(self.previous().text);
+        } else {
+            return error.@"Expected string";
+        }
+    } else {
+        return error.@"Unknown option";
+    }
+}
+
 test "init" {
     const alloc = std.testing.allocator;
     var parser = try Parser.init(alloc);
@@ -345,7 +412,7 @@ test "Parse" {
     var parser = try Parser.init(alloc);
     defer parser.deinit();
 
-    var mappings = Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
 
     // try std.testing.expectError(error.@"Mode already exists in hotkey mode", parser.parse(&mappings, "default, default"));
@@ -373,5 +440,20 @@ test "Parse" {
         \\     *: ~
         \\ ]
     );
+    print("{s}\n", .{mappings});
+}
+
+test "Parse my skhd.conf" {
+    const alloc = std.testing.allocator;
+    const content = try std.fs.cwd().readFileAlloc(alloc, "/Users/jackieli/.config/skhd/skhdrc", 1 << 16);
+    defer alloc.free(content);
+
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings, content);
     print("{s}\n", .{mappings});
 }

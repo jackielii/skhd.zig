@@ -88,7 +88,7 @@ pub fn init(alloc: std.mem.Allocator) !Keycodes {
 }
 
 pub fn deinit(self: *Keycodes) void {
-    std.debug.print("size: {}\n", .{self.keymap_table.count()});
+    // std.debug.print("size: {}\n", .{self.keymap_table.count()});
     var it = self.keymap_table.iterator();
     while (it.next()) |kv| {
         self.alloc.free(kv.key_ptr.*);

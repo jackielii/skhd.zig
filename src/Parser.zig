@@ -149,7 +149,9 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     } else if (self.match(.Token_Key_Hex)) {
         hotkey.key = try self.parse_key_hex();
     } else if (self.match(.Token_Literal)) {
-        try self.parse_key_literal(hotkey);
+        const keypress = try self.parse_key_literal();
+        hotkey.flags |= keypress.flags;
+        hotkey.key = keypress.key;
     } else {
         return error.@"Expected key, key hex, literal or modifier";
     }
@@ -247,31 +249,35 @@ fn parse_key_hex(self: *Parser) !u32 {
 
 const literal_keycode_str = @import("./consts.zig").literal_keycode_str;
 
-fn parse_key_literal(self: *Parser, hotkey: *Hotkey) !void {
+fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
     const token = self.previous();
     const key = token.text;
+    var flags: u32 = 0;
+    var keycode: u32 = 0;
 
     for (literal_keycode_str, 0..) |literal_key, i| {
         if (std.mem.eql(u8, key, literal_key)) {
             if (i > consts.KEY_HAS_IMPLICIT_FN_MOD and i < consts.KEY_HAS_IMPLICIT_NX_MOD) {
-                hotkey.flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Fn);
+                flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Fn);
             } else if (i >= consts.KEY_HAS_IMPLICIT_NX_MOD) {
-                hotkey.flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_NX);
+                flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_NX);
             }
-            hotkey.key = try self.keycodes.get_keycode(literal_key);
-            return;
+            keycode = try self.keycodes.get_keycode(literal_key);
+            break;
         }
+    } else {
+        return error.@"Unknown literal key";
     }
+
+    return Hotkey.KeyPress{ .flags = flags, .key = keycode };
 }
 
-fn parse_keypress(self: *Parser) !*Hotkey {
-    var hotkey = try Hotkey.create(self.allocator);
-    errdefer hotkey.destroy();
-    // const token
-
+fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
+    var flags: u32 = 0;
+    var keycode: u32 = 0;
     var found_modifier = false;
     if (self.match(.Token_Modifier)) {
-        hotkey.flags = try self.parse_modifier();
+        flags = try self.parse_modifier();
         found_modifier = true;
     }
 
@@ -280,16 +286,18 @@ fn parse_keypress(self: *Parser) !*Hotkey {
     }
 
     if (self.match(.Token_Key)) {
-        hotkey.key = try self.parse_key();
+        keycode = try self.parse_key();
     } else if (self.match(.Token_Key_Hex)) {
-        hotkey.key = try self.parse_key_hex();
+        keycode = try self.parse_key_hex();
     } else if (self.match(.Token_Literal)) {
-        try self.parse_key_literal(hotkey);
+        const keypress = try self.parse_key_literal();
+        flags |= keypress.flags;
+        keycode = keypress.key;
     } else {
         return error.@"Expected key, key hex, literal or modifier";
     }
 
-    return hotkey;
+    return Hotkey.KeyPress{ .flags = flags, .key = keycode };
 }
 
 fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {

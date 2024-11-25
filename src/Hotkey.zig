@@ -16,6 +16,11 @@ const utils = @import("./utils.zig");
 
 pub const HotkeyMap = std.ArrayHashMap(*Hotkey, void, hotkeyContext, false);
 
+pub const KeyPress = struct {
+    flags: u32,
+    key: u32,
+};
+
 fn eql(a: *Hotkey, b: *Hotkey) bool {
     return a.flags == b.flags and a.key == b.key;
 }
@@ -33,7 +38,7 @@ const hotkeyContext = struct {
 
 const processCommand = union(enum) {
     command: []const u8,
-    forwarded: *Hotkey,
+    forwarded: KeyPress,
     unbound: void,
 };
 
@@ -52,19 +57,13 @@ pub fn destroy(self: *Hotkey) void {
     for (self.commands.items) |cmd| {
         switch (cmd) {
             .command => self.allocator.free(cmd.command),
-            .forwarded => cmd.forwarded.destroy(),
+            .forwarded => {},
             .unbound => {},
         }
     }
     self.commands.deinit();
 
-    if (self.wildcard_command) |wildcard_command| {
-        switch (wildcard_command) {
-            .command => self.allocator.free(wildcard_command.command),
-            .forwarded => wildcard_command.forwarded.destroy(),
-            .unbound => {},
-        }
-    }
+    self.deinit_wildcard_command();
     self.mode_list.deinit();
     self.allocator.destroy(self);
 }
@@ -80,11 +79,11 @@ pub fn create(allocator: std.mem.Allocator) !*Hotkey {
     return hotkey;
 }
 
-fn deinit_old_wildcard_command(self: *Hotkey) void {
+fn deinit_wildcard_command(self: *Hotkey) void {
     if (self.wildcard_command) |wildcard_command| {
         switch (wildcard_command) {
             .command => self.allocator.free(wildcard_command.command),
-            .forwarded => wildcard_command.forwarded.destroy(),
+            .forwarded => {},
             .unbound => {},
         }
         self.wildcard_command = null;
@@ -92,18 +91,18 @@ fn deinit_old_wildcard_command(self: *Hotkey) void {
 }
 
 pub fn set_wildcard_command(self: *Hotkey, wildcard_command: []const u8) !void {
-    self.deinit_old_wildcard_command();
+    self.deinit_wildcard_command();
     const cmd = try self.allocator.dupe(u8, wildcard_command);
     self.wildcard_command = processCommand{ .command = cmd };
 }
 
-pub fn set_wildcard_forwarded(self: *Hotkey, forwarded: *Hotkey) void {
-    self.deinit_old_wildcard_command();
+pub fn set_wildcard_forwarded(self: *Hotkey, forwarded: KeyPress) void {
+    self.deinit_wildcard_command();
     self.wildcard_command = processCommand{ .forwarded = forwarded };
 }
 
 pub fn set_wildcard_unbound(self: *Hotkey) void {
-    self.deinit_old_wildcard_command();
+    self.deinit_wildcard_command();
     self.wildcard_command = processCommand{ .unbound = void{} };
 }
 
@@ -134,10 +133,10 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     {
         for (self.commands.items) |cmd| {
             switch (cmd) {
-                .command => try writer.print("\n    {s}", .{cmd.command}),
+                .command => try writer.print("\n    cmd: {s},", .{cmd.command}),
                 .forwarded => {
-                    try writer.print("\n    forwarded", .{});
-                    try utils.indentPrint(self.allocator, writer, "  ", "{}", cmd.forwarded);
+                    try writer.print("\n    forwarded:", .{});
+                    try utils.indentPrint(self.allocator, writer, "    ", "{}", cmd.forwarded);
                 },
                 .unbound => try writer.print("\n    unbound", .{}),
             }
@@ -176,7 +175,7 @@ pub fn add_proc_unbound(self: *Hotkey) !void {
     try self.commands.append(processCommand{ .unbound = void{} });
 }
 
-pub fn add_proc_forward(self: *Hotkey, forwarded: *Hotkey) !void {
+pub fn add_proc_forward(self: *Hotkey, forwarded: KeyPress) !void {
     try self.commands.append(processCommand{ .forwarded = forwarded });
 }
 
@@ -229,7 +228,7 @@ test "format hotkey" {
     // std.debug.print("{}\n", .{mode});
     try hotkey.add_mode(&mode);
     // try hotkey.set_wildcard_command("some wildcard_command");
-    hotkey.set_wildcard_forwarded(try Hotkey.create(alloc));
+    hotkey.set_wildcard_forwarded(KeyPress{ .flags = 0x1, .key = 0x2 });
 
     const string = try std.fmt.allocPrint(alloc, "{s}", .{hotkey});
     defer alloc.free(string);

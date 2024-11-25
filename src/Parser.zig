@@ -158,7 +158,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     } else if (self.match(.Token_Literal)) {
         try self.parse_key_literal(hotkey);
     } else {
-        return error.@"Expected key, key hex or literal";
+        return error.@"Expected key, key hex, literal or modifier";
     }
 
     if (self.match(.Token_Forward)) {
@@ -168,9 +168,13 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     if (self.match(.Token_Forward)) {
         print("\tforward: {{\n", .{});
         const forwarded = try self.parse_keypress();
-        hotkey.forwarded = forwarded;
-        utils.indentPrint(self.alloc, forwarded, "{}", forwarded);
+        hotkey.forwarded_hotkey = forwarded;
+        print("{}\n", .{forwarded});
         print("\t}}\n", .{});
+    } else if (self.match(.Token_Command)) {
+        try self.parse_command(hotkey);
+    } else if (self.match(.Token_BeginList)) {
+        try self.parse_command_list(hotkey);
     }
 
     // switch (true) {
@@ -271,6 +275,84 @@ fn parse_key_literal(self: *Parser, hotkey: *Hotkey) !void {
     }
 }
 
+fn parse_keypress(self: *Parser) !*Hotkey {
+    var hotkey = try Hotkey.create(self.allocator);
+    errdefer hotkey.destroy();
+    // const token
+
+    var found_modifier = false;
+    if (self.match(.Token_Modifier)) {
+        hotkey.flags = try self.parse_modifier();
+        found_modifier = true;
+    }
+
+    if (found_modifier and !self.match(.Token_Dash)) {
+        return error.@"Unexpected token";
+    }
+
+    if (self.match(.Token_Key)) {
+        hotkey.key = try self.parse_key();
+    } else if (self.match(.Token_Key_Hex)) {
+        hotkey.key = try self.parse_key_hex();
+    } else if (self.match(.Token_Literal)) {
+        try self.parse_key_literal(hotkey);
+    } else {
+        return error.@"Expected key, key hex, literal or modifier";
+    }
+
+    return hotkey;
+}
+
+fn parse_command(self: *Parser, hotkey: *Hotkey) !void {
+    const token = self.previous();
+    const command = token.text;
+    try hotkey.add_command(command);
+    print("\tcommand: '{s}'\n", .{command});
+}
+
+fn parse_command_list(self: *Parser, hotkey: *Hotkey) !void {
+    if (self.match(.Token_String)) {
+        const name_token = self.previous();
+        try hotkey.add_process_name(name_token.text);
+        if (self.match(.Token_Command)) {
+            try self.parse_command(hotkey);
+            try self.parse_command_list(hotkey);
+        } else if (self.match(.Token_Forward)) {
+            // @panic("Not implemented");
+            std.debug.print("not implemented\n", .{});
+        } else if (self.match(.Token_Unbound)) {
+            try hotkey.add_unbound_command();
+            try self.parse_command_list(hotkey);
+        } else {
+            return error.@"Expected command ':', forward '|' or unbound '~'";
+        }
+    } else if (self.match(.Token_Wildcard)) {
+        print("wildcard\n", .{});
+        if (self.match(.Token_Command)) {
+            const command = self.previous();
+            try hotkey.set_wilecard_command(command.text);
+            print("\tcommand: '{s}'\n", .{command.text});
+            try self.parse_command_list(hotkey);
+        } else if (self.match(.Token_Forward)) {
+            print("\tforward\n", .{});
+            hotkey.forwarded_hotkey = try self.parse_keypress();
+            try hotkey.set_wilecard_command("__forward");
+            try self.parse_command_list(hotkey);
+        } else if (self.match(.Token_Unbound)) {
+            try hotkey.add_unbound_command();
+            try self.parse_command_list(hotkey);
+        } else {
+            return error.@"Expected command ':', forward '|' or unbound '~'";
+        }
+    } else if (self.match(.Token_EndList)) {
+        if (hotkey.process_names.items.len == 0) {
+            return error.@"Expected string, wildcard or end list";
+        }
+    } else {
+        return error.@"Expected string, wildcard or end list";
+    }
+}
+
 test "init" {
     const alloc = std.testing.allocator;
     var parser = Parser.init(alloc);
@@ -299,5 +381,13 @@ test "Parse" {
     // while (tokenizer.get_token()) |token| {
     //     print("token: {?}\n", .{token});
     // }
-    try parser.parse(&mappings, "default < ctrl + shift - b:");
+    try parser.parse(&mappings, "default < ctrl + shift - b: echo");
+
+    try parser.parse(&mappings,
+        \\ cmd + shift - h : [
+        \\     "notepad.exe": echo
+        \\     "chrome.exe": foo
+        \\     *: ~
+        \\ ]
+    );
 }

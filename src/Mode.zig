@@ -57,7 +57,7 @@ pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOpti
     {
         var it = self.hotkey_map.iterator();
         while (it.next()) |kv| {
-            try utils.indentPrint(self.allocator, writer, 4, "{}", kv.key_ptr.*);
+            try utils.indentPrint(self.allocator, writer, "    ", "{}", kv.key_ptr.*);
         }
     }
     try writer.print("\n  }}", .{});

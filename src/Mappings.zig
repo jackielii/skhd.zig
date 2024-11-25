@@ -43,7 +43,7 @@ pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.Format
     {
         var it = self.mode_map.iterator();
         while (it.next()) |kv| {
-            try utils.indentPrint(self.allocator, writer, 4, "\n{}", kv.value_ptr.*);
+            try utils.indentPrint(self.allocator, writer, "    ", "\n{}", kv.value_ptr.*);
         }
     }
     try writer.print("\n  }}", .{});

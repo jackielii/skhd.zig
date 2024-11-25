@@ -31,11 +31,16 @@ const hotkeyContext = struct {
     }
 };
 
+const commandOrUnbound = union(enum) {
+    command: []const u8,
+    unbound: void,
+};
+
 allocator: std.mem.Allocator,
 flags: u32 = undefined,
 key: u32 = undefined,
 process_names: std.ArrayList([]const u8) = undefined,
-commands: std.ArrayList([]const u8) = undefined,
+commands: std.ArrayList(commandOrUnbound) = undefined,
 wildcard_command: ?[]const u8 = null,
 forwarded_hotkey: ?*Hotkey = null,
 mode_list: std.AutoArrayHashMap(*Mode, void) = undefined,
@@ -44,7 +49,12 @@ pub fn destroy(self: *Hotkey) void {
     for (self.process_names.items) |name| self.allocator.free(name);
     self.process_names.deinit();
 
-    for (self.commands.items) |cmd| self.allocator.free(cmd);
+    for (self.commands.items) |cmd| {
+        switch (cmd) {
+            .command => self.allocator.free(cmd.command),
+            .unbound => {},
+        }
+    }
     self.commands.deinit();
 
     if (self.wildcard_command) |wildcard_command| self.allocator.free(wildcard_command);
@@ -59,7 +69,7 @@ pub fn create(allocator: std.mem.Allocator) !*Hotkey {
     hotkey.* = .{
         .allocator = allocator,
         .process_names = std.ArrayList([]const u8).init(allocator),
-        .commands = std.ArrayList([]const u8).init(allocator),
+        .commands = std.ArrayList(commandOrUnbound).init(allocator),
         .mode_list = std.AutoArrayHashMap(*Mode, void).init(allocator),
     };
     return hotkey;
@@ -101,25 +111,34 @@ pub fn format(self: *const Hotkey, comptime _: []const u8, _: std.fmt.FormatOpti
     try writer.print("\n  commands: {{", .{});
     {
         for (self.commands.items) |cmd| {
-            try writer.print("\n    {s}", .{cmd});
+            switch (cmd) {
+                .command => try writer.print("\n    {s}", .{cmd.command}),
+                .unbound => try writer.print("\n    unbound", .{}),
+            }
         }
     }
     try writer.print("\n  }}", .{});
     if (self.forwarded_hotkey) |hotkey| {
         try writer.print("\n  forwarded_hotkey: ", .{});
-        try utils.indentPrint(self.allocator, writer, 2, "{}", hotkey);
+        try utils.indentPrint(self.allocator, writer, "  ", "{}", hotkey);
     }
     try writer.print("\n}}", .{});
 }
 
 pub fn add_process_name(self: *Hotkey, process_name: []const u8) !void {
     const owned = try self.allocator.dupe(u8, process_name);
+    // TODO: assuming ascii
+    for (owned, 0..) |c, i| owned[i] = std.ascii.toLower(c);
     try self.process_names.append(owned);
 }
 
 pub fn add_command(self: *Hotkey, command: []const u8) !void {
     const owned = try self.allocator.dupe(u8, command);
-    try self.commands.append(owned);
+    try self.commands.append(commandOrUnbound{ .command = owned });
+}
+
+pub fn add_unbound_command(self: *Hotkey) !void {
+    try self.commands.append(commandOrUnbound{ .unbound = void{} });
 }
 
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {

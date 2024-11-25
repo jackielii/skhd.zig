@@ -45,9 +45,9 @@ keymap_table: std.StringArrayHashMap(u32) = undefined,
 //     }
 // };
 
-const KeycodeTable = @This();
+const Keycodes = @This();
 
-pub fn init(alloc: std.mem.Allocator) !KeycodeTable {
+pub fn init(alloc: std.mem.Allocator) !Keycodes {
     const keyboard = c.TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
     const uchr: c.CFDataRef = @ptrCast(c.TISGetInputSourceProperty(keyboard, c.kTISPropertyUnicodeKeyLayoutData));
     defer c.CFRelease(keyboard);
@@ -60,7 +60,7 @@ pub fn init(alloc: std.mem.Allocator) !KeycodeTable {
     var keymap_table = std.StringArrayHashMap(u32).init(alloc);
 
     var len: c.UniCharCount = 0;
-    var chars: [255]c.UniChar = @splat(0);
+    var chars = [_]c.UniChar{0} ** 255;
     var state: c.UInt32 = 0;
 
     for (layout_dependent_keycodes) |keycode| {
@@ -84,10 +84,11 @@ pub fn init(alloc: std.mem.Allocator) !KeycodeTable {
         }
     }
 
-    return KeycodeTable{ .keymap_table = keymap_table, .alloc = alloc };
+    return Keycodes{ .keymap_table = keymap_table, .alloc = alloc };
 }
 
-pub fn deinit(self: *KeycodeTable) void {
+pub fn deinit(self: *Keycodes) void {
+    std.debug.print("size: {}\n", .{self.keymap_table.count()});
     var it = self.keymap_table.iterator();
     while (it.next()) |kv| {
         self.alloc.free(kv.key_ptr.*);
@@ -95,7 +96,7 @@ pub fn deinit(self: *KeycodeTable) void {
     self.keymap_table.deinit();
 }
 
-pub fn get_keycode(self: *KeycodeTable, key: []const u8) !u32 {
+pub fn get_keycode(self: *Keycodes, key: []const u8) !u32 {
     const key_string = self.keymap_table.get(key) orelse return error.@"Key not found";
     return key_string;
 }

@@ -31,8 +31,9 @@ const hotkeyContext = struct {
     }
 };
 
-const commandOrUnbound = union(enum) {
+const processCommand = union(enum) {
     command: []const u8,
+    forwarded: *Hotkey,
     unbound: void,
 };
 
@@ -40,9 +41,8 @@ allocator: std.mem.Allocator,
 flags: u32 = undefined,
 key: u32 = undefined,
 process_names: std.ArrayList([]const u8) = undefined,
-commands: std.ArrayList(commandOrUnbound) = undefined,
-wildcard_command: ?[]const u8 = null,
-forwarded_hotkey: ?*Hotkey = null,
+commands: std.ArrayList(processCommand) = undefined,
+wildcard_command: ?processCommand = null,
 mode_list: std.AutoArrayHashMap(*Mode, void) = undefined,
 
 pub fn destroy(self: *Hotkey) void {
@@ -52,14 +52,19 @@ pub fn destroy(self: *Hotkey) void {
     for (self.commands.items) |cmd| {
         switch (cmd) {
             .command => self.allocator.free(cmd.command),
+            .forwarded => cmd.forwarded.destroy(),
             .unbound => {},
         }
     }
     self.commands.deinit();
 
-    if (self.wildcard_command) |wildcard_command| self.allocator.free(wildcard_command);
-    if (self.forwarded_hotkey) |forwarded_hotkey| forwarded_hotkey.destroy();
-
+    if (self.wildcard_command) |wildcard_command| {
+        switch (wildcard_command) {
+            .command => self.allocator.free(wildcard_command.command),
+            .forwarded => wildcard_command.forwarded.destroy(),
+            .unbound => {},
+        }
+    }
     self.mode_list.deinit();
     self.allocator.destroy(self);
 }
@@ -69,27 +74,53 @@ pub fn create(allocator: std.mem.Allocator) !*Hotkey {
     hotkey.* = .{
         .allocator = allocator,
         .process_names = std.ArrayList([]const u8).init(allocator),
-        .commands = std.ArrayList(commandOrUnbound).init(allocator),
+        .commands = std.ArrayList(processCommand).init(allocator),
         .mode_list = std.AutoArrayHashMap(*Mode, void).init(allocator),
     };
     return hotkey;
 }
 
-pub fn set_wilecard_command(self: *Hotkey, wildcard_command: []const u8) !void {
-    if (self.wildcard_command) |old| self.allocator.free(old);
-    self.wildcard_command = try self.allocator.dupe(u8, wildcard_command);
+fn deinit_old_wildcard_command(self: *Hotkey) void {
+    if (self.wildcard_command) |wildcard_command| {
+        switch (wildcard_command) {
+            .command => self.allocator.free(wildcard_command.command),
+            .forwarded => wildcard_command.forwarded.destroy(),
+            .unbound => {},
+        }
+        self.wildcard_command = null;
+    }
 }
 
-pub fn set_forwarded_hotkey(self: *Hotkey, forwarded_hotkey: *Hotkey) void {
-    if (self.forwarded_hotkey) |old| old.destroy();
-    self.forwarded_hotkey = forwarded_hotkey;
+pub fn set_wildcard_command(self: *Hotkey, wildcard_command: []const u8) !void {
+    self.deinit_old_wildcard_command();
+    const cmd = try self.allocator.dupe(u8, wildcard_command);
+    self.wildcard_command = processCommand{ .command = cmd };
 }
 
-pub fn format(self: *const Hotkey, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+pub fn set_wildcard_forwarded(self: *Hotkey, forwarded: *Hotkey) void {
+    self.deinit_old_wildcard_command();
+    self.wildcard_command = processCommand{ .forwarded = forwarded };
+}
+
+pub fn set_wildcard_unbound(self: *Hotkey) void {
+    self.deinit_old_wildcard_command();
+    self.wildcard_command = processCommand{ .unbound = void{} };
+}
+
+pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
     // if (fmt.len != 0) {
     //     std.fmt.invalidFmtError(fmt, self);
     // }
+    _ = fmt;
     try writer.print("Hotkey{{", .{});
+    try writer.print("\n  mode_list: {{", .{});
+    {
+        var it = self.mode_list.iterator();
+        while (it.next()) |kv| {
+            try writer.print("{s},", .{kv.key_ptr.*.name});
+        }
+    }
+    try writer.print("}}", .{});
     try writer.print("\n  flags: {}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
     try writer.print("\n  process_names: {{", .{});
@@ -99,28 +130,32 @@ pub fn format(self: *const Hotkey, comptime _: []const u8, _: std.fmt.FormatOpti
         }
     }
     try writer.print("\n  }}", .{});
-    try writer.print("\n  wildcard_command: {?s}", .{self.wildcard_command});
-    try writer.print("\n  mode_list: {{", .{});
-    {
-        var it = self.mode_list.iterator();
-        while (it.next()) |kv| {
-            try writer.print("\n    {s}", .{kv.key_ptr.*.name});
-        }
-    }
-    try writer.print("\n  }}", .{});
     try writer.print("\n  commands: {{", .{});
     {
         for (self.commands.items) |cmd| {
             switch (cmd) {
                 .command => try writer.print("\n    {s}", .{cmd.command}),
+                .forwarded => {
+                    try writer.print("\n    forwarded", .{});
+                    try utils.indentPrint(self.allocator, writer, "  ", "{}", cmd.forwarded);
+                },
                 .unbound => try writer.print("\n    unbound", .{}),
             }
         }
     }
     try writer.print("\n  }}", .{});
-    if (self.forwarded_hotkey) |hotkey| {
-        try writer.print("\n  forwarded_hotkey: ", .{});
-        try utils.indentPrint(self.allocator, writer, "  ", "{}", hotkey);
+    if (self.wildcard_command) |wildcard_command| {
+        try writer.print("\n  wildcard_command: ", .{});
+        switch (wildcard_command) {
+            .command => try writer.print("{s}", .{wildcard_command.command}),
+            .forwarded => {
+                try writer.print("forwarded", .{});
+                try utils.indentPrint(self.allocator, writer, "  ", "{}", wildcard_command.forwarded);
+            },
+            .unbound => try writer.print("unbound", .{}),
+        }
+    } else {
+        try writer.print("\n  wildcard_command: null", .{});
     }
     try writer.print("\n}}", .{});
 }
@@ -132,13 +167,17 @@ pub fn add_process_name(self: *Hotkey, process_name: []const u8) !void {
     try self.process_names.append(owned);
 }
 
-pub fn add_command(self: *Hotkey, command: []const u8) !void {
+pub fn add_proc_command(self: *Hotkey, command: []const u8) !void {
     const owned = try self.allocator.dupe(u8, command);
-    try self.commands.append(commandOrUnbound{ .command = owned });
+    try self.commands.append(processCommand{ .command = owned });
 }
 
-pub fn add_unbound_command(self: *Hotkey) !void {
-    try self.commands.append(commandOrUnbound{ .unbound = void{} });
+pub fn add_proc_unbound(self: *Hotkey) !void {
+    try self.commands.append(processCommand{ .unbound = void{} });
+}
+
+pub fn add_proc_forward(self: *Hotkey, forwarded: *Hotkey) !void {
+    try self.commands.append(processCommand{ .forwarded = forwarded });
 }
 
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
@@ -184,13 +223,13 @@ test "format hotkey" {
     hotkey.flags = 0x1;
     hotkey.key = 0x2;
     try hotkey.add_process_name("some process_name");
-    try hotkey.add_command("some command");
+    try hotkey.add_proc_command("some command");
     var mode = try Mode.init(alloc, "default");
     defer mode.deinit();
     // std.debug.print("{}\n", .{mode});
     try hotkey.add_mode(&mode);
-    try hotkey.set_wilecard_command("some wildcard_command");
-    hotkey.forwarded_hotkey = try Hotkey.create(alloc);
+    // try hotkey.set_wildcard_command("some wildcard_command");
+    hotkey.set_wildcard_forwarded(try Hotkey.create(alloc));
 
     const string = try std.fmt.allocPrint(alloc, "{s}", .{hotkey});
     defer alloc.free(string);

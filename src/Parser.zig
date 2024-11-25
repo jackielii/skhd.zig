@@ -6,7 +6,7 @@ const print = std.debug.print;
 const assert = std.debug.assert;
 const Mode = @import("./Mode.zig");
 const Mappings = @import("./Mappings.zig");
-const KeycodeTable = @import("./KeycodeTable.zig");
+const Keycodes = @import("./Keycodes.zig");
 const consts = @import("./consts.zig");
 const utils = @import("./utils.zig");
 
@@ -40,15 +40,11 @@ const LoadDirective = struct {
 
 // unmanaged:
 allocator: std.mem.Allocator,
-
-// managed:
-// filename: []const u8,
-content: []const u8 = undefined,
-load_directives: []LoadDirective = undefined,
 tokenizer: Tokenizer = undefined,
+content: []const u8 = undefined,
 previous_token: ?Token = undefined,
 next_token: ?Token = undefined,
-keycodes: KeycodeTable = undefined,
+keycodes: Keycodes = undefined,
 
 pub fn deinit(self: *Parser) void {
     // self.allocator.free(self.filename);
@@ -57,26 +53,23 @@ pub fn deinit(self: *Parser) void {
     self.* = undefined;
 }
 
-pub fn init(allocator: std.mem.Allocator) Parser {
+pub fn init(allocator: std.mem.Allocator) !Parser {
     // const f = try std.fs.cwd().openFile(filename, .{});
     // defer f.close();
     // const content = try f.readToEndAlloc(allocator, 1 << 24); // max size 16MB
     return Parser{
         .allocator = allocator,
-        // .mappings = &mappings,
-        // .filename = allocator.dupe(u8, filename),
-        // .content = content,
-        // .tokenizer = tokenizer,
-        // .keycodes = try KeycodeTable.init(allocator),
+        .previous_token = null,
+        .next_token = null,
+        .keycodes = try Keycodes.init(allocator),
     };
 }
 
 pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
     self.content = content;
     self.tokenizer = try Tokenizer.init(content);
-    self.keycodes = try KeycodeTable.init(self.allocator);
-    _ = self.advance();
 
+    _ = self.advance();
     while (self.peek()) |token| {
         switch (token.type) {
             .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key => {
@@ -125,7 +118,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     errdefer hotkey.destroy();
     // var found_modifier = false;
 
-    print("hotkey :: #{d} {{\n", .{self.next_token.?.line});
+    // print("hotkey :: #{d} {{\n", .{self.next_token.?.line});
 
     if (self.match(.Token_Identifier)) {
         try self.parse_mode(mappings, hotkey);
@@ -166,15 +159,11 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     }
 
     if (self.match(.Token_Forward)) {
-        print("\tforward: {{\n", .{});
-        const forwarded = try self.parse_keypress();
-        hotkey.forwarded_hotkey = forwarded;
-        print("{}\n", .{forwarded});
-        print("\t}}\n", .{});
+        hotkey.set_wildcard_forwarded(try self.parse_keypress());
     } else if (self.match(.Token_Command)) {
-        try self.parse_command(hotkey);
+        try hotkey.set_wildcard_command(self.previous().text);
     } else if (self.match(.Token_BeginList)) {
-        try self.parse_command_list(hotkey);
+        try self.parse_proc_list(hotkey);
     }
 
     // switch (true) {
@@ -202,7 +191,7 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         return error.@"Mode already exists in hotkey mode";
     }
     try hotkey.mode_list.put(mode, {});
-    print("\tmode: '{s}'\n", .{name});
+    // print("\tmode: '{s}'\n", .{name});
 
     // const token1 = self.advance_token() orelse return error.@"Expected token";
     if (self.match(.Token_Comma)) {
@@ -244,7 +233,7 @@ fn parse_key(self: *Parser) !u32 {
     const token = self.previous();
     const key = token.text;
     const keycode = try self.keycodes.get_keycode(key);
-    print("\tkey: '{s}' (0x{x:0>2})\n", .{ key, keycode });
+    // print("\tkey: '{s}' (0x{x:0>2})\n", .{ key, keycode });
     return keycode;
 }
 
@@ -303,47 +292,31 @@ fn parse_keypress(self: *Parser) !*Hotkey {
     return hotkey;
 }
 
-fn parse_command(self: *Parser, hotkey: *Hotkey) !void {
-    const token = self.previous();
-    const command = token.text;
-    try hotkey.add_command(command);
-    print("\tcommand: '{s}'\n", .{command});
-}
-
-fn parse_command_list(self: *Parser, hotkey: *Hotkey) !void {
+fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
     if (self.match(.Token_String)) {
         const name_token = self.previous();
         try hotkey.add_process_name(name_token.text);
         if (self.match(.Token_Command)) {
-            try self.parse_command(hotkey);
-            try self.parse_command_list(hotkey);
+            try hotkey.add_proc_command(self.previous().text);
         } else if (self.match(.Token_Forward)) {
-            // @panic("Not implemented");
-            std.debug.print("not implemented\n", .{});
+            try hotkey.add_proc_forward(try self.parse_keypress());
         } else if (self.match(.Token_Unbound)) {
-            try hotkey.add_unbound_command();
-            try self.parse_command_list(hotkey);
+            try hotkey.add_proc_unbound();
         } else {
             return error.@"Expected command ':', forward '|' or unbound '~'";
         }
+        try self.parse_proc_list(hotkey);
     } else if (self.match(.Token_Wildcard)) {
-        print("wildcard\n", .{});
         if (self.match(.Token_Command)) {
-            const command = self.previous();
-            try hotkey.set_wilecard_command(command.text);
-            print("\tcommand: '{s}'\n", .{command.text});
-            try self.parse_command_list(hotkey);
+            try hotkey.set_wildcard_command(self.previous().text);
         } else if (self.match(.Token_Forward)) {
-            print("\tforward\n", .{});
-            hotkey.forwarded_hotkey = try self.parse_keypress();
-            try hotkey.set_wilecard_command("__forward");
-            try self.parse_command_list(hotkey);
+            hotkey.set_wildcard_forwarded(try self.parse_keypress());
         } else if (self.match(.Token_Unbound)) {
-            try hotkey.add_unbound_command();
-            try self.parse_command_list(hotkey);
+            hotkey.set_wildcard_unbound();
         } else {
             return error.@"Expected command ':', forward '|' or unbound '~'";
         }
+        try self.parse_proc_list(hotkey);
     } else if (self.match(.Token_EndList)) {
         if (hotkey.process_names.items.len == 0) {
             return error.@"Expected string, wildcard or end list";
@@ -355,13 +328,13 @@ fn parse_command_list(self: *Parser, hotkey: *Hotkey) !void {
 
 test "init" {
     const alloc = std.testing.allocator;
-    var parser = Parser.init(alloc);
+    var parser = try Parser.init(alloc);
     defer parser.deinit();
 }
 
 test "Parse" {
     const alloc = std.testing.allocator;
-    var parser = Parser.init(alloc);
+    var parser = try Parser.init(alloc);
     defer parser.deinit();
 
     var mappings = Mappings.init(alloc);
@@ -381,13 +354,16 @@ test "Parse" {
     // while (tokenizer.get_token()) |token| {
     //     print("token: {?}\n", .{token});
     // }
-    try parser.parse(&mappings, "default < ctrl + shift - b: echo");
+    // try parser.parse(&mappings, "default < ctrl + shift - b: echo");
+    // print("{s}\n", .{mappings});
 
     try parser.parse(&mappings,
-        \\ cmd + shift - h : [
+        \\ cmd + shift - h [
         \\     "notepad.exe": echo
         \\     "chrome.exe": foo
+        \\     "firefox.exe" | cmd + shift - h
         \\     *: ~
         \\ ]
     );
+    print("{s}\n", .{mappings});
 }

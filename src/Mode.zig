@@ -45,9 +45,10 @@ pub fn deinit(self: *Mode) void {
 }
 
 pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    if (fmt.len != 0) {
-        std.fmt.invalidFmtError(fmt, self);
-    }
+    // if (fmt.len != 0) {
+    //     std.fmt.invalidFmtError(fmt, self);
+    // }
+    _ = fmt;
     try writer.print("Mode{{", .{});
     try writer.print("\n  name: {s}", .{self.name});
     try writer.print("\n  command: {?s}", .{self.command});

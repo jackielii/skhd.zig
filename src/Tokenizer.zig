@@ -236,7 +236,7 @@ fn acceptCommand(self: *Tokenizer) []const u8 {
             break;
         }
     }
-    return self.buffer[start..self.pos];
+    return std.mem.trimRight(u8, self.buffer[start..self.pos], "\n");
 }
 
 fn skipWhitespace(self: *Tokenizer) void {

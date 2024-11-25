@@ -35,9 +35,10 @@ pub fn deinit(self: *Mappings) void {
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    if (fmt.len != 0) {
-        std.fmt.invalidFmtError(fmt, self);
-    }
+    // if (fmt.len != 0) {
+    //     std.fmt.invalidFmtError(fmt, self);
+    // }
+    _ = fmt;
     try writer.print("Mappings {{", .{});
     try writer.print("\n  mode_map: {{", .{});
     {

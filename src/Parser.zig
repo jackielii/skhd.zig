@@ -76,7 +76,7 @@ pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
                 try self.parse_hotkey(mappings);
             },
             .Token_Decl => {
-                try self.parse_decl(mappings);
+                try self.parse_mode_decl(mappings);
             },
             .Token_Option => {
                 try self.parse_option(mappings);
@@ -100,7 +100,7 @@ fn previous(self: *Parser) Token {
 fn advance(self: *Parser) void {
     self.previous_token = self.next_token;
     self.next_token = self.tokenizer.get_token();
-    print("token: {?}\n", .{self.next_token});
+    // print("token: {?}\n", .{self.next_token});
 }
 
 /// peek next token and check if it's the expected type
@@ -161,7 +161,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         return error.@"Expected key, key hex, literal or modifier";
     }
 
-    if (self.match(.Token_Forward)) {
+    if (self.match(.Token_Arrow)) {
         hotkey.flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Passthrough);
     }
 
@@ -340,7 +340,7 @@ fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
     }
 }
 
-fn parse_decl(self: *Parser, mappings: *Mappings) !void {
+fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
     assert(self.match(.Token_Decl));
     if (!self.match(.Token_Identifier)) {
         return error.@"Expected identifier";
@@ -368,7 +368,7 @@ fn parse_decl(self: *Parser, mappings: *Mappings) !void {
             if (mode.command) |cmd| try existing_mode.set_command(cmd);
         }
     } else {
-        try mappings.mode_map.put(mode_name, mode);
+        try mappings.put_mode(mode);
     }
 }
 
@@ -455,5 +455,29 @@ test "Parse my skhd.conf" {
     defer mappings.deinit();
 
     try parser.parse(&mappings, content);
+    // print("{s}\n", .{mappings});
+}
+
+test "Parse mode decl" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings, ":: mode : command");
+    print("{s}\n", .{mappings});
+}
+
+test "Parse mode decl capture" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings, ":: mode @: command");
     print("{s}\n", .{mappings});
 }

@@ -94,6 +94,12 @@ pub fn get_mode_or_create_default(self: *Mappings, mode_name: []const u8) !?*Mod
     return self.mode_map.getPtr(mode_name);
 }
 
+pub fn put_mode(self: *Mappings, mode: Mode) !void {
+    const key = try self.allocator.dupe(u8, mode.name);
+    errdefer self.allocator.free(key);
+    try self.mode_map.put(key, mode);
+}
+
 test "get_mode default" {
     const alloc = std.testing.allocator;
     var mappings = try Mappings.init(alloc);

@@ -359,13 +359,12 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
 
     if (try mappings.get_mode_or_create_default(mode_name)) |existing_mode| {
         defer mode.deinit();
-        if (std.mem.eql(u8, existing_mode.name, mode_name)) {
-            return error.@"Mode already exists";
-        }
         if (std.mem.eql(u8, existing_mode.name, "default")) {
             existing_mode.initialized = false;
             existing_mode.capture = mode.capture;
             if (mode.command) |cmd| try existing_mode.set_command(cmd);
+        } else if (std.mem.eql(u8, existing_mode.name, mode_name)) {
+            return error.@"Mode already exists";
         }
     } else {
         try mappings.put_mode(mode);

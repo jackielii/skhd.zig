@@ -1,7 +1,87 @@
 const std = @import("std");
 const c = @cImport(@cInclude("Carbon/Carbon.h"));
 
-pub fn strForKey(keyCode: i64) []const u8 {
+pub extern fn NSApplicationLoad() void;
+
+pub fn echo() !void {
+    const mask: u32 = 1 << c.kCGEventKeyDown;
+    const handle: c.CFMachPortRef = c.CGEventTapCreate(c.kCGSessionEventTap, c.kCGHeadInsertEventTap, c.kCGEventTapOptionDefault, mask, &callback, null);
+    defer c.CFRelease(handle);
+
+    const enabled = c.CGEventTapIsEnabled(handle);
+    if (!enabled) {
+        return error.@"Failed to enable event tap";
+    }
+    const loopsource = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, handle, 0);
+    defer c.CFRelease(loopsource);
+
+    c.CFRunLoopAddSource(c.CFRunLoopGetMain(), loopsource, c.kCFRunLoopCommonModes);
+    NSApplicationLoad();
+    std.debug.print("Ctrl+C to exit\n", .{});
+    c.CFRunLoopRun();
+}
+
+export fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) c.CGEventRef {
+    if (typ != c.kCGEventKeyDown) {
+        return event;
+    }
+    const keycode = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode);
+    // std.debug.print("type of keycode: {}\n", .{@TypeOf(keycode)});
+
+    const flags: c.CGEventFlags = c.CGEventGetFlags(event);
+    if (keycode == c.kVK_ANSI_C and flags & c.kCGEventFlagMaskControl != 0) {
+        std.debug.print("Ctrl+C pressed\n", .{});
+        std.posix.exit(0);
+    }
+    if (flags & c.kCGEventFlagMaskShift != 0) {
+        std.debug.print("Shift ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskControl != 0) {
+        std.debug.print("Ctrl ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskAlternate != 0) {
+        std.debug.print("Alt ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskCommand != 0) {
+        std.debug.print("Cmd ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskSecondaryFn != 0) {
+        std.debug.print("Fn ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskNumericPad != 0) {
+        std.debug.print("Num ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskHelp != 0) {
+        std.debug.print("Help ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskNonCoalesced != 0) {
+        std.debug.print("NonCoalesced ", .{});
+    }
+    if (flags & c.kCGEventFlagMaskAlphaShift != 0) {
+        std.debug.print("AlphaShift ", .{});
+    }
+
+    // const chars = createStringForKey(@intCast(u16, keycode), gpa_allocator) catch @panic("createStringForKey failed");
+    // defer gpa_allocator.free(chars);
+    // std.debug.print("typeof chars: {}, length: {}\n", .{ @TypeOf(chars), chars.len });
+    // std.debug.print("key: {s}", .{chars});
+    const chars = strForKey(keycode);
+    const keyCodeBit: i64 = @bitCast(keycode);
+    std.debug.print("\t{s}\tkeycode: 0x{x:0<2}\n", .{ chars, keyCodeBit });
+
+    // c.CGEventSetFlags(event, c.kCGEventFlagMaskShift);
+    // c.CGEventSetIntegerValueField(event, c.kCGKeyboardEventKeycode, c.kVK_ANSI_X);
+    // return event;
+    // var str = createDynamicString() catch |err| {
+    //     std.debug.print("Error: {}\n", .{err});
+    //     return event;
+    // };
+    // std.debug.print("createDynamicString: {s}\n", .{str});
+
+    return null;
+}
+
+fn strForKey(keyCode: i64) []const u8 {
     return switch (keyCode) {
         0 => "a",
         1 => "s",

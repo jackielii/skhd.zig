@@ -43,7 +43,27 @@ pub const ModifierFlag = packed struct(u32) {
         const m2: u32 = @bitCast(other);
         return @bitCast(m1 | m2);
     }
+    pub fn format(self: *const ModifierFlag, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+
+        var i: u32 = 0;
+        inline for (@typeInfo(@This()).@"struct".fields) |field| {
+            const name = field.name;
+            if (field.type != bool) continue;
+            const value = @field(self, name);
+            if (value) {
+                if (i != 0) try writer.print(", ", .{});
+                try writer.print("{s}", .{name});
+                i += 1;
+            }
+        }
+    }
 };
+
+test "format ModifierFlag" {
+    const flag = ModifierFlag{ .alt = true, .shift = true };
+    std.debug.print("{s}", .{flag});
+}
 
 const modifier_flags_map = std.StaticStringMap(ModifierFlag).initComptime(.{
     .{ "alt", ModifierFlag{ .alt = true } },

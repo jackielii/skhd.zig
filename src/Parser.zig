@@ -9,6 +9,7 @@ const Mappings = @import("./Mappings.zig");
 const Keycodes = @import("./Keycodes.zig");
 const consts = @import("./consts.zig");
 const utils = @import("./utils.zig");
+const ModifierFlag = @import("./consts.zig").ModifierFlag;
 
 const Parser = @This();
 
@@ -155,14 +156,14 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         hotkey.key = try self.parse_key_hex();
     } else if (self.match(.Token_Literal)) {
         const keypress = try self.parse_key_literal();
-        hotkey.flags |= keypress.flags;
+        hotkey.flags = hotkey.flags.merge(keypress.flags);
         hotkey.key = keypress.key;
     } else {
         return error.@"Expected key, key hex, literal or modifier";
     }
 
     if (self.match(.Token_Arrow)) {
-        hotkey.flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Passthrough);
+        hotkey.flags = hotkey.flags.merge(.{ .passthrough = true });
     }
 
     if (self.match(.Token_Forward)) {
@@ -210,25 +211,19 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     }
 }
 
-const modifier_flags_str = @import("./consts.zig").modifier_flags_str;
-const modifier_flags_value = @import("./consts.zig").modifier_flags_value;
-
-fn parse_modifier(self: *Parser) !u32 {
+fn parse_modifier(self: *Parser) !ModifierFlag {
     const token = self.previous();
-    var flags: u32 = 0;
+    var flags = ModifierFlag{};
 
-    for (modifier_flags_str, 0..) |flag, i| {
-        if (std.mem.eql(u8, token.text, flag)) {
-            flags |= modifier_flags_value[i];
-            break;
-        }
+    if (ModifierFlag.get(token.text)) |modifier_flags_value| {
+        flags = flags.merge(modifier_flags_value);
     } else {
         return error.@"Unknown modifier";
     }
 
     if (self.match(.Token_Plus)) {
         if (self.match(.Token_Modifier)) {
-            flags |= try self.parse_modifier();
+            flags = flags.merge(try self.parse_modifier());
         } else {
             return error.@"Expected modifier";
         }
@@ -258,15 +253,17 @@ const literal_keycode_value = @import("./consts.zig").literal_keycode_value;
 fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
     const token = self.previous();
     const key = token.text;
-    var flags: u32 = 0;
+    var flags = ModifierFlag{};
     var keycode: u32 = 0;
 
     for (literal_keycode_str, 0..) |literal_key, i| {
         if (std.mem.eql(u8, key, literal_key)) {
             if (i > consts.KEY_HAS_IMPLICIT_FN_MOD and i < consts.KEY_HAS_IMPLICIT_NX_MOD) {
-                flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Fn);
+                // flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Fn);
+                flags = flags.merge(.{ .@"fn" = true });
             } else if (i >= consts.KEY_HAS_IMPLICIT_NX_MOD) {
-                flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_NX);
+                // flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_NX);
+                flags = flags.merge(.{ .nx = true });
             }
             keycode = literal_keycode_value[i];
             break;
@@ -279,7 +276,7 @@ fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
 }
 
 fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
-    var flags: u32 = 0;
+    var flags: ModifierFlag = .{};
     var keycode: u32 = 0;
     var found_modifier = false;
     if (self.match(.Token_Modifier)) {
@@ -297,7 +294,7 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
         keycode = try self.parse_key_hex();
     } else if (self.match(.Token_Literal)) {
         const keypress = try self.parse_key_literal();
-        flags |= keypress.flags;
+        flags = flags.merge(keypress.flags);
         keycode = keypress.key;
     } else {
         return error.@"Expected key, key hex, literal or modifier";
@@ -454,7 +451,7 @@ test "Parse my skhd.conf" {
     defer mappings.deinit();
 
     try parser.parse(&mappings, content);
-    // print("{s}\n", .{mappings});
+    print("{s}\n", .{mappings});
 }
 
 test "Parse mode decl" {

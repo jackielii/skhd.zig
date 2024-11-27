@@ -3,8 +3,9 @@ const print = std.debug.print;
 const eql = std.mem.eql;
 const unicode = std.unicode;
 const ascii = std.ascii;
+const ModifierFlag = @import("./consts.zig").ModifierFlag;
 
-const modifier_flags_str = @import("./consts.zig").modifier_flags_str;
+// const modifier_flags_str = @import("./consts.zig").modifier_flags_str;
 const literal_keycode_str = @import("./consts.zig").literal_keycode_str;
 
 const identifier_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
@@ -248,10 +249,8 @@ fn resolveIdentifierType(token: Token) TokenType {
         return .Token_Key;
     }
 
-    for (modifier_flags_str) |modifier| {
-        if (eql(u8, modifier, token.text)) {
-            return .Token_Modifier;
-        }
+    if (ModifierFlag.get(token.text) != null) {
+        return .Token_Modifier;
     }
 
     for (literal_keycode_str) |keycode| {

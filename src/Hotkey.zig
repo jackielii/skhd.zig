@@ -13,11 +13,12 @@ const std = @import("std");
 const Hotkey = @This();
 const Mode = @import("Mode.zig");
 const utils = @import("./utils.zig");
+const ModifierFlag = @import("consts.zig").ModifierFlag;
 
 pub const HotkeyMap = std.ArrayHashMap(*Hotkey, void, hotkeyContext, false);
 
 pub const KeyPress = struct {
-    flags: u32,
+    flags: ModifierFlag,
     key: u32,
 };
 
@@ -28,7 +29,7 @@ fn eql(a: *Hotkey, b: *Hotkey) bool {
 const hotkeyContext = struct {
     pub fn hash(self: @This(), key: *Hotkey) u32 {
         _ = self;
-        return key.flags ^ key.key;
+        return @as(u32, @bitCast(key.flags)) ^ key.key;
     }
     pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
         _ = self;
@@ -43,7 +44,7 @@ const processCommand = union(enum) {
 };
 
 allocator: std.mem.Allocator,
-flags: u32 = undefined,
+flags: ModifierFlag = undefined,
 key: u32 = undefined,
 process_names: std.ArrayList([]const u8) = undefined,
 commands: std.ArrayList(processCommand) = undefined,
@@ -190,20 +191,20 @@ test "hotkey map" {
 
     var key1 = try Hotkey.create(alloc);
     defer key1.destroy();
-    key1.flags = 0x1;
+    key1.flags = ModifierFlag{ .alt = true };
     key1.key = 0x2;
     try key1.add_process_name("notepad.exe");
     std.debug.print("{}\n", .{key1});
 
     var key2 = try Hotkey.create(alloc);
-    key2.flags = 0x1;
+    key2.flags = ModifierFlag{ .alt = true };
     key2.key = 0x2;
     defer key2.destroy();
     std.debug.print("{}\n", .{key2});
 
     var key1d = try Hotkey.create(alloc);
     defer key1d.destroy();
-    key1d.flags = 0x2;
+    key1d.flags = ModifierFlag{ .cmd = true };
     key1d.key = 0x2;
     try key1d.add_process_name("notepad.exe");
     std.debug.print("{}\n", .{key1d});
@@ -219,7 +220,7 @@ test "format hotkey" {
     var hotkey = try Hotkey.create(alloc);
     defer hotkey.destroy();
 
-    hotkey.flags = 0x1;
+    hotkey.flags = ModifierFlag{ .alt = true };
     hotkey.key = 0x2;
     try hotkey.add_process_name("some process_name");
     try hotkey.add_proc_command("some command");
@@ -228,7 +229,7 @@ test "format hotkey" {
     // std.debug.print("{}\n", .{mode});
     try hotkey.add_mode(&mode);
     // try hotkey.set_wildcard_command("some wildcard_command");
-    hotkey.set_wildcard_forwarded(KeyPress{ .flags = 0x1, .key = 0x2 });
+    hotkey.set_wildcard_forwarded(KeyPress{ .flags = ModifierFlag{ .alt = true }, .key = 0x2 });
 
     const string = try std.fmt.allocPrint(alloc, "{s}", .{hotkey});
     defer alloc.free(string);

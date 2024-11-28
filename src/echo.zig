@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @cImport(@cInclude("Carbon/Carbon.h"));
 
-pub extern fn NSApplicationLoad() void;
+extern fn NSApplicationLoad() void;
 
 pub fn echo() !void {
     const mask: u32 = 1 << c.kCGEventKeyDown;
@@ -21,7 +21,7 @@ pub fn echo() !void {
     c.CFRunLoopRun();
 }
 
-export fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) c.CGEventRef {
+fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {
     if (typ != c.kCGEventKeyDown) {
         return event;
     }
@@ -164,6 +164,7 @@ fn strForKey(keyCode: i64) []const u8 {
         91 => "8",
         92 => "9",
 
+        0xb0 => "F5",
         96 => "F5",
         97 => "F6",
         98 => "F7",

@@ -29,12 +29,12 @@ pub fn deinit(self: *Mappings) void {
             self.allocator.free(kv.key_ptr.*);
             kv.value_ptr.*.deinit();
         }
-        self.mode_map.deinit();
+        self.mode_map.deinit(self.allocator);
     }
     {
         var it = self.blacklist.keyIterator();
         while (it.next()) |key| self.allocator.free(key.*);
-        self.blacklist.deinit();
+        self.blacklist.deinit(self.allocator);
     }
     self.allocator.free(self.shell);
 
@@ -47,8 +47,8 @@ pub fn set_shell(self: *Mappings, shell: []const u8) !void {
 }
 
 pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
-    const key_dup = try self.allocator.dupe(u8, key);
-    try self.blacklist.put(key_dup, void{});
+    const owned = try self.allocator.dupe(u8, key);
+    try self.blacklist.put(self.allocator, owned, void{});
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -80,7 +80,7 @@ pub fn get_mode_or_create_default(self: *Mappings, mode_name: []const u8) !?*Mod
     if (std.mem.eql(u8, mode_name, "default")) {
         const key = try self.allocator.dupe(u8, mode_name);
         errdefer self.allocator.free(key);
-        const mode_value = try self.mode_map.getOrPut(key);
+        const mode_value = try self.mode_map.getOrPut(self.allocator, key);
         if (mode_value.found_existing) {
             defer self.allocator.free(key);
             return mode_value.value_ptr;
@@ -95,7 +95,7 @@ pub fn get_mode_or_create_default(self: *Mappings, mode_name: []const u8) !?*Mod
 pub fn put_mode(self: *Mappings, mode: Mode) !void {
     const key = try self.allocator.dupe(u8, mode.name);
     errdefer self.allocator.free(key);
-    try self.mode_map.put(key, mode);
+    try self.mode_map.put(self.allocator, key, mode);
 }
 
 test "get_mode default" {

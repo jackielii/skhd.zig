@@ -17,7 +17,7 @@ pub fn main() !void {
     _ = alloc;
 
     try echo();
-    std.process.args();
+    // std.process.args();
 }
 
 // test {

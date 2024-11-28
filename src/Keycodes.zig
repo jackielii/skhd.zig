@@ -104,15 +104,19 @@ pub fn get_keycode(self: *Keycodes, key: []const u8) !u32 {
 fn copy_cfstring(alloc: std.mem.Allocator, cfstring: c.CFStringRef) ![]u8 {
     // const n = c.CFStringGetLength(cfstring);
     const num_bytes = c.CFStringGetMaximumSizeForEncoding(c.CFStringGetLength(cfstring), c.kCFStringEncodingUTF8);
+    if (num_bytes > 64) {
+        @panic("num_bytes for cfstring > 64");
+    }
     // std.debug.print("n: {}, max_num_bytes: {}\n", .{ n, num_bytes });
-    const buffer = try alloc.alloc(u8, @intCast(num_bytes));
-    defer alloc.free(buffer);
+    var buffer: [64]u8 = undefined;
+    // const buffer = try alloc.alloc(u8, @intCast(num_bytes));
+    // defer alloc.free(buffer);
 
-    if (c.CFStringGetCString(cfstring, buffer.ptr, num_bytes, c.kCFStringEncodingUTF8) == c.false) {
+    if (c.CFStringGetCString(cfstring, &buffer, num_bytes, c.kCFStringEncodingUTF8) == c.false) {
         return error.@"Failed to copy CFString";
     }
 
-    const ret = try alloc.dupe(u8, std.mem.sliceTo(buffer, 0));
+    const ret = try alloc.dupe(u8, std.mem.sliceTo(buffer[0..], 0));
     return ret;
 }
 

@@ -3,9 +3,9 @@ const Mode = @import("./Mode.zig");
 const utils = @import("./utils.zig");
 
 allocator: std.mem.Allocator,
-mode_map: std.StringHashMap(Mode) = undefined,
-blacklist: std.StringHashMap(void) = undefined,
-shell: []const u8 = undefined,
+mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
+blacklist: std.StringHashMapUnmanaged(void) = .empty,
+shell: []const u8,
 
 const Mappings = @This();
 
@@ -19,8 +19,6 @@ pub fn init(alloc: std.mem.Allocator) !Mappings {
     return Mappings{
         .shell = shell,
         .allocator = alloc,
-        .mode_map = std.StringHashMap(Mode).init(alloc),
-        .blacklist = std.StringHashMap(void).init(alloc),
     };
 }
 

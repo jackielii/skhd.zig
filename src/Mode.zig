@@ -16,18 +16,17 @@ const Mode = @This();
 allocator: std.mem.Allocator,
 name: []const u8,
 command: ?[]const u8 = null,
-capture: bool,
-initialized: bool,
+capture: bool = false,
+initialized: bool = false,
 hotkey_map: HotkeyMap,
 
 pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
     return Mode{
         .allocator = allocator,
         .name = try allocator.dupe(u8, name),
-        // .command = allocator.dupe(command),
         .capture = false,
         .initialized = true,
-        .hotkey_map = HotkeyMap.init(allocator),
+        .hotkey_map = .init(allocator),
     };
 }
 

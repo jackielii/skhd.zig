@@ -13,33 +13,11 @@ const ModifierFlag = @import("./consts.zig").ModifierFlag;
 
 const Parser = @This();
 
-// const ParserError = error{
-//     @"Expect token",
-//     @"Mode not found",
-//     @"Expected identifier",
-//     @"Unexpected token",
-//     @"Mode already exists in hotkey mode",
-//     @"Expected '<'",
-// };
-
 const LoadDirective = struct {
     filename: []const u8,
     token: Token,
 };
 
-// struct parser
-// {
-//     char *file;
-//     struct token previous_token;
-//     struct token current_token;
-//     struct tokenizer tokenizer;
-//     struct table *mode_map;
-//     struct table *blacklst;
-//     struct load_directive *load_directives;
-//     bool error;
-// };
-
-// unmanaged:
 allocator: std.mem.Allocator,
 tokenizer: Tokenizer = undefined,
 content: []const u8 = undefined,

@@ -76,7 +76,7 @@ pub fn create(allocator: std.mem.Allocator) !*Hotkey {
     const hotkey = try allocator.create(Hotkey);
     hotkey.* = .{
         .allocator = allocator,
-        .mode_list = std.AutoArrayHashMap(*Mode, void).init(allocator),
+        .mode_list = .init(allocator),
     };
     return hotkey;
 }

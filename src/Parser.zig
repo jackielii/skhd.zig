@@ -445,3 +445,19 @@ test "Parse mode decl capture" {
     try parser.parse(&mappings, ":: mode @: command");
     print("{s}\n", .{mappings});
 }
+
+test "double mode free" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\ ::game
+        \\ ::work
+        \\ game, work < ctrl + shift - h: echo
+    );
+    print("{s}\n", .{mappings});
+}

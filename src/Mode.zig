@@ -8,18 +8,6 @@
 // };
 const std = @import("std");
 const Hotkey = @import("./Hotkey.zig");
-const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, hotkeyContext, false);
-const hotkeyContext = struct {
-    pub fn hash(self: @This(), key: *Hotkey) u32 {
-        _ = self;
-        return @as(u32, @bitCast(key.flags)) ^ key.key;
-    }
-    pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
-        _ = self;
-        return Hotkey.eql(a, b);
-    }
-};
-
 const utils = @import("./utils.zig");
 
 const Mode = @This();
@@ -29,7 +17,16 @@ name: []const u8,
 command: ?[]const u8 = null,
 capture: bool = false,
 initialized: bool = false,
-hotkey_map: HotkeyMap,
+hotkey_map: std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
+    pub fn hash(self: @This(), key: *Hotkey) u32 {
+        _ = self;
+        return @as(u32, @bitCast(key.flags)) ^ key.key;
+    }
+    pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
+        _ = self;
+        return Hotkey.eql(a, b);
+    }
+}, false),
 
 pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
     return Mode{
@@ -100,6 +97,16 @@ test "init" {
 }
 
 test "hotkey map" {
+    const HotkeyMap = std.ArrayHashMap(Hotkey, void, struct {
+        pub fn hash(self: @This(), key: Hotkey) u32 {
+            _ = self;
+            return @as(u32, @bitCast(key.flags)) ^ key.key;
+        }
+        pub fn eql(self: @This(), a: Hotkey, b: Hotkey, _: anytype) bool {
+            _ = self;
+            return Hotkey.eql(a, b);
+        }
+    }, false);
     const alloc = std.testing.allocator;
     var m = HotkeyMap.init(alloc);
     defer m.deinit();

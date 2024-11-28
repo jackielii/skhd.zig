@@ -3,10 +3,10 @@ const print = std.debug.print;
 const eql = std.mem.eql;
 const unicode = std.unicode;
 const ascii = std.ascii;
-const ModifierFlag = @import("./consts.zig").ModifierFlag;
+const ModifierFlag = @import("./Keycodes.zig").ModifierFlag;
 
-// const modifier_flags_str = @import("./consts.zig").modifier_flags_str;
-const literal_keycode_str = @import("./consts.zig").literal_keycode_str;
+// const modifier_flags_str = @import("./Keycodes.zig").modifier_flags_str;
+const literal_keycode_str = @import("./Keycodes.zig").literal_keycode_str;
 
 const identifier_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
 const number_chars = "0123456789";

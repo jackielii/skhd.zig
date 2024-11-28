@@ -7,9 +7,8 @@ const assert = std.debug.assert;
 const Mode = @import("./Mode.zig");
 const Mappings = @import("./Mappings.zig");
 const Keycodes = @import("./Keycodes.zig");
-const consts = @import("./consts.zig");
 const utils = @import("./utils.zig");
-const ModifierFlag = @import("./consts.zig").ModifierFlag;
+const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
 const Parser = @This();
 
@@ -214,8 +213,8 @@ fn parse_key_hex(self: *Parser) !u32 {
     return code;
 }
 
-const literal_keycode_str = @import("./consts.zig").literal_keycode_str;
-const literal_keycode_value = @import("./consts.zig").literal_keycode_value;
+const literal_keycode_str = @import("./Keycodes.zig").literal_keycode_str;
+const literal_keycode_value = @import("./Keycodes.zig").literal_keycode_value;
 
 fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
     const token = self.previous();
@@ -225,10 +224,10 @@ fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
 
     for (literal_keycode_str, 0..) |literal_key, i| {
         if (std.mem.eql(u8, key, literal_key)) {
-            if (i > consts.KEY_HAS_IMPLICIT_FN_MOD and i < consts.KEY_HAS_IMPLICIT_NX_MOD) {
+            if (i > Keycodes.KEY_HAS_IMPLICIT_FN_MOD and i < Keycodes.KEY_HAS_IMPLICIT_NX_MOD) {
                 // flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Fn);
                 flags = flags.merge(.{ .@"fn" = true });
-            } else if (i >= consts.KEY_HAS_IMPLICIT_NX_MOD) {
+            } else if (i >= Keycodes.KEY_HAS_IMPLICIT_NX_MOD) {
                 // flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_NX);
                 flags = flags.merge(.{ .nx = true });
             }

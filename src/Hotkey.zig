@@ -13,7 +13,7 @@ const std = @import("std");
 const Hotkey = @This();
 const Mode = @import("Mode.zig");
 const utils = @import("./utils.zig");
-const ModifierFlag = @import("consts.zig").ModifierFlag;
+const ModifierFlag = @import("./Keycodes.zig").ModifierFlag;
 
 pub const KeyPress = struct {
     flags: ModifierFlag,

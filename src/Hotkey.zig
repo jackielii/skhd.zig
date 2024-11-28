@@ -15,6 +15,17 @@ const Mode = @import("Mode.zig");
 const utils = @import("./utils.zig");
 const ModifierFlag = @import("./Keycodes.zig").ModifierFlag;
 
+pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
+    pub fn hash(self: @This(), key: *Hotkey) u32 {
+        _ = self;
+        return @as(u32, @bitCast(key.flags)) ^ key.key;
+    }
+    pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
+        _ = self;
+        return Hotkey.eql(a, b);
+    }
+}, false);
+
 pub const KeyPress = struct {
     flags: ModifierFlag,
     key: u32,
@@ -194,4 +205,35 @@ test "format hotkey" {
     defer alloc.free(string);
 
     std.debug.print("{s}\n", .{string});
+}
+
+test "hotkey map" {
+    const alloc = std.testing.allocator;
+    var m = HotkeyMap.empty;
+    defer m.deinit(alloc);
+
+    var key1 = try Hotkey.create(alloc);
+    defer key1.destroy();
+    key1.flags = ModifierFlag{ .alt = true };
+    key1.key = 0x2;
+    try key1.add_process_name("notepad.exe");
+    std.debug.print("{}\n", .{key1});
+
+    var key2 = try Hotkey.create(alloc);
+    key2.flags = ModifierFlag{ .alt = true };
+    key2.key = 0x2;
+    defer key2.destroy();
+    std.debug.print("{}\n", .{key2});
+
+    var key1d = try Hotkey.create(alloc);
+    defer key1d.destroy();
+    key1d.flags = ModifierFlag{ .cmd = true };
+    key1d.key = 0x2;
+    try key1d.add_process_name("notepad.exe");
+    std.debug.print("{}\n", .{key1d});
+
+    try m.put(alloc, key1, {});
+    try m.put(alloc, key2, {});
+    try m.put(alloc, key1d, {});
+    try std.testing.expectEqual(2, m.count());
 }

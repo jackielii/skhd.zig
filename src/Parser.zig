@@ -151,11 +151,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         try self.parse_proc_list(hotkey);
     }
 
-    var it = hotkey.mode_list.iterator();
-    while (it.next()) |kv| {
-        const mode = kv.key_ptr.*;
-        try mode.add_hotkey(hotkey);
-    }
+    try mappings.add_hotkey(hotkey);
 }
 
 fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {

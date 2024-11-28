@@ -1,10 +1,12 @@
 const std = @import("std");
 const Mode = @import("./Mode.zig");
+const Hotkey = @import("./Hotkey.zig");
 const utils = @import("./utils.zig");
 
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
 blacklist: std.StringHashMapUnmanaged(void) = .empty,
+hotkey_map: Hotkey.HotkeyMap = .empty,
 shell: []const u8,
 
 const Mappings = @This();
@@ -24,6 +26,13 @@ pub fn init(alloc: std.mem.Allocator) !Mappings {
 
 pub fn deinit(self: *Mappings) void {
     {
+        var it = self.hotkey_map.iterator();
+        while (it.next()) |kv| {
+            kv.key_ptr.*.destroy();
+        }
+        self.hotkey_map.deinit(self.allocator);
+    }
+    {
         var it = self.mode_map.iterator();
         while (it.next()) |kv| {
             self.allocator.free(kv.key_ptr.*);
@@ -39,6 +48,16 @@ pub fn deinit(self: *Mappings) void {
     self.allocator.free(self.shell);
 
     self.* = undefined;
+}
+
+pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
+    try self.hotkey_map.put(self.allocator, hotkey, {});
+
+    var it = hotkey.mode_list.iterator();
+    while (it.next()) |kv| {
+        const mode = kv.key_ptr.*;
+        try mode.add_hotkey(hotkey);
+    }
 }
 
 pub fn set_shell(self: *Mappings, shell: []const u8) !void {

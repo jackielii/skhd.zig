@@ -17,16 +17,7 @@ name: []const u8,
 command: ?[]const u8 = null,
 capture: bool = false,
 initialized: bool = false,
-hotkey_map: std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
-    pub fn hash(self: @This(), key: *Hotkey) u32 {
-        _ = self;
-        return @as(u32, @bitCast(key.flags)) ^ key.key;
-    }
-    pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
-        _ = self;
-        return Hotkey.eql(a, b);
-    }
-}, false),
+hotkey_map: Hotkey.HotkeyMap = .empty,
 
 pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
     return Mode{
@@ -34,20 +25,13 @@ pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
         .name = try allocator.dupe(u8, name),
         .capture = false,
         .initialized = true,
-        .hotkey_map = .empty,
     };
 }
 
 pub fn deinit(self: *Mode) void {
     self.allocator.free(self.name);
     if (self.command) |cmd| self.allocator.free(cmd);
-    {
-        var it = self.hotkey_map.iterator();
-        while (it.next()) |kv| {
-            kv.key_ptr.*.destroy();
-        }
-        self.hotkey_map.deinit(self.allocator);
-    }
+    self.hotkey_map.deinit(self.allocator);
     self.* = undefined;
 }
 
@@ -94,45 +78,4 @@ test "init" {
     const string = try std.fmt.allocPrint(alloc, "{}", .{mode});
     defer alloc.free(string);
     std.debug.print("{s}\n", .{string});
-}
-
-test "hotkey map" {
-    const HotkeyMap = std.ArrayHashMap(Hotkey, void, struct {
-        pub fn hash(self: @This(), key: Hotkey) u32 {
-            _ = self;
-            return @as(u32, @bitCast(key.flags)) ^ key.key;
-        }
-        pub fn eql(self: @This(), a: Hotkey, b: Hotkey, _: anytype) bool {
-            _ = self;
-            return Hotkey.eql(a, b);
-        }
-    }, false);
-    const alloc = std.testing.allocator;
-    var m = HotkeyMap.init(alloc);
-    defer m.deinit();
-
-    var key1 = try Hotkey.create(alloc);
-    defer key1.destroy();
-    key1.flags = Hotkey.ModifierFlag{ .alt = true };
-    key1.key = 0x2;
-    try key1.add_process_name("notepad.exe");
-    std.debug.print("{}\n", .{key1});
-
-    var key2 = try Hotkey.create(alloc);
-    key2.flags = Hotkey.ModifierFlag{ .alt = true };
-    key2.key = 0x2;
-    defer key2.destroy();
-    std.debug.print("{}\n", .{key2});
-
-    var key1d = try Hotkey.create(alloc);
-    defer key1d.destroy();
-    key1d.flags = Hotkey.ModifierFlag{ .cmd = true };
-    key1d.key = 0x2;
-    try key1d.add_process_name("notepad.exe");
-    std.debug.print("{}\n", .{key1d});
-
-    try m.put(key1, {});
-    try m.put(key2, {});
-    try m.put(key1d, {});
-    try std.testing.expectEqual(2, m.count());
 }

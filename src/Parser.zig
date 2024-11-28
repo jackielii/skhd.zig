@@ -136,7 +136,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         }
     } else {
         const default_mode = try mappings.get_mode_or_create_default("default") orelse unreachable;
-        try hotkey.mode_list.put(default_mode, {});
+        try hotkey.add_mode(default_mode);
     }
 
     const found_modifier = self.match(.Token_Modifier);
@@ -174,13 +174,6 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         try self.parse_proc_list(hotkey);
     }
 
-    // switch (true) {
-    //     self.match(.Token_Key) => hotkey.key = try self.parse_key(),
-    //     self.match(.Token_Key_Hex) => hotkey.key = try self.parse_key_hex(),
-    //     self.match(.Token_Literal) => try self.parse_key_literal(hotkey),
-    //     else => return error.@"Expected key, key hex or literal",
-    // }
-
     var it = hotkey.mode_list.iterator();
     while (it.next()) |kv| {
         const mode = kv.key_ptr.*;
@@ -194,11 +187,7 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
 
     const name = token.text;
     const mode = try mappings.get_mode_or_create_default(name) orelse return error.@"Mode not found";
-
-    if (hotkey.mode_list.contains(mode)) {
-        return error.@"Mode already exists in hotkey mode";
-    }
-    try hotkey.mode_list.put(mode, {});
+    try hotkey.add_mode(mode);
     // print("\tmode: '{s}'\n", .{name});
 
     // const token1 = self.advance_token() orelse return error.@"Expected token";
@@ -345,6 +334,7 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
     const token = self.previous();
     const mode_name = token.text;
     var mode = try Mode.init(self.allocator, mode_name);
+    errdefer mode.deinit();
 
     if (self.match(.Token_Capture)) {
         mode.capture = true;

@@ -46,23 +46,26 @@ const processCommand = union(enum) {
 allocator: std.mem.Allocator,
 flags: ModifierFlag = undefined,
 key: u32 = undefined,
-process_names: std.ArrayList([]const u8) = undefined,
-commands: std.ArrayList(processCommand) = undefined,
+process_names: std.ArrayListUnmanaged([]const u8) = .empty,
+commands: std.ArrayListUnmanaged(processCommand) = .empty,
 wildcard_command: ?processCommand = null,
-mode_list: std.AutoArrayHashMap(*Mode, void) = undefined,
+mode_list: std.AutoArrayHashMap(*Mode, void),
 
 pub fn destroy(self: *Hotkey) void {
-    for (self.process_names.items) |name| self.allocator.free(name);
-    self.process_names.deinit();
-
-    for (self.commands.items) |cmd| {
-        switch (cmd) {
-            .command => self.allocator.free(cmd.command),
-            .forwarded => {},
-            .unbound => {},
-        }
+    {
+        for (self.process_names.items) |name| self.allocator.free(name);
+        self.process_names.deinit(self.allocator);
     }
-    self.commands.deinit();
+
+    {
+        for (self.commands.items) |cmd| {
+            switch (cmd) {
+                .command => self.allocator.free(cmd.command),
+                else => {},
+            }
+        }
+        self.commands.deinit(self.allocator);
+    }
 
     self.deinit_wildcard_command();
     self.mode_list.deinit();
@@ -73,8 +76,6 @@ pub fn create(allocator: std.mem.Allocator) !*Hotkey {
     const hotkey = try allocator.create(Hotkey);
     hotkey.* = .{
         .allocator = allocator,
-        .process_names = std.ArrayList([]const u8).init(allocator),
-        .commands = std.ArrayList(processCommand).init(allocator),
         .mode_list = std.AutoArrayHashMap(*Mode, void).init(allocator),
     };
     return hotkey;
@@ -84,8 +85,7 @@ fn deinit_wildcard_command(self: *Hotkey) void {
     if (self.wildcard_command) |wildcard_command| {
         switch (wildcard_command) {
             .command => self.allocator.free(wildcard_command.command),
-            .forwarded => {},
-            .unbound => {},
+            else => {},
         }
         self.wildcard_command = null;
     }
@@ -162,25 +162,28 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
 
 pub fn add_process_name(self: *Hotkey, process_name: []const u8) !void {
     const owned = try self.allocator.dupe(u8, process_name);
-    // TODO: assuming ascii
+    // TODO: assuming ascii, need to handle utf8
     for (owned, 0..) |c, i| owned[i] = std.ascii.toLower(c);
-    try self.process_names.append(owned);
+    try self.process_names.append(self.allocator, owned);
 }
 
 pub fn add_proc_command(self: *Hotkey, command: []const u8) !void {
     const owned = try self.allocator.dupe(u8, command);
-    try self.commands.append(processCommand{ .command = owned });
+    try self.commands.append(self.allocator, processCommand{ .command = owned });
 }
 
 pub fn add_proc_unbound(self: *Hotkey) !void {
-    try self.commands.append(processCommand{ .unbound = void{} });
+    try self.commands.append(self.allocator, processCommand{ .unbound = void{} });
 }
 
 pub fn add_proc_forward(self: *Hotkey, forwarded: KeyPress) !void {
-    try self.commands.append(processCommand{ .forwarded = forwarded });
+    try self.commands.append(self.allocator, processCommand{ .forwarded = forwarded });
 }
 
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
+    if (self.mode_list.contains(mode)) {
+        return error.@"Mode already exists in hotkey mode";
+    }
     try self.mode_list.put(mode, {});
 }
 

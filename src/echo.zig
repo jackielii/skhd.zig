@@ -1,30 +1,40 @@
 const std = @import("std");
+const EventTap = @import("EventTap.zig");
+
 const c = @cImport(@cInclude("Carbon/Carbon.h"));
 
 extern fn NSApplicationLoad() void;
 
 pub fn echo() !void {
-    const mask: u32 = 1 << c.kCGEventKeyDown;
-    const handle: c.CFMachPortRef = c.CGEventTapCreate(c.kCGSessionEventTap, c.kCGHeadInsertEventTap, c.kCGEventTapOptionDefault, mask, &callback, null);
-    defer c.CFRelease(handle);
-
-    const enabled = c.CGEventTapIsEnabled(handle);
-    if (!enabled) {
-        return error.@"Failed to enable event tap";
-    }
-    const loopsource = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, handle, 0);
-    defer c.CFRelease(loopsource);
-
-    c.CFRunLoopAddSource(c.CFRunLoopGetMain(), loopsource, c.kCFRunLoopCommonModes);
-    NSApplicationLoad();
+    // NSApplicationLoad();
+    const mask: u32 = (1 << c.kCGEventKeyDown) |
+        (1 << c.kCGEventFlagsChanged) |
+        (1 << c.kCGEventLeftMouseDown) |
+        (1 << c.kCGEventRightMouseDown) |
+        (1 << c.kCGEventOtherMouseDown);
+    var event_tap = EventTap{ .mask = mask };
+    defer event_tap.deinit();
     std.debug.print("Ctrl+C to exit\n", .{});
-    c.CFRunLoopRun();
+    try event_tap.run(callback);
 }
 
 fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {
-    if (typ != c.kCGEventKeyDown) {
-        return event;
+    switch (typ) {
+        c.kCGEventKeyDown => return printKeydown(event),
+        // c.kCGEventFlagsChanged => printFlagsChanged(event),
+        c.kCGEventLeftMouseDown, c.kCGEventRightMouseDown, c.kCGEventOtherMouseDown => {
+            const button = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
+            std.debug.print("Mouse button: {d}\n", .{button});
+            return null;
+        },
+        else => {
+            std.debug.print("Event type: {any}\n", .{typ});
+            return event;
+        },
     }
+}
+
+fn printKeydown(event: c.CGEventRef) c.CGEventRef {
     const keycode = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode);
     // std.debug.print("type of keycode: {}\n", .{@TypeOf(keycode)});
 
@@ -67,7 +77,10 @@ fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*
     // std.debug.print("key: {s}", .{chars});
     const chars = strForKey(keycode);
     const keyCodeBit: i64 = @bitCast(keycode);
-    std.debug.print("\t{s}\tkeycode: 0x{x:0<2}\n", .{ chars, keyCodeBit });
+
+    const button = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
+
+    std.debug.print("\t{s}\tkeycode: 0x{x:0<2}, button: {d}\n", .{ chars, keyCodeBit, button });
 
     // c.CGEventSetFlags(event, c.kCGEventFlagMaskShift);
     // c.CGEventSetIntegerValueField(event, c.kCGKeyboardEventKeycode, c.kVK_ANSI_X);

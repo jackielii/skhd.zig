@@ -1,5 +1,11 @@
 const std = @import("std");
 
+fn linkFrameworks(exe: *std.Build.Step.Compile) void {
+    exe.linkFramework("Cocoa");
+    exe.linkFramework("Carbon");
+    exe.linkFramework("CoreServices");
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -21,10 +27,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
-    exe.linkFramework("Cocoa");
-    exe.linkFramework("Carbon");
-    exe.linkFramework("CoreServices");
+    linkFrameworks(exe);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -60,9 +63,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    exe_unit_tests.linkFramework("Cocoa");
-    exe_unit_tests.linkFramework("Carbon");
-    exe_unit_tests.linkFramework("CoreServices");
+    linkFrameworks(exe_unit_tests);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

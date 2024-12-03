@@ -20,7 +20,10 @@ pub fn echo() !void {
 
 fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {
     switch (typ) {
-        c.kCGEventKeyDown => return printKeydown(event),
+        c.kCGEventKeyDown => return printKeydown(event) catch |err| {
+            std.debug.print("Error: {}\n", .{err});
+            return null;
+        },
         // c.kCGEventFlagsChanged => printFlagsChanged(event),
         c.kCGEventLeftMouseDown, c.kCGEventRightMouseDown, c.kCGEventOtherMouseDown => {
             const button = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
@@ -28,15 +31,14 @@ fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*
             return null;
         },
         else => {
-            std.debug.print("Event type: {any}\n", .{typ});
+            // std.debug.print("Event type: {any}\n", .{typ});
             return event;
         },
     }
 }
 
-fn printKeydown(event: c.CGEventRef) c.CGEventRef {
+fn printKeydown(event: c.CGEventRef) !c.CGEventRef {
     const keycode = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode);
-    // std.debug.print("type of keycode: {}\n", .{@TypeOf(keycode)});
 
     const flags: c.CGEventFlags = c.CGEventGetFlags(event);
     if (keycode == c.kVK_ANSI_C and flags & c.kCGEventFlagMaskControl != 0) {
@@ -64,9 +66,9 @@ fn printKeydown(event: c.CGEventRef) c.CGEventRef {
     if (flags & c.kCGEventFlagMaskHelp != 0) {
         std.debug.print("Help ", .{});
     }
-    if (flags & c.kCGEventFlagMaskNonCoalesced != 0) {
-        std.debug.print("NonCoalesced ", .{});
-    }
+    // if (flags & c.kCGEventFlagMaskNonCoalesced != 0) {
+    //     std.debug.print("NonCoalesced ", .{});
+    // }
     if (flags & c.kCGEventFlagMaskAlphaShift != 0) {
         std.debug.print("AlphaShift ", .{});
     }
@@ -76,22 +78,61 @@ fn printKeydown(event: c.CGEventRef) c.CGEventRef {
     // std.debug.print("typeof chars: {}, length: {}\n", .{ @TypeOf(chars), chars.len });
     // std.debug.print("key: {s}", .{chars});
     const chars = strForKey(keycode);
-    const keyCodeBit: i64 = @bitCast(keycode);
+    std.debug.print("\t{s}\tkeycode: 0x{x:0>2}\n", .{ chars, keycode });
+    // print("\tkey: '{s}' (0x{x:0>2})\n", .{ key, keycode });
 
-    const button = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
-
-    std.debug.print("\t{s}\tkeycode: 0x{x:0<2}, button: {d}\n", .{ chars, keyCodeBit, button });
-
-    // c.CGEventSetFlags(event, c.kCGEventFlagMaskShift);
-    // c.CGEventSetIntegerValueField(event, c.kCGKeyboardEventKeycode, c.kVK_ANSI_X);
-    // return event;
-    // var str = createDynamicString() catch |err| {
-    //     std.debug.print("Error: {}\n", .{err});
-    //     return event;
-    // };
-    // std.debug.print("createDynamicString: {s}\n", .{str});
+    // var buffer: [255]u8 = undefined;
+    // try translateKey(&buffer, @intCast(keycode), @intCast(flags));
+    // const s = std.mem.sliceTo(buffer[0..], 0);
+    // std.debug.print("\t{s}\tkeycode: 0x{x:0<2}\n", .{ s, keycode });
 
     return null;
+}
+
+fn translateKey(buffer: *[255]u8, keyCode: u16, modifierState: u32) !void {
+    const keyboard = c.TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+    const uchr: c.CFDataRef = @ptrCast(c.TISGetInputSourceProperty(keyboard, c.kTISPropertyUnicodeKeyLayoutData));
+    defer c.CFRelease(keyboard);
+
+    const keyboard_layout: ?*c.UCKeyboardLayout = @constCast(@ptrCast(@alignCast(c.CFDataGetBytePtr(uchr))));
+    if (keyboard_layout == null) {
+        return error.@"Failed to get keyboard layout";
+    }
+
+    var len: c.UniCharCount = 0;
+    var chars: [255]u16 = undefined;
+    var state: c.UInt32 = 0;
+
+    const ret = c.UCKeyTranslate(
+        keyboard_layout,
+        keyCode,
+        c.kUCKeyActionDisplay,
+        modifierState & 0x0,
+        c.LMGetKbdType(),
+        c.kUCKeyTranslateNoDeadKeysMask,
+        &state,
+        chars.len,
+        &len,
+        &chars,
+    );
+
+    if (ret != c.noErr) {
+        std.debug.print("ret: {d}\n", .{ret});
+        return error.@"Failed to translate key";
+    }
+
+    const cfstring = c.CFStringCreateWithCharacters(c.kCFAllocatorDefault, &chars, @intCast(len));
+    defer c.CFRelease(cfstring);
+
+    const num_bytes = c.CFStringGetMaximumSizeForEncoding(c.CFStringGetLength(cfstring), c.kCFStringEncodingUTF8);
+    if (num_bytes > 64) {
+        @panic("num_bytes for cfstring > 64");
+    }
+    if (c.CFStringGetCString(cfstring, buffer, num_bytes, c.kCFStringEncodingUTF8) == c.false) {
+        std.debug.print("str {?x} len: {d}\n", .{ cfstring.?, num_bytes });
+        std.debug.print("chars: {x}\n", .{chars});
+        return error.@"Failed to get c string from CFString";
+    }
 }
 
 fn strForKey(keyCode: i64) []const u8 {
@@ -213,103 +254,3 @@ fn strForKey(keyCode: i64) []const u8 {
         else => "unknown keycode",
     };
 }
-
-// test "simple test" {
-//     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-//     const gpa = general_purpose_allocator.allocator();
-//     for (0..128) |i| {
-//         const res = createStringForKey(@as(u16, @intCast(i)), gpa);
-//         // std.debug.print("{}", .{i});
-//         if (res) |str| {
-//             // std.debug.print("keycode: {}\n", .{i});
-//             std.debug.print("keycode: {}, str: {s}\n", .{ i, str });
-//             gpa.free(str);
-//         } else |err| {
-//             std.debug.print("keycode: {}, err: {}\n", .{ i, err });
-//             std.debug.print("ok err", .{});
-//         }
-//     }
-//     std.testing.log_level = std.log.Level.debug;
-//     std.log.info("========================\n", .{});
-// }
-//
-// fn createStringForKey(keyCode: c.CGKeyCode, allocator: std.mem.Allocator) ![]u8 {
-//     const currentKeyboard = c.TISCopyCurrentKeyboardInputSource();
-//     const layoutData: c.CFDataRef = @ptrCast(c.TISGetInputSourceProperty(currentKeyboard, c.kTISPropertyUnicodeKeyLayoutData));
-//     const keyboardLayout: *const c.UCKeyboardLayout = @ptrCast(@alignCast(c.CFDataGetBytePtr(layoutData)));
-//     // var keyboardLayout = @ptrCast(*c.UCKeyboardLayout, c.CFDataGetBytePtr(layoutData));
-//
-//     var keysDown: c.UInt32 = 0;
-//     var chars: [4]c.UniChar = undefined;
-//     // std.debug.print("typeof chars: {}\n", .{@TypeOf(chars)});
-//     var realLength: c.UniCharCount = 0;
-//
-//     _ = c.UCKeyTranslate(
-//         //
-//         // keyLayoutPtr
-//         // A pointer to the first element in a resource of type 'uchr'. Pass a pointer to the 'uchr' resource that you wish the UCKeyTranslate function to use when converting the virtual key code to a Unicode character. The resource handle associated with this pointer need not be locked, since the UCKeyTranslate function does not move memory.
-//         keyboardLayout,
-//
-//         // virtualKeyCode
-//         // An unsigned 16-bit integer. Pass a value specifying the virtual key code that is to be translated. For ADB keyboards, virtual key codes are in the range from 0 to 127.
-//         keyCode,
-//
-//         //
-//         // keyAction
-//         // An unsigned 16-bit integer. Pass a value specifying the current key action. See Key Actions for descriptions of possible values.
-//         c.kUCKeyActionDisplay,
-//
-//         //
-//         // modifierKeyState
-//         // An unsigned 32-bit integer. Pass a bit mask indicating the current state of various modifier keys. You can obtain this value from the modifiers field of the event record as follows:
-//         0,
-//
-//         //
-//         // modifierKeyState = ((EventRecord.modifiers) >> 8) & 0xFF;
-//         // keyboardType
-//         // An unsigned 32-bit integer. Pass a value specifying the physical keyboard type (that is, the keyboard shape shown by Key Caps). You can call the function LMGetKbdType for this value.
-//         c.LMGetKbdType(),
-//
-//         //
-//         // keyTranslateOptions
-//         // A bit mask of options for controlling the UCKeyTranslate function. See Key Translation Options Flag and Key Translation Options Mask for descriptions of possible values.
-//         c.kUCKeyTranslateNoDeadKeysBit,
-//
-//         //
-//         // deadKeyState
-//         // A pointer to an unsigned 32-bit value, initialized to zero. The UCKeyTranslate function uses this value to store private information about the current dead key state.
-//         &keysDown,
-//
-//         //
-//         // maxStringLength
-//         // A value of type UniCharCount. Pass the number of 16-bit Unicode characters that are contained in the buffer passed in the unicodeString parameter. This may be a value of up to 255, although it would be rare to get more than 4 characters.
-//         4,
-//
-//         //
-//         // actualStringLength
-//         // A pointer to a value of type UniCharCount. On return this value contains the actual number of Unicode characters placed into the buffer passed in the unicodeString parameter.
-//         &realLength,
-//
-//         //
-//         // unicodeString
-//         // An array of values of type UniChar. Pass a pointer to the buffer whose sized is specified in the maxStringLength parameter. On return, the buffer contains a string of Unicode characters resulting from the virtual key code being handled. The number of characters in this string is less than or equal to the value specified in the maxStringLength parameter.
-//         &chars,
-//
-//         //
-//         // Return Value
-//         // A result code. If you pass NULL in the keyLayoutPtr parameter, UCKeyTranslate returns paramErr. The UCKeyTranslate function also returns paramErr for an invalid 'uchr' resource format or for invalid virtualKeyCode or keyAction values, as well as for NULL pointers to output values. The result kUCOutputBufferTooSmall (-25340) is returned for an output string length greater than maxStringLength.
-//     );
-//
-//     c.CFRelease(currentKeyboard);
-//
-//     // return chars[0..realLength].ptr;
-//     // std.debug.print("type: {}\n", .{@TypeOf(chars[0..realLength].ptr)});
-//     // var s = "good morning".*;
-//     // std.debug.print("s: {s}, typeof: {}\n", .{ s, @TypeOf(s[0..realLength]) });
-//
-//     // std.debug.print("chars: {s}, len: {any}\n", .{ chars[0..realLength], realLength });
-//
-//     const utf8string = try std.unicode.utf16leToUtf8Alloc(allocator, chars[0..realLength]);
-//
-//     return utf8string;
-// }

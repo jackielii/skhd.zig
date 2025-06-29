@@ -49,10 +49,8 @@ pub fn main() !void {
     }
 
     // Initialize and run skhd
-    var skhd = try Skhd.init(allocator, config_file);
+    var skhd = try Skhd.init(allocator, config_file, verbose);
     defer skhd.deinit();
-    
-    skhd.verbose = verbose;
 
     if (verbose) {
         std.debug.print("skhd: using config file: {s}\n", .{config_file});

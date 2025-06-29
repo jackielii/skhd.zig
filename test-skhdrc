@@ -1,0 +1,40 @@
+# Test configuration with simple echo commands
+# Run with: ./zig-out/bin/skhd.zig -V -c test-skhdrc
+
+# Basic test hotkeys
+cmd - a : echo "CMD+A pressed!"
+cmd - b : echo "CMD+B pressed!"
+cmd - c : echo "CMD+C pressed!"
+
+# Test different modifiers
+ctrl - x : echo "CTRL+X pressed!"
+alt - z : echo "ALT+Z pressed!"
+shift - s : echo "SHIFT+S pressed!"
+
+# Test modifier combinations
+shift + cmd - d : echo "SHIFT+CMD+D pressed!"
+ctrl + alt - e : echo "CTRL+ALT+E pressed!"
+cmd + alt - f : echo "CMD+ALT+F pressed!"
+
+# Test numbers and special keys
+cmd - 1 : echo "CMD+1 pressed!"
+cmd - 2 : echo "CMD+2 pressed!"
+cmd - space : echo "CMD+SPACE pressed!"
+cmd - return : echo "CMD+RETURN pressed!"
+
+# Mode switching test
+:: test @
+cmd - t ; test
+test < q : echo "In TEST mode: Q pressed!"
+test < w : echo "In TEST mode: W pressed!"
+test < escape ; default
+
+# Another mode for demonstration
+:: edit
+cmd - e ; edit
+edit < h : echo "EDIT mode: Move left"
+edit < j : echo "EDIT mode: Move down"
+edit < k : echo "EDIT mode: Move up"
+edit < l : echo "EDIT mode: Move right"
+edit < i : echo "EDIT mode: Insert"; skhd -k "escape"
+edit < escape ; default

@@ -1,0 +1,57 @@
+# Simple skhd configuration for testing
+# This file should be placed at ~/.skhdrc or specified with -c flag
+
+# Basic hotkeys
+cmd - return : open -na /Applications/Terminal.app
+cmd - h : echo "Hello from skhd.zig!"
+
+# Application launcher shortcuts
+cmd - space : open -a "Spotlight"
+shift + cmd - space : open -a "Finder"
+
+# Window management (requires yabai or similar)
+alt - h : echo "Move focus west"
+alt - j : echo "Move focus south"
+alt - k : echo "Move focus north"
+alt - l : echo "Move focus east"
+
+# Test with modifiers
+ctrl + alt - t : echo "Ctrl+Alt+T pressed"
+shift + cmd - q : echo "Quit shortcut pressed (but not quitting)"
+
+# Mode example: resize mode
+:: resize
+alt - r ; resize
+resize < h : echo "Resize left"
+resize < j : echo "Resize down"
+resize < k : echo "Resize up"
+resize < l : echo "Resize right"
+resize < escape ; default
+
+# Mode example: launch mode
+:: launch
+cmd - o ; launch
+launch < t : open -na /Applications/Terminal.app; skhd -k "escape"
+launch < s : open -a "Safari"; skhd -k "escape"
+launch < m : open -a "Music"; skhd -k "escape"
+launch < escape ; default
+
+# Test commands that show notifications (requires terminal-notifier)
+cmd + shift - n : osascript -e 'display notification "Test notification from skhd.zig" with title "skhd"'
+
+# Volume controls (media keys example - these would need media key support)
+# f11 : echo "Volume down"
+# f12 : echo "Volume up"
+
+# Quick terminal command
+ctrl + cmd - c : open -na /Applications/Terminal.app --args -e "cal"
+
+# Test passthrough (once implemented with ->)
+# cmd - b -> : echo "This would pass through cmd-b after executing"
+
+# Process-specific hotkeys (once implemented)
+# cmd - w [
+#     "Safari" : echo "Close Safari tab"
+#     "Terminal" : echo "Close Terminal tab"
+#     * : echo "Generic close"
+# ]

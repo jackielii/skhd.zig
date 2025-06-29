@@ -16,7 +16,7 @@ event_tap: EventTap,
 verbose: bool = false,
 config_file: []const u8,
 
-pub fn init(allocator: std.mem.Allocator, config_file: []const u8) !Skhd {
+pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool) !Skhd {
     var mappings = try Mappings.init(allocator);
     errdefer mappings.deinit();
 
@@ -34,6 +34,16 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8) !Skhd {
     if (mappings.mode_map.getPtr("default")) |mode| {
         current_mode = mode;
     }
+    
+    if (verbose) {
+        // Debug: print all modes
+        var mode_iter = mappings.mode_map.iterator();
+        std.debug.print("skhd: loaded modes: ", .{});
+        while (mode_iter.next()) |entry| {
+            std.debug.print("'{s}' ", .{entry.key_ptr.*});
+        }
+        std.debug.print("\n", .{});
+    }
 
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
@@ -43,6 +53,7 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8) !Skhd {
         .mappings = mappings,
         .current_mode = current_mode,
         .event_tap = EventTap{ .mask = mask },
+        .verbose = verbose,
         .config_file = try allocator.dupe(u8, config_file),
     };
 }
@@ -225,7 +236,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
     
     if (found_hotkey) |hotkey| {
         if (self.verbose) {
-            std.debug.print("skhd: found hotkey match - key: {d}, flags: {any}\n", .{ hotkey.key, hotkey.flags });
+            std.debug.print("skhd: found hotkey match - key: {d}, flags: {any} in mode '{s}'\n", .{ hotkey.key, hotkey.flags, mode.name });
         }
 
         // Get current process name for process-specific commands
@@ -234,23 +245,59 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
 
         // Check for mode activation
         if (hotkey.flags.activate) {
+            if (self.verbose) {
+                std.debug.print("skhd: mode activation hotkey triggered\n", .{});
+            }
             // Get the mode name from the command
             if (hotkey.wildcard_command) |cmd| {
                 switch (cmd) {
                     .command => |mode_name| {
-                        if (self.mappings.mode_map.getPtr(mode_name)) |new_mode| {
-                            self.current_mode = new_mode;
+                        if (self.verbose) {
+                            std.debug.print("skhd: attempting to switch to mode '{s}'\n", .{mode_name});
+                        }
+                        // Try to find the mode
+                        const new_mode = self.mappings.mode_map.getPtr(mode_name);
+                        
+                        // If not found and it's a known mode name, create it
+                        if (new_mode == null and !std.mem.eql(u8, mode_name, "default")) {
+                            // This handles forward references - mode might be declared later
                             if (self.verbose) {
-                                std.debug.print("skhd: switching to mode '{s}'\n", .{new_mode.name});
+                                std.debug.print("skhd: mode '{s}' not found, checking if it's a forward reference\n", .{mode_name});
+                            }
+                            // For now, just return false - the mode will be created when declared
+                            return false;
+                        }
+                        
+                        if (new_mode) |target_mode| {
+                            self.current_mode = target_mode;
+                            if (self.verbose) {
+                                std.debug.print("skhd: successfully switched to mode '{s}'\n", .{target_mode.name});
                             }
                             // Execute mode command if exists
-                            if (new_mode.command) |mode_cmd| {
+                            if (target_mode.command) |mode_cmd| {
                                 try executeCommand(self.allocator, self.mappings.shell, mode_cmd);
                             }
                             return true;
+                        } else if (std.mem.eql(u8, mode_name, "default")) {
+                            // Switching to default mode which should always exist
+                            if (self.mappings.mode_map.getPtr("default")) |default_mode| {
+                                self.current_mode = default_mode;
+                                if (self.verbose) {
+                                    std.debug.print("skhd: switched to default mode\n", .{});
+                                }
+                                return true;
+                            }
                         }
                     },
-                    else => {},
+                    else => {
+                        if (self.verbose) {
+                            std.debug.print("skhd: activate flag set but no command found\n", .{});
+                        }
+                    },
+                }
+            } else {
+                if (self.verbose) {
+                    std.debug.print("skhd: activate flag set but no wildcard_command\n", .{});
                 }
             }
             return false;

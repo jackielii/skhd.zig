@@ -114,6 +114,7 @@ fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
 
     // Create hotkey from event
     const eventkey = createEventKey(event);
+    
 
     // First check for key forwarding
     if (try self.findAndForwardHotkey(&eventkey, event)) {
@@ -258,15 +259,6 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                         // Try to find the mode
                         const new_mode = self.mappings.mode_map.getPtr(mode_name);
                         
-                        // If not found and it's a known mode name, create it
-                        if (new_mode == null and !std.mem.eql(u8, mode_name, "default")) {
-                            // This handles forward references - mode might be declared later
-                            if (self.verbose) {
-                                std.debug.print("skhd: mode '{s}' not found, checking if it's a forward reference\n", .{mode_name});
-                            }
-                            // For now, just return false - the mode will be created when declared
-                            return false;
-                        }
                         
                         if (new_mode) |target_mode| {
                             self.current_mode = target_mode;
@@ -288,6 +280,10 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                                 return true;
                             }
                         }
+                        
+                        // If we get here, mode wasn't found but we should still consume the event
+                        // since this is a mode activation hotkey
+                        return true;
                     },
                     else => {
                         if (self.verbose) {

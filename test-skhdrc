@@ -23,14 +23,14 @@ cmd - space : echo "CMD+SPACE pressed!"
 cmd - return : echo "CMD+RETURN pressed!"
 
 # Mode switching test
-:: test @
+:: test @ : echo "TEST MODE ACTIVATED!"
 cmd - t ; test
 test < q : echo "In TEST mode: Q pressed!"
 test < w : echo "In TEST mode: W pressed!"
 test < escape ; default
 
 # Another mode for demonstration
-:: edit
+:: edit : echo "EDIT MODE ACTIVATED!"
 cmd - e ; edit
 edit < h : echo "EDIT mode: Move left"
 edit < j : echo "EDIT mode: Move down"

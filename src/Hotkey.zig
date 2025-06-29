@@ -32,7 +32,11 @@ pub const KeyPress = struct {
 };
 
 pub fn eql(a: *Hotkey, b: *Hotkey) bool {
-    return a.flags == b.flags and a.key == b.key;
+    // Compare only the modifier flags, not special flags like activate/passthrough
+    const modifier_mask: u32 = 0x0FFF; // First 12 bits are modifier flags
+    const a_modifiers = @as(u32, @bitCast(a.flags)) & modifier_mask;
+    const b_modifiers = @as(u32, @bitCast(b.flags)) & modifier_mask;
+    return a_modifiers == b_modifiers and a.key == b.key;
 }
 
 const processCommand = union(enum) {

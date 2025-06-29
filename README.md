@@ -21,6 +21,9 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [x] Process-specific hotkey support
 - [x] Key forwarding/remapping (`|` operator)
 - [x] Left/right modifier distinction (lcmd, rcmd, etc.)
+- [x] Key synthesis (-k option) for testing
+- [x] Text synthesis (-t option) for text input
+- [x] Comprehensive unit tests
 
 ## TODO
 
@@ -32,8 +35,8 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [x] `-c` / `--config` - Specify config file location
 - [x] `-o` / `--observe` - Observe mode (echo keycodes)
 - [x] `-V` / `--verbose` - Debug output
-- [ ] `-k` / `--key` - Synthesize keypress
-- [ ] `-t` / `--text` - Synthesize text input
+- [x] `-k` / `--key` - Synthesize keypress
+- [x] `-t` / `--text` - Synthesize text input
 - [ ] `-P` / `--profile` - Profiling output
 - [ ] `-r` / `--reload` - Signal reload to running instance
 - [ ] `-h` / `--no-hotload` - Disable hotloading

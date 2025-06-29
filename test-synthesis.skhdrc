@@ -1,0 +1,19 @@
+# Test configuration for synthesis testing
+
+# Test basic hotkey that we can trigger with synthesis
+cmd - f1 : echo "SUCCESS: Basic hotkey triggered!"
+
+# Test left/right modifier distinction
+lcmd - f2 : echo "SUCCESS: Left command key triggered!"
+rcmd - f3 : echo "SUCCESS: Right command key triggered!"
+
+# Test process-specific hotkey
+cmd - f4 [
+    "terminal" : echo "SUCCESS: Terminal-specific hotkey!"
+    *          : echo "SUCCESS: Default hotkey!"
+]
+
+# Test mode switching
+:: testmode : echo "SUCCESS: Entered test mode!"
+cmd - f5 ; testmode
+testmode < escape ; default

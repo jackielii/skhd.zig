@@ -1,5 +1,6 @@
 const std = @import("std");
 const Skhd = @import("skhd.zig");
+const synthesize = @import("synthesize.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -36,6 +37,24 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "-v") or std.mem.eql(u8, args[i], "--version")) {
             std.debug.print("skhd.zig v0.1.0\n", .{});
             return;
+        } else if (std.mem.eql(u8, args[i], "-k") or std.mem.eql(u8, args[i], "--key")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                try synthesize.synthesizeKey(allocator, args[i]);
+                return;
+            } else {
+                std.debug.print("Error: --key requires a key string\n", .{});
+                return;
+            }
+        } else if (std.mem.eql(u8, args[i], "-t") or std.mem.eql(u8, args[i], "--text")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                try synthesize.synthesizeText(allocator, args[i]);
+                return;
+            } else {
+                std.debug.print("Error: --text requires a text string\n", .{});
+                return;
+            }
         } else if (std.mem.eql(u8, args[i], "--help")) {
             printHelp();
             return;
@@ -69,6 +88,8 @@ fn printHelp() void {
         \\  -c, --config <file>    Specify config file (default: skhdrc)
         \\  -V, --verbose          Enable verbose output
         \\  -o, --observe          Observe mode - print key events
+        \\  -k, --key <keyspec>    Synthesize a keypress
+        \\  -t, --text <text>      Synthesize text input
         \\  -v, --version          Print version
         \\      --help             Show this help message
         \\

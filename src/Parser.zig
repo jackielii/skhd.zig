@@ -47,10 +47,17 @@ pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
     self.content = content;
     self.tokenizer = try Tokenizer.init(content);
 
+    // Create default mode if it doesn't exist
+    if (!mappings.mode_map.contains("default")) {
+        const default_mode = try Mode.init(mappings.allocator, "default");
+        const key = try mappings.allocator.dupe(u8, "default");
+        try mappings.mode_map.put(mappings.allocator, key, default_mode);
+    }
+
     _ = self.advance();
     while (self.peek()) |token| {
         switch (token.type) {
-            .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key => {
+            .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key, .Token_Activate => {
                 try self.parse_hotkey(mappings);
             },
             .Token_Decl => {
@@ -99,9 +106,6 @@ fn match(self: *Parser, typ: Tokenizer.TokenType) bool {
 fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     var hotkey = try Hotkey.create(self.allocator);
     errdefer hotkey.destroy();
-    // var found_modifier = false;
-
-    // print("hotkey :: #{d} {{\n", .{self.next_token.?.line});
 
     if (self.match(.Token_Identifier)) {
         try self.parse_mode(mappings, hotkey);
@@ -143,7 +147,14 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         hotkey.flags = hotkey.flags.merge(.{ .passthrough = true });
     }
 
-    if (self.match(.Token_Forward)) {
+    if (self.match(.Token_Activate)) {
+        // Mode activation hotkey - don't add command, just set flag
+        hotkey.flags = hotkey.flags.merge(.{ .activate = true });
+        const mode_name = self.previous().text;
+        // Don't add the target mode to the hotkey's mode list - that's for activation
+        // Instead, store it as a command (the mode name to switch to)
+        try hotkey.set_wildcard_command(mode_name);
+    } else if (self.match(.Token_Forward)) {
         hotkey.set_wildcard_forwarded(try self.parse_keypress());
     } else if (self.match(.Token_Command)) {
         try hotkey.set_wildcard_command(self.previous().text);
@@ -161,9 +172,6 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     const name = token.text;
     const mode = try mappings.get_mode_or_create_default(name) orelse return error.@"Mode not found";
     try hotkey.add_mode(mode);
-    // print("\tmode: '{s}'\n", .{name});
-
-    // const token1 = self.advance_token() orelse return error.@"Expected token";
     if (self.match(.Token_Comma)) {
         if (self.match(.Token_Identifier)) {
             try self.parse_mode(mappings, hotkey);
@@ -197,7 +205,6 @@ fn parse_key(self: *Parser) !u32 {
     const token = self.previous();
     const key = token.text;
     const keycode = try self.keycodes.get_keycode(key);
-    // print("\tkey: '{s}' (0x{x:0>2})\n", .{ key, keycode });
     return keycode;
 }
 

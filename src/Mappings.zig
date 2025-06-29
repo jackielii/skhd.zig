@@ -111,6 +111,19 @@ pub fn get_mode_or_create_default(self: *Mappings, mode_name: []const u8) !?*Mod
     return self.mode_map.getPtr(mode_name);
 }
 
+pub fn get_or_create_mode(self: *Mappings, mode_name: []const u8) !*Mode {
+    const key = try self.allocator.dupe(u8, mode_name);
+    errdefer self.allocator.free(key);
+    const mode_value = try self.mode_map.getOrPut(self.allocator, key);
+    if (mode_value.found_existing) {
+        defer self.allocator.free(key);
+        return mode_value.value_ptr;
+    }
+    const mode = try Mode.init(self.allocator, key);
+    mode_value.value_ptr.* = mode;
+    return mode_value.value_ptr;
+}
+
 pub fn put_mode(self: *Mappings, mode: Mode) !void {
     const key = try self.allocator.dupe(u8, mode.name);
     errdefer self.allocator.free(key);

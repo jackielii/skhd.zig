@@ -13,9 +13,9 @@ pub fn enabled(self: *EventTap) bool {
 
 // pub const CGEventTapCallBack = ?*const fn (CGEventTapProxy, CGEventType, CGEventRef, ?*anyopaque) callconv(.c) CGEventRef;
 
-pub fn run(self: *EventTap, callback: c.CGEventTapCallBack) !void {
+pub fn run(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyopaque) !void {
     self.handle = c.CGEventTapCreate(c.kCGSessionEventTap, c.kCGHeadInsertEventTap, //
-        c.kCGEventTapOptionDefault, self.mask, callback, null);
+        c.kCGEventTapOptionDefault, self.mask, callback, user_info);
     if (self.enabled()) {
         self.runloop_source = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, self.handle, 0);
         c.CFRunLoopAddSource(c.CFRunLoopGetMain(), self.runloop_source, c.kCFRunLoopCommonModes);
@@ -55,5 +55,5 @@ test "EventTap" {
             return event;
         }
     };
-    try event_tap.run(callback.f);
+    try event_tap.run(callback.f, null);
 }

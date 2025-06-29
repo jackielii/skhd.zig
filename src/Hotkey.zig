@@ -74,6 +74,11 @@ pub fn create(allocator: std.mem.Allocator) !*Hotkey {
     const hotkey = try allocator.create(Hotkey);
     hotkey.* = .{
         .allocator = allocator,
+        .flags = ModifierFlag{},
+        .key = 0,
+        .process_names = .empty,
+        .commands = .empty,
+        .wildcard_command = null,
         .mode_list = .init(allocator),
     };
     return hotkey;

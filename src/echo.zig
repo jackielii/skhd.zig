@@ -1,7 +1,7 @@
 const std = @import("std");
 const EventTap = @import("EventTap.zig");
 
-const c = @cImport(@cInclude("Carbon/Carbon.h"));
+const c = @import("c.zig");
 
 extern fn NSApplicationLoad() void;
 
@@ -22,13 +22,13 @@ fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*
     switch (typ) {
         c.kCGEventKeyDown => return printKeydown(event) catch |err| {
             std.debug.print("Error: {}\n", .{err});
-            return null;
+            return @ptrFromInt(0);
         },
         // c.kCGEventFlagsChanged => printFlagsChanged(event),
         c.kCGEventLeftMouseDown, c.kCGEventRightMouseDown, c.kCGEventOtherMouseDown => {
             const button = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
             std.debug.print("Mouse button: {d}\n", .{button});
-            return null;
+            return @ptrFromInt(0);
         },
         else => {
             // std.debug.print("Event type: {any}\n", .{typ});
@@ -86,7 +86,7 @@ fn printKeydown(event: c.CGEventRef) !c.CGEventRef {
     // const s = std.mem.sliceTo(buffer[0..], 0);
     // std.debug.print("\t{s}\tkeycode: 0x{x:0<2}\n", .{ s, keycode });
 
-    return null;
+    return @ptrFromInt(0);
 }
 
 fn translateKey(buffer: *[255]u8, keyCode: u16, modifierState: u32) !void {

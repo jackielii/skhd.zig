@@ -1,0 +1,23 @@
+# Test process-specific hotkeys
+
+# Process-specific hotkey example
+# Different commands for different applications
+cmd - n [
+    "terminal" : echo "Terminal: New window"
+    "safari"   : echo "Safari: New window"
+    "finder"   : echo "Finder: New window"
+    *          : echo "Other app: New window"
+]
+
+# Another example with unbound keys
+cmd - q [
+    "terminal" ~ # Unbind Cmd+Q in Terminal
+    *          : echo "Quit command"
+]
+
+# Test forwarding in specific apps
+ctrl - d [
+    "terminal" | cmd - left
+    "kitty"   | ctrl - l
+    *          : echo "Ctrl+H in other apps"
+]

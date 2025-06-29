@@ -2,6 +2,8 @@
 
 Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiya/skhd) to zig.
 
+This implementation provides a fully functional hotkey daemon with modal support, process-specific bindings, key forwarding, and comprehensive configuration options.
+
 ## Completed
 - [x] Basic tokenizer and parser
 - [x] Event tap creation
@@ -15,12 +17,13 @@ Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiy
 - [x] Basic verbose output (`-V`)
 - [x] Observe mode (`-o`)
 - [x] Config file specification (`-c`)
+- [x] Process name detection for active window
+- [x] Process-specific hotkey support
+- [x] Key forwarding/remapping (`|` operator)
 
 ## TODO
 
 ### Core Functionality
-- [ ] Implement process-specific hotkey support
-- [ ] Add process name detection for active window
 
 ### Command-Line Features
 - [x] `--version` / `-v` - Display version
@@ -57,7 +60,6 @@ Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiy
 - [ ] Hyper and Meh modifier support
 - [ ] Function key modifier
 - [ ] Media key support (brightness, volume, playbook)
-- [ ] Key forwarding/remapping (`|` operator)
 - [x] Passthrough mode (`->` operator)
 - [ ] Wildcard commands (`*` in process lists)
 - [ ] Unbound keys (`~` operator)
@@ -70,7 +72,6 @@ Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiy
 - [ ] Symlink resolution
 
 ### System Integration
-- [ ] Process name detection for active window
 - [ ] Application switching detection
 - [ ] Keyboard layout change handling
 - [ ] Secure keyboard entry detection

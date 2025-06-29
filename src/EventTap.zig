@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @cImport(@cInclude("Carbon/Carbon.h"));
+const c = @import("c.zig");
 
 handle: c.CFMachPortRef = null,
 runloop_source: c.CFRunLoopSourceRef = null,

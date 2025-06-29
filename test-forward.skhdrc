@@ -1,0 +1,17 @@
+# Test key forwarding/remapping
+
+# Simple key forwarding - remap Ctrl+H to Left Arrow
+ctrl - h | left
+
+# Process-specific forwarding - only in Terminal
+ctrl - j [
+    "terminal" | down
+    *          : echo "Ctrl+J in other apps"
+]
+
+# Test multiple forwarding options
+ctrl - k [
+    "terminal" | up
+    "safari"   | cmd - up
+    *          | shift - up
+]

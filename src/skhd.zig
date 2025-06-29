@@ -5,7 +5,7 @@ const Parser = @import("Parser.zig");
 const Hotkey = @import("Hotkey.zig");
 const Mode = @import("Mode.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
-const c = @cImport(@cInclude("Carbon/Carbon.h"));
+const c = @import("c.zig");
 
 const Skhd = @This();
 
@@ -123,8 +123,9 @@ fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
 
     // Then check for regular hotkey execution
     if (try self.findAndExecHotkey(&eventkey)) {
-        // Hotkey was handled, consume the event
-        return null;
+        // Hotkey was handled, consume the event by returning null
+        // In Zig, we need to cast this properly for the C callback
+        return @ptrFromInt(0);
     }
 
     return event;
@@ -144,7 +145,7 @@ fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     var eventkey: Hotkey.KeyPress = undefined;
     if (interceptSystemKey(event, &eventkey)) {
         if (try self.findAndExecHotkey(&eventkey)) {
-            return null;
+            return @ptrFromInt(0);
         }
     }
 
@@ -205,11 +206,101 @@ fn interceptSystemKey(event: c.CGEventRef, eventkey: *Hotkey.KeyPress) bool {
     return result;
 }
 
+fn forwardKey(target_key: Hotkey.KeyPress, original_event: c.CGEventRef) !bool {
+    // Modify the original event directly (like the original skhd implementation)
+    // This prevents the original key from being sent and sends the target key instead
+    
+    // Set the new keycode
+    c.CGEventSetIntegerValueField(original_event, c.kCGKeyboardEventKeycode, @intCast(target_key.key));
+    
+    // Set the new modifier flags
+    const target_flags = hotkeyFlagsToCGEventFlags(target_key.flags);
+    c.CGEventSetFlags(original_event, target_flags);
+    
+    return true;
+}
+
+fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
+    var flags: c.CGEventFlags = 0;
+    
+    if (hotkey_flags.cmd) {
+        flags |= c.kCGEventFlagMaskCommand;
+    }
+    if (hotkey_flags.alt) {
+        flags |= c.kCGEventFlagMaskAlternate;
+    }
+    if (hotkey_flags.control) {
+        flags |= c.kCGEventFlagMaskControl;
+    }
+    if (hotkey_flags.shift) {
+        flags |= c.kCGEventFlagMaskShift;
+    }
+    if (hotkey_flags.@"fn") {
+        flags |= c.kCGEventFlagMaskSecondaryFn;
+    }
+    
+    return flags;
+}
+
 fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef) !bool {
-    // TODO: Implement key forwarding
-    _ = self;
-    _ = eventkey;
-    _ = event;
+    // Create a temporary hotkey struct for lookup
+    var lookup_hotkey = try Hotkey.create(self.allocator);
+    defer lookup_hotkey.destroy();
+    
+    lookup_hotkey.key = eventkey.key;
+    lookup_hotkey.flags = eventkey.flags;
+
+    // Look up hotkey in current mode
+    const mode = self.current_mode orelse return false;
+    
+    // Find matching hotkey in the mode
+    var found_hotkey: ?*Hotkey = null;
+    var it = mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (Hotkey.eql(hotkey, lookup_hotkey)) {
+            found_hotkey = hotkey;
+            break;
+        }
+    }
+    
+    if (found_hotkey) |hotkey| {
+        // Get current process name
+        const process_name = try getCurrentProcessName(self.allocator);
+        defer self.allocator.free(process_name);
+        
+        // Check for forwarded key in process-specific commands
+        for (hotkey.process_names.items, 0..) |proc_name, i| {
+            if (std.mem.eql(u8, proc_name, process_name)) {
+                if (i < hotkey.commands.items.len) {
+                    switch (hotkey.commands.items[i]) {
+                        .forwarded => |target_key| {
+                            if (self.verbose) {
+                                std.debug.print("skhd: forwarding key for process '{s}'\n", .{process_name});
+                            }
+                            return try forwardKey(target_key, event);
+                        },
+                        else => {}, // Not a forwarded key
+                    }
+                }
+                break;
+            }
+        }
+        
+        // Check wildcard forwarding
+        if (hotkey.wildcard_command) |wildcard| {
+            switch (wildcard) {
+                .forwarded => |target_key| {
+                    if (self.verbose) {
+                        std.debug.print("skhd: forwarding key (wildcard)\n", .{});
+                    }
+                    return try forwardKey(target_key, event);
+                },
+                else => {}, // Not a forwarded key
+            }
+        }
+    }
+    
     return false;
 }
 
@@ -243,6 +334,10 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
         // Get current process name for process-specific commands
         const process_name = try getCurrentProcessName(self.allocator);
         defer self.allocator.free(process_name);
+        
+        if (self.verbose) {
+            std.debug.print("skhd: current process name: '{s}'\n", .{process_name});
+        }
 
         // Check for mode activation
         if (hotkey.flags.activate) {
@@ -304,13 +399,33 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
 
         // Check process-specific commands
         for (hotkey.process_names.items, 0..) |proc_name, i| {
+            if (self.verbose) {
+                std.debug.print("skhd: checking process '{s}' against current '{s}'\n", .{proc_name, process_name});
+            }
             if (std.mem.eql(u8, proc_name, process_name)) {
+                if (self.verbose) {
+                    std.debug.print("skhd: process match found for '{s}'\n", .{process_name});
+                }
                 if (i < hotkey.commands.items.len) {
                     switch (hotkey.commands.items[i]) {
-                        .command => |cmd| command_to_exec = cmd,
-                        .unbound => return false, // Unbound key
-                        .forwarded => {
-                            // TODO: Handle forwarded keys
+                        .command => |cmd| {
+                            command_to_exec = cmd;
+                            if (self.verbose) {
+                                std.debug.print("skhd: using process-specific command: '{s}'\n", .{cmd});
+                            }
+                        },
+                        .unbound => {
+                            if (self.verbose) {
+                                std.debug.print("skhd: key is unbound for process '{s}'\n", .{process_name});
+                            }
+                            return false; // Unbound key
+                        },
+                        .forwarded => |_| {
+                            if (self.verbose) {
+                                std.debug.print("skhd: forwarding key for process '{s}'\n", .{process_name});
+                            }
+                            // Note: We should only reach here if findAndForwardHotkey didn't handle it
+                            // This shouldn't happen with current logic, but handling for completeness
                             return false;
                         },
                     }
@@ -325,8 +440,11 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                 switch (wildcard) {
                     .command => |cmd| command_to_exec = cmd,
                     .unbound => return false,
-                    .forwarded => {
-                        // TODO: Handle forwarded keys
+                    .forwarded => |_| {
+                        if (self.verbose) {
+                            std.debug.print("skhd: forwarding key (wildcard)\n", .{});
+                        }
+                        // Note: We should only reach here if findAndForwardHotkey didn't handle it
                         return false;
                     },
                 }
@@ -356,6 +474,41 @@ fn executeCommand(allocator: std.mem.Allocator, shell: []const u8, command: []co
 }
 
 fn getCurrentProcessName(allocator: std.mem.Allocator) ![]const u8 {
-    // TODO: Implement actual process name detection
-    return try allocator.dupe(u8, "unknown");
+    var psn: c.ProcessSerialNumber = undefined;
+    
+    // Get the frontmost process
+    const status = c.GetFrontProcess(&psn);
+    if (status != c.noErr) {
+        return try allocator.dupe(u8, "unknown");
+    }
+    
+    // Get the process name
+    var process_name_ref: c.CFStringRef = undefined;
+    const copy_status = c.CopyProcessName(&psn, &process_name_ref);
+    if (copy_status != c.noErr) {
+        return try allocator.dupe(u8, "unknown");
+    }
+    defer c.CFRelease(process_name_ref);
+    
+    // Convert CFString to C string
+    const max_size = c.CFStringGetMaximumSizeForEncoding(c.CFStringGetLength(process_name_ref), c.kCFStringEncodingUTF8);
+    var buffer = try allocator.alloc(u8, @intCast(max_size + 1));
+    defer allocator.free(buffer);
+    
+    const success = c.CFStringGetCString(process_name_ref, buffer.ptr, @intCast(buffer.len), c.kCFStringEncodingUTF8);
+    if (success == 0) {
+        return try allocator.dupe(u8, "unknown");
+    }
+    
+    // Find the actual length of the string
+    const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
+    const name = buffer[0..c_string_len];
+    
+    // Convert to lowercase to match original skhd behavior
+    var result = try allocator.alloc(u8, name.len);
+    for (name, 0..) |char, i| {
+        result[i] = std.ascii.toLower(char);
+    }
+    
+    return result;
 }

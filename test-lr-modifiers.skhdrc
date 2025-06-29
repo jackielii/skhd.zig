@@ -1,0 +1,27 @@
+# Test left/right modifier distinction
+
+# General modifiers (should match any side)
+cmd - a : echo "CMD+A: General command key (matches lcmd or rcmd)"
+alt - b : echo "ALT+B: General alt key (matches lalt or ralt)"
+shift - c : echo "SHIFT+C: General shift key (matches lshift or rshift)"
+ctrl - d : echo "CTRL+D: General control key (matches lctrl or rctrl)"
+
+# Left-specific modifiers
+lcmd - e : echo "LCMD+E: Left command key only"
+lalt - f : echo "LALT+F: Left alt key only"
+lshift - g : echo "LSHIFT+G: Left shift key only"
+lctrl - h : echo "LCTRL+H: Left control key only"
+
+# Right-specific modifiers
+rcmd - i : echo "RCMD+I: Right command key only"
+ralt - j : echo "RALT+J: Right alt key only"
+rshift - k : echo "RSHIFT+K: Right shift key only"
+rctrl - l : echo "RCTRL+L: Right control key only"
+
+# Mixed combinations
+lcmd + ralt - m : echo "LCMD+RALT+M: Left command + right alt"
+lshift + rcmd - n : echo "LSHIFT+RCMD+N: Left shift + right command"
+
+# Test hyper and meh
+hyper - space : echo "HYPER+SPACE: Hyper key (cmd+alt+shift+ctrl)"
+meh - return : echo "MEH+RETURN: Meh key (alt+shift+ctrl)"

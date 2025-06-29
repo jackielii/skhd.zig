@@ -20,6 +20,7 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [x] Process name detection for active window
 - [x] Process-specific hotkey support
 - [x] Key forwarding/remapping (`|` operator)
+- [x] Left/right modifier distinction (lcmd, rcmd, etc.)
 
 ## TODO
 
@@ -56,7 +57,6 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [ ] Config file error reporting with line numbers
 
 ### Hotkey Features
-- [ ] Left/right modifier distinction (lcmd, rcmd, etc.)
 - [ ] Hyper and Meh modifier support
 - [ ] Function key modifier
 - [ ] Media key support (brightness, volume, playbook)

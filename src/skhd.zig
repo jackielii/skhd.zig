@@ -162,20 +162,72 @@ fn createEventKey(event: c.CGEventRef) Hotkey.KeyPress {
 fn cgeventFlagsToHotkeyFlags(event_flags: c.CGEventFlags) ModifierFlag {
     var flags = ModifierFlag{};
 
-    // Check for modifiers
+    // Implement left/right modifier distinction like original skhd
+    // Alt/Option modifiers
     if (event_flags & c.kCGEventFlagMaskAlternate != 0) {
-        // TODO: Add left/right distinction
-        flags.alt = true;
+        const left_alt = (event_flags & 0x00000020) != 0;   // Event_Mask_LAlt
+        const right_alt = (event_flags & 0x00000040) != 0;  // Event_Mask_RAlt
+        
+        if (left_alt) {
+            flags.lalt = true;
+        }
+        if (right_alt) {
+            flags.ralt = true;
+        }
+        if (!left_alt and !right_alt) {
+            flags.alt = true;
+        }
     }
+    
+    // Shift modifiers
     if (event_flags & c.kCGEventFlagMaskShift != 0) {
-        flags.shift = true;
+        const left_shift = (event_flags & 0x00000002) != 0;   // Event_Mask_LShift
+        const right_shift = (event_flags & 0x00000004) != 0;  // Event_Mask_RShift
+        
+        if (left_shift) {
+            flags.lshift = true;
+        }
+        if (right_shift) {
+            flags.rshift = true;
+        }
+        if (!left_shift and !right_shift) {
+            flags.shift = true;
+        }
     }
+    
+    // Command modifiers
     if (event_flags & c.kCGEventFlagMaskCommand != 0) {
-        flags.cmd = true;
+        const left_cmd = (event_flags & 0x00000008) != 0;   // Event_Mask_LCmd
+        const right_cmd = (event_flags & 0x00000010) != 0;  // Event_Mask_RCmd
+        
+        if (left_cmd) {
+            flags.lcmd = true;
+        }
+        if (right_cmd) {
+            flags.rcmd = true;
+        }
+        if (!left_cmd and !right_cmd) {
+            flags.cmd = true;
+        }
     }
+    
+    // Control modifiers
     if (event_flags & c.kCGEventFlagMaskControl != 0) {
-        flags.control = true;
+        const left_ctrl = (event_flags & 0x00000001) != 0;   // Event_Mask_LControl
+        const right_ctrl = (event_flags & 0x00002000) != 0;  // Event_Mask_RControl
+        
+        if (left_ctrl) {
+            flags.lcontrol = true;
+        }
+        if (right_ctrl) {
+            flags.rcontrol = true;
+        }
+        if (!left_ctrl and !right_ctrl) {
+            flags.control = true;
+        }
     }
+    
+    // Function key modifier
     if (event_flags & c.kCGEventFlagMaskSecondaryFn != 0) {
         flags.@"fn" = true;
     }
@@ -223,18 +275,51 @@ fn forwardKey(target_key: Hotkey.KeyPress, original_event: c.CGEventRef) !bool {
 fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
     var flags: c.CGEventFlags = 0;
     
-    if (hotkey_flags.cmd) {
+    // Handle command modifiers (general, left, right)
+    if (hotkey_flags.cmd or hotkey_flags.lcmd or hotkey_flags.rcmd) {
         flags |= c.kCGEventFlagMaskCommand;
+        if (hotkey_flags.lcmd) {
+            flags |= 0x00000008; // Event_Mask_LCmd
+        }
+        if (hotkey_flags.rcmd) {
+            flags |= 0x00000010; // Event_Mask_RCmd
+        }
     }
-    if (hotkey_flags.alt) {
+    
+    // Handle alt modifiers (general, left, right)
+    if (hotkey_flags.alt or hotkey_flags.lalt or hotkey_flags.ralt) {
         flags |= c.kCGEventFlagMaskAlternate;
+        if (hotkey_flags.lalt) {
+            flags |= 0x00000020; // Event_Mask_LAlt
+        }
+        if (hotkey_flags.ralt) {
+            flags |= 0x00000040; // Event_Mask_RAlt
+        }
     }
-    if (hotkey_flags.control) {
+    
+    // Handle control modifiers (general, left, right)
+    if (hotkey_flags.control or hotkey_flags.lcontrol or hotkey_flags.rcontrol) {
         flags |= c.kCGEventFlagMaskControl;
+        if (hotkey_flags.lcontrol) {
+            flags |= 0x00000001; // Event_Mask_LControl
+        }
+        if (hotkey_flags.rcontrol) {
+            flags |= 0x00002000; // Event_Mask_RControl
+        }
     }
-    if (hotkey_flags.shift) {
+    
+    // Handle shift modifiers (general, left, right)
+    if (hotkey_flags.shift or hotkey_flags.lshift or hotkey_flags.rshift) {
         flags |= c.kCGEventFlagMaskShift;
+        if (hotkey_flags.lshift) {
+            flags |= 0x00000002; // Event_Mask_LShift
+        }
+        if (hotkey_flags.rshift) {
+            flags |= 0x00000004; // Event_Mask_RShift
+        }
     }
+    
+    // Function key modifier
     if (hotkey_flags.@"fn") {
         flags |= c.kCGEventFlagMaskSecondaryFn;
     }

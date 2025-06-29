@@ -7,24 +7,29 @@ Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiy
 - [x] Event tap creation
 - [x] Core data structures (Hotkey, Mode, Mappings)
 - [x] Packed structs and unmanaged collections
+- [x] Main entry point with command-line argument parsing
+- [x] Keyboard event handling in EventTap callback
+- [x] Hotkey matching and command execution
+- [x] Shell command execution
+- [x] Modal system with mode switching (`;` syntax)
+- [x] Basic verbose output (`-V`)
+- [x] Observe mode (`-o`)
+- [x] Config file specification (`-c`)
 
 ## TODO
 
 ### Core Functionality
-- [ ] Complete main entry point with command-line argument parsing
-- [ ] Implement actual keyboard event handling in EventTap callback
-- [ ] Add hotkey matching and command execution
 - [ ] Implement process-specific hotkey support
-- [ ] Add actual shell command execution
+- [ ] Add process name detection for active window
 
 ### Command-Line Features
-- [ ] `--version` / `-v` - Display version
-- [ ] `--help` - Show usage information
-- [ ] `-c` / `--config` - Specify config file location
-- [ ] `-o` / `--observe` - Observe mode (echo keycodes)
+- [x] `--version` / `-v` - Display version
+- [x] `--help` - Show usage information
+- [x] `-c` / `--config` - Specify config file location
+- [x] `-o` / `--observe` - Observe mode (echo keycodes)
+- [x] `-V` / `--verbose` - Debug output
 - [ ] `-k` / `--key` - Synthesize keypress
 - [ ] `-t` / `--text` - Synthesize text input
-- [ ] `-V` / `--verbose` - Debug output
 - [ ] `-P` / `--profile` - Profiling output
 - [ ] `-r` / `--reload` - Signal reload to running instance
 - [ ] `-h` / `--no-hotload` - Disable hotloading
@@ -41,19 +46,19 @@ Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiy
 ### Configuration Features
 - [ ] Default config file resolution (`~/.skhdrc`, `~/.config/skhd/skhdrc`)
 - [ ] `.load` directive for including other config files
-- [ ] `.blacklist` directive for application blacklisting
-- [ ] `.shell` directive for custom shell (currently hardcoded)
-- [ ] Modal activation commands
-- [ ] Capture mode (`@` modifier) for modes
+- [x] `.blacklist` directive for application blacklisting
+- [ ] `.shell` directive for custom shell
+- [x] Modal activation commands
+- [x] Capture mode (`@` modifier) for modes
 - [ ] Config file error reporting with line numbers
 
 ### Hotkey Features
 - [ ] Left/right modifier distinction (lcmd, rcmd, etc.)
 - [ ] Hyper and Meh modifier support
 - [ ] Function key modifier
-- [ ] Media key support (brightness, volume, playback)
+- [ ] Media key support (brightness, volume, playbook)
 - [ ] Key forwarding/remapping (`|` operator)
-- [ ] Passthrough mode (`->` operator)
+- [x] Passthrough mode (`->` operator)
 - [ ] Wildcard commands (`*` in process lists)
 - [ ] Unbound keys (`~` operator)
 - [ ] System-defined key events (NX_SYSDEFINED)

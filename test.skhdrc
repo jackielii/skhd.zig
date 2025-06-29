@@ -1,0 +1,159 @@
+# Test configuration for skhd.zig
+# This file tests various features of the hotkey daemon
+
+# Blacklist some applications where hotkeys should not work
+.blacklist [
+    "screencapture"
+    "loginwindow"
+]
+
+#############################################
+# Basic Hotkeys
+#############################################
+
+# Single modifier hotkeys
+cmd - a : echo "CMD+A: Testing single modifier"
+ctrl - b : echo "CTRL+B: Control key test"
+alt - c : echo "ALT+C: Alt/Option key test"
+shift - d : echo "SHIFT+D: Shift key test"
+
+# Multiple modifier combinations
+shift + cmd - e : echo "SHIFT+CMD+E: Multiple modifiers"
+ctrl + alt - f : echo "CTRL+ALT+F: Control+Alt combo"
+cmd + alt - g : echo "CMD+ALT+G: Command+Alt combo"
+ctrl + shift - h : echo "CTRL+SHIFT+H: Control+Shift combo"
+
+# Special keys
+cmd - space : echo "CMD+SPACE: Space key"
+cmd - return : echo "CMD+RETURN: Return/Enter key"
+cmd - tab : echo "CMD+TAB: Tab key"
+cmd - escape : echo "CMD+ESCAPE: Escape key"
+cmd - delete : echo "CMD+DELETE: Delete/Backspace key"
+
+# Arrow keys
+cmd - left : echo "CMD+LEFT: Left arrow"
+cmd - right : echo "CMD+RIGHT: Right arrow"
+cmd - up : echo "CMD+UP: Up arrow"
+cmd - down : echo "CMD+DOWN: Down arrow"
+
+# Function keys
+cmd - f1 : echo "CMD+F1: Function key 1"
+cmd - f2 : echo "CMD+F2: Function key 2"
+cmd - f12 : echo "CMD+F12: Function key 12"
+
+# Number keys
+cmd - 1 : echo "CMD+1: Number 1"
+cmd - 2 : echo "CMD+2: Number 2"
+cmd - 0 : echo "CMD+0: Number 0"
+
+#############################################
+# Modal System Tests
+#############################################
+
+# Test mode with capture (@)
+:: test @ : echo ">>> Entering TEST mode (capture enabled)"
+cmd - t ; test
+
+# In test mode - basic keys work without modifiers due to @ capture
+test < q : echo "TEST mode: Q key (captured)"
+test < w : echo "TEST mode: W key (captured)"
+test < e : echo "TEST mode: E key (captured)"
+test < escape ; default
+
+# Window management mode
+:: window : echo ">>> Entering WINDOW mode"
+cmd - w ; window
+
+window < h : echo "WINDOW: Focus left"
+window < j : echo "WINDOW: Focus down"
+window < k : echo "WINDOW: Focus up"
+window < l : echo "WINDOW: Focus right"
+
+# Resize submode
+window < r : echo "WINDOW: Resize submode"
+window < m : echo "WINDOW: Move submode"
+window < f : echo "WINDOW: Fullscreen toggle"
+
+window < escape ; default
+
+# Launch mode for applications
+:: launch : echo ">>> Entering LAUNCH mode"
+cmd - o ; launch
+
+launch < t : echo "LAUNCH: Terminal"
+launch < b : echo "LAUNCH: Browser"
+launch < e : echo "LAUNCH: Editor"
+launch < escape ; default
+
+#############################################
+# Passthrough Mode Tests
+#############################################
+
+# These will pass the key through after executing command
+cmd - p -> : echo "CMD+P: Passthrough test - key will still be sent"
+cmd + shift - p -> : echo "CMD+SHIFT+P: Passthrough with modifiers"
+
+#############################################
+# Key Forwarding Tests (TODO)
+#############################################
+
+# Remap keys to other keys
+# ctrl - h | cmd - left  # Remap Ctrl+H to Cmd+Left
+# ctrl - l | cmd - right # Remap Ctrl+L to Cmd+Right
+
+#############################################
+# Process-Specific Hotkeys (TODO)
+#############################################
+
+# Different commands for different applications
+# cmd - n [
+#     "Terminal" : echo "Terminal: New window"
+#     "Safari"   : echo "Safari: New window"
+#     "Finder"   : echo "Finder: New window"
+#     *          : echo "Other app: New window"
+# ]
+
+# Unbind keys in specific apps
+# cmd - q [
+#     "Terminal" ~ # Unbind Cmd+Q in Terminal
+#     *          : echo "Quit command"
+# ]
+
+#############################################
+# Complex Examples
+#############################################
+
+# Vim-like mode
+:: vim : echo ">>> VIM mode activated"
+cmd - v ; vim
+
+vim < h : echo "VIM: Move left"
+vim < j : echo "VIM: Move down"
+vim < k : echo "VIM: Move up"
+vim < l : echo "VIM: Move right"
+
+vim < i : echo "VIM: Insert mode"; skhd -k "escape"
+vim < a : echo "VIM: Append mode"; skhd -k "escape"
+vim < o : echo "VIM: Open line below"; skhd -k "escape"
+
+vim < shift - g : echo "VIM: Go to end"
+vim < g ; vim_g
+vim < escape ; default
+
+# Vim g-prefix commands
+:: vim_g : echo ">>> VIM G-prefix mode"
+vim_g < g : echo "VIM: Go to beginning"; skhd -k "escape"
+vim_g < escape ; vim
+
+#############################################
+# Testing Edge Cases
+#############################################
+
+# Very long command
+cmd - x : echo "This is a very long command that tests whether the command parsing and execution can handle longer strings without any issues"
+
+# Command with special characters
+cmd - y : echo "Special chars: $HOME | grep test && echo 'done' || echo 'failed'"
+
+# Multiple commands (using semicolon in shell)
+cmd - z : echo "First command"; echo "Second command"; echo "Third command"

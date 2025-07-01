@@ -261,7 +261,8 @@ test "format hotkey" {
     const string = try std.fmt.allocPrint(alloc, "{s}", .{hotkey});
     defer alloc.free(string);
 
-    std.debug.print("{s}\n", .{string});
+    // Just verify formatting works
+    try std.testing.expect(string.len > 0);
 }
 
 test "hotkey map" {
@@ -274,20 +275,17 @@ test "hotkey map" {
     key1.flags = ModifierFlag{ .alt = true };
     key1.key = 0x2;
     try key1.add_process_name("notepad.exe");
-    std.debug.print("{}\n", .{key1});
 
     var key2 = try Hotkey.create(alloc);
     key2.flags = ModifierFlag{ .alt = true };
     key2.key = 0x2;
     defer key2.destroy();
-    std.debug.print("{}\n", .{key2});
 
     var key1d = try Hotkey.create(alloc);
     defer key1d.destroy();
     key1d.flags = ModifierFlag{ .cmd = true };
     key1d.key = 0x2;
     try key1d.add_process_name("notepad.exe");
-    std.debug.print("{}\n", .{key1d});
 
     try m.put(alloc, key1, {});
     try m.put(alloc, key2, {});

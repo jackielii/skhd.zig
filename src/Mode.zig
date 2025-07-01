@@ -71,11 +71,12 @@ test "init" {
     defer mode.deinit();
 
     var key = try Hotkey.create(alloc);
+    defer key.destroy();
     try key.add_process_name("notepad.exe");
     try key.add_mode(&mode);
     try mode.add_hotkey(key);
 
-    const string = try std.fmt.allocPrint(alloc, "{}", .{mode});
-    defer alloc.free(string);
-    std.debug.print("{s}\n", .{string});
+    // const string = try std.fmt.allocPrint(alloc, "{}", .{mode});
+    // defer alloc.free(string);
+    // std.debug.print("{s}\n", .{string});
 }

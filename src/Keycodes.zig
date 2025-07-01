@@ -82,7 +82,10 @@ pub const ModifierFlag = packed struct(u32) {
 
 test "format ModifierFlag" {
     const flag = ModifierFlag{ .alt = true, .shift = true };
-    std.debug.print("{s}", .{flag});
+    // Verify formatting works without printing
+    const formatted = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{flag});
+    defer std.testing.allocator.free(formatted);
+    try std.testing.expectEqualStrings("alt, shift", formatted);
 }
 
 const modifier_flags_map = std.StaticStringMap(ModifierFlag).initComptime(.{
@@ -264,10 +267,15 @@ test "init_keycode_map" {
     const alloc = std.testing.allocator;
     var self = try init(alloc);
     defer self.deinit();
-    var it = self.keymap_table.iterator();
-    while (it.next()) |kv| {
-        std.debug.print("{s}: {x}: 0x{x}\n", .{ kv.key_ptr.*, kv.key_ptr.*, kv.value_ptr.* });
-    }
+    
+    // Just verify the keymap was initialized with some expected values
+    try std.testing.expect(self.keymap_table.contains("a"));
+    try std.testing.expect(self.keymap_table.contains("1"));
+    try std.testing.expect(self.keymap_table.count() > 20); // Should have many keys
+    
+    // Verify literal keycodes exist in the arrays
+    try std.testing.expect(literal_keycode_str.len > 0);
+    try std.testing.expect(literal_keycode_value.len == literal_keycode_str.len);
 }
 
 test "ptrcast" {
@@ -283,11 +291,12 @@ test "ptrcast" {
     const ptr: [*:0]u8 = @ptrCast(buf.ptr);
     const sentinalSlice: [:0]const u8 = @ptrCast(buf);
 
-    std.debug.print("{s}\n", .{ptr});
-    std.debug.print("{s}\n", .{sentinalSlice.ptr});
+    // Verify the cast worked correctly
+    try std.testing.expectEqualStrings("abc", ptr[0..3]);
+    try std.testing.expectEqualStrings("abc", sentinalSlice[0..3]);
 
     const span = std.mem.sliceTo(buf, 0);
-    std.debug.print("{s}\n", .{span});
+    try std.testing.expectEqualStrings("abc", span);
     // alloc.free(span);
     // alloc.free(ptr);
 }

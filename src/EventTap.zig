@@ -36,24 +36,25 @@ pub fn deinit(self: *EventTap) void {
     }
 }
 
-test "EventTap" {
-    var event_tap = EventTap{ .mask = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED) };
-    defer event_tap.deinit();
+// This test would block forever as it runs an actual event tap
+// test "EventTap" {
+//     var event_tap = EventTap{ .mask = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED) };
+//     defer event_tap.deinit();
 
-    const callback = struct {
-        fn f(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {
-            _ = proxy;
-            if (typ == c.kCGEventKeyDown) {
-                const keycode = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode);
-                const flags = c.CGEventGetFlags(event);
-                // Control + C
-                if (keycode == c.kVK_ANSI_C and flags & c.kCGEventFlagMaskControl != 0) {
-                    std.process.exit(0);
-                }
-            }
-            std.debug.print("Event: {any}\n", .{event.?});
-            return event;
-        }
-    };
-    try event_tap.run(callback.f, null);
-}
+//     const callback = struct {
+//         fn f(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {
+//             _ = proxy;
+//             if (typ == c.kCGEventKeyDown) {
+//                 const keycode = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode);
+//                 const flags = c.CGEventGetFlags(event);
+//                 // Control + C
+//                 if (keycode == c.kVK_ANSI_C and flags & c.kCGEventFlagMaskControl != 0) {
+//                     std.process.exit(0);
+//                 }
+//             }
+//             std.debug.print("Event: {any}\n", .{event.?});
+//             return event;
+//         }
+//     };
+//     try event_tap.run(callback.f, null);
+// }

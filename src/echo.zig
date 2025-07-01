@@ -135,7 +135,7 @@ fn translateKey(buffer: *[255]u8, keyCode: u16, modifierState: u32) !void {
     }
 }
 
-fn strForKey(keyCode: i64) []const u8 {
+pub fn strForKey(keyCode: i64) []const u8 {
     return switch (keyCode) {
         0 => "a",
         1 => "s",

@@ -145,7 +145,10 @@ test "format" {
     const alloc = std.testing.allocator;
     var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
-    _ = try mappings.get_mode_or_create_default("default");
-    std.debug.print("{}\n", .{mappings});
-    // try std.json.stringify(mappings, .{ .whitespace = .indent_2 }, string.writer());
+    const mode = try mappings.get_mode_or_create_default("default");
+    // Just verify the formatting doesn't crash
+    const formatted = try std.fmt.allocPrint(alloc, "{}", .{mappings});
+    defer alloc.free(formatted);
+    try std.testing.expect(formatted.len > 0);
+    try std.testing.expect(mode != null);
 }

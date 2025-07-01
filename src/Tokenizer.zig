@@ -315,21 +315,24 @@ test "acceptUntil" {
 }
 
 test "tokenize" {
-    const filename = "/Users/jackieli/.config/skhd/skhdrc";
-    const allocator = std.testing.allocator;
+    const test_content = "cmd - a : echo test";
 
-    print("Parsing file: {s}\n", .{filename});
-    const f = try std.fs.cwd().openFile(filename, .{});
-    defer f.close();
-
-    const content = try f.readToEndAlloc(allocator, 1 << 24); // max size 16MB
-    defer allocator.free(content);
-
-    var tokenizer = try init(content);
-    while (tokenizer.get_token()) |token| {
-        print("line: {d}, cursor: {d}, type: {any}, text: {s}\n", .{ token.line, token.cursor, token.type, token.text });
-        // _ = token;
-    }
+    var tokenizer = try init(test_content);
+    
+    // Just verify we can tokenize a simple hotkey
+    const token1 = tokenizer.get_token();
+    try std.testing.expect(token1 != null);
+    try std.testing.expectEqual(TokenType.Token_Modifier, token1.?.type);
+    try std.testing.expectEqualStrings("cmd", token1.?.text);
+    
+    const token2 = tokenizer.get_token();
+    try std.testing.expect(token2 != null);
+    try std.testing.expectEqual(TokenType.Token_Dash, token2.?.type);
+    
+    const token3 = tokenizer.get_token();
+    try std.testing.expect(token3 != null);
+    try std.testing.expectEqual(TokenType.Token_Key, token3.?.type);
+    try std.testing.expectEqualStrings("a", token3.?.text);
 }
 
 test "format token" {
@@ -339,5 +342,9 @@ test "format token" {
         .type = .Token_Identifier,
         .text = "hello",
     };
-    std.debug.print("{}\n", .{token});
+    // Just verify the token was created correctly
+    try std.testing.expectEqual(@as(usize, 1), token.line);
+    try std.testing.expectEqual(@as(usize, 1), token.cursor);
+    try std.testing.expectEqual(TokenType.Token_Identifier, token.type);
+    try std.testing.expectEqualStrings("hello", token.text);
 }

@@ -336,143 +336,32 @@ fn forwardKey(target_key: Hotkey.KeyPress, original_event: c.CGEventRef) !bool {
     return true;
 }
 
-/// Compare process names, ignoring invisible Unicode characters
-/// This avoids allocation by comparing in-place
-fn processNamesMatch(config_name: []const u8, actual_name: []const u8) bool {
-    // First try exact match
-    if (std.mem.eql(u8, config_name, actual_name)) return true;
-
-    // If actual_name starts with invisible chars, compare without them
-    var start: usize = 0;
-    while (start < actual_name.len) {
-        const char_len = std.unicode.utf8ByteSequenceLength(actual_name[start]) catch 1;
-        if (char_len == 1 and actual_name[start] < 0x20) {
-            // ASCII control character
-            start += 1;
-        } else if (char_len > 1) {
-            // Check for Unicode invisible characters
-            const codepoint = std.unicode.utf8Decode(actual_name[start..][0..char_len]) catch {
-                start += char_len;
-                continue;
-            };
-            // Common invisible Unicode characters
-            if (codepoint == 0x200E or // LEFT-TO-RIGHT MARK
-                codepoint == 0x200F or // RIGHT-TO-LEFT MARK
-                codepoint == 0x200B or // ZERO WIDTH SPACE
-                codepoint == 0x200C or // ZERO WIDTH NON-JOINER
-                codepoint == 0x200D or // ZERO WIDTH JOINER
-                codepoint == 0xFEFF) // ZERO WIDTH NO-BREAK SPACE
-            {
-                start += char_len;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    // If we trimmed something, try matching again
-    if (start > 0) {
-        return std.mem.eql(u8, config_name, actual_name[start..]);
-    }
-
-    return false;
-}
-
-/// Trim invisible/control characters from both ends of a string
-fn trimInvisibleChars(allocator: std.mem.Allocator, str: []const u8) ![]const u8 {
-    var start: usize = 0;
-    var end: usize = str.len;
-
-    // Trim from start
-    while (start < str.len) {
-        const char_len = std.unicode.utf8ByteSequenceLength(str[start]) catch 1;
-        if (char_len == 1 and str[start] < 0x20) {
-            // ASCII control character
-            start += 1;
-        } else if (char_len > 1) {
-            // Check for Unicode invisible characters
-            const codepoint = std.unicode.utf8Decode(str[start..][0..char_len]) catch {
-                start += char_len;
-                continue;
-            };
-            // Common invisible Unicode characters
-            if (codepoint == 0x200E or // LEFT-TO-RIGHT MARK
-                codepoint == 0x200F or // RIGHT-TO-LEFT MARK
-                codepoint == 0x200B or // ZERO WIDTH SPACE
-                codepoint == 0x200C or // ZERO WIDTH NON-JOINER
-                codepoint == 0x200D or // ZERO WIDTH JOINER
-                codepoint == 0xFEFF) // ZERO WIDTH NO-BREAK SPACE
-            {
-                start += char_len;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    // Trim from end
-    while (end > start) {
-        var char_start = end;
-        // Find start of last character
-        while (char_start > start and (str[char_start - 1] & 0xC0) == 0x80) {
-            char_start -= 1;
-        }
-        if (char_start > start) char_start -= 1;
-
-        const char_len = end - char_start;
-        if (char_len == 1 and str[char_start] < 0x20) {
-            // ASCII control character
-            end = char_start;
-        } else if (char_len > 1) {
-            // Check for Unicode invisible characters
-            const codepoint = std.unicode.utf8Decode(str[char_start..end]) catch {
-                break;
-            };
-            if (codepoint == 0x200E or // LEFT-TO-RIGHT MARK
-                codepoint == 0x200F or // RIGHT-TO-LEFT MARK
-                codepoint == 0x200B or // ZERO WIDTH SPACE
-                codepoint == 0x200C or // ZERO WIDTH NON-JOINER
-                codepoint == 0x200D or // ZERO WIDTH JOINER
-                codepoint == 0xFEFF) // ZERO WIDTH NO-BREAK SPACE
-            {
-                end = char_start;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    return allocator.dupe(u8, str[start..end]);
-}
-
 /// Compare hotkey flags, handling left/right modifier logic
+/// a = hotkey from config, b = event from keyboard
 fn hotkeyFlagsMatch(a_flags: ModifierFlag, b_flags: ModifierFlag) bool {
-    // Compare left/right modifiers like original skhd
-    const alt_match = ((a_flags.alt or a_flags.lalt or a_flags.ralt) ==
-        (b_flags.alt or b_flags.lalt or b_flags.ralt)) and
-        ((!a_flags.alt and !b_flags.alt) or
-            (a_flags.lalt == b_flags.lalt and a_flags.ralt == b_flags.ralt));
+    // Match logic from original skhd:
+    // If config has general modifier (alt), keyboard can have general, left, or right
+    // If config has specific modifier (lalt), keyboard must match exactly
 
-    const cmd_match = ((a_flags.cmd or a_flags.lcmd or a_flags.rcmd) ==
-        (b_flags.cmd or b_flags.lcmd or b_flags.rcmd)) and
-        ((!a_flags.cmd and !b_flags.cmd) or
-            (a_flags.lcmd == b_flags.lcmd and a_flags.rcmd == b_flags.rcmd));
+    const alt_match = if (a_flags.alt)
+        (b_flags.alt or b_flags.lalt or b_flags.ralt)
+    else
+        (a_flags.lalt == b_flags.lalt and a_flags.ralt == b_flags.ralt and a_flags.alt == b_flags.alt);
 
-    const ctrl_match = ((a_flags.control or a_flags.lcontrol or a_flags.rcontrol) ==
-        (b_flags.control or b_flags.lcontrol or b_flags.rcontrol)) and
-        ((!a_flags.control and !b_flags.control) or
-            (a_flags.lcontrol == b_flags.lcontrol and a_flags.rcontrol == b_flags.rcontrol));
+    const cmd_match = if (a_flags.cmd)
+        (b_flags.cmd or b_flags.lcmd or b_flags.rcmd)
+    else
+        (a_flags.lcmd == b_flags.lcmd and a_flags.rcmd == b_flags.rcmd and a_flags.cmd == b_flags.cmd);
 
-    const shift_match = ((a_flags.shift or a_flags.lshift or a_flags.rshift) ==
-        (b_flags.shift or b_flags.lshift or b_flags.rshift)) and
-        ((!a_flags.shift and !b_flags.shift) or
-            (a_flags.lshift == b_flags.lshift and a_flags.rshift == b_flags.rshift));
+    const ctrl_match = if (a_flags.control)
+        (b_flags.control or b_flags.lcontrol or b_flags.rcontrol)
+    else
+        (a_flags.lcontrol == b_flags.lcontrol and a_flags.rcontrol == b_flags.rcontrol and a_flags.control == b_flags.control);
+
+    const shift_match = if (a_flags.shift)
+        (b_flags.shift or b_flags.lshift or b_flags.rshift)
+    else
+        (a_flags.lshift == b_flags.lshift and a_flags.rshift == b_flags.rshift and a_flags.shift == b_flags.shift);
 
     return alt_match and cmd_match and ctrl_match and shift_match and
         a_flags.@"fn" == b_flags.@"fn" and
@@ -557,9 +446,8 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 
         // Check for forwarded key in process-specific commands
         for (hotkey.process_names.items, 0..) |proc_name, i| {
-            // Compare process names, handling invisible Unicode chars
-            const matches = processNamesMatch(proc_name, process_name);
-            if (matches) {
+            // Process name is already cleaned in getCurrentProcessNameBuf
+            if (std.mem.eql(u8, proc_name, process_name)) {
                 if (i < hotkey.commands.items.len) {
                     switch (hotkey.commands.items[i]) {
                         .forwarded => |target_key| {
@@ -673,9 +561,8 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
 
         // Check process-specific commands
         for (hotkey.process_names.items, 0..) |proc_name, i| {
-            // Compare process names, handling invisible Unicode chars
-            const matches = processNamesMatch(proc_name, process_name);
-            if (matches) {
+            // Process name is already cleaned in getCurrentProcessNameBuf
+            if (std.mem.eql(u8, proc_name, process_name)) {
                 if (i < hotkey.commands.items.len) {
                     switch (hotkey.commands.items[i]) {
                         .command => |cmd| {
@@ -805,48 +692,47 @@ fn getCurrentProcessNameBuf(buffer: []u8) ![]const u8 {
 
     // Find the actual length of the string
     const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
-    return buffer[0..c_string_len];
+    const raw_name = buffer[0..c_string_len];
+
+    // Trim invisible characters from the start
+    var start: usize = 0;
+    while (start < raw_name.len) {
+        const char_len = std.unicode.utf8ByteSequenceLength(raw_name[start]) catch 1;
+        if (char_len == 1 and raw_name[start] < 0x20) {
+            // ASCII control character
+            start += 1;
+        } else if (char_len > 1) {
+            // Check for Unicode invisible characters
+            const codepoint = std.unicode.utf8Decode(raw_name[start..][0..char_len]) catch {
+                start += char_len;
+                continue;
+            };
+            // Common invisible Unicode characters
+            if (codepoint == 0x200E or // LEFT-TO-RIGHT MARK
+                codepoint == 0x200F or // RIGHT-TO-LEFT MARK
+                codepoint == 0x200B or // ZERO WIDTH SPACE
+                codepoint == 0x200C or // ZERO WIDTH NON-JOINER
+                codepoint == 0x200D or // ZERO WIDTH JOINER
+                codepoint == 0xFEFF) // ZERO WIDTH NO-BREAK SPACE
+            {
+                start += char_len;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // If we trimmed, move the cleaned string to the beginning of the buffer
+    if (start > 0) {
+        std.mem.copyForwards(u8, buffer[0 .. raw_name.len - start], raw_name[start..]);
+        return buffer[0 .. raw_name.len - start];
+    }
+
+    return raw_name;
 }
 
-fn getCurrentProcessName(allocator: std.mem.Allocator) ![]const u8 {
-    var psn: c.ProcessSerialNumber = undefined;
-
-    // Get the frontmost process
-    const status = c.GetFrontProcess(&psn);
-    if (status != c.noErr) {
-        return try allocator.dupe(u8, "unknown");
-    }
-
-    // Get the process name
-    var process_name_ref: c.CFStringRef = undefined;
-    const copy_status = c.CopyProcessName(&psn, &process_name_ref);
-    if (copy_status != c.noErr) {
-        return try allocator.dupe(u8, "unknown");
-    }
-    defer c.CFRelease(process_name_ref);
-
-    // Convert CFString to C string
-    const max_size = c.CFStringGetMaximumSizeForEncoding(c.CFStringGetLength(process_name_ref), c.kCFStringEncodingUTF8);
-    var buffer = try allocator.alloc(u8, @intCast(max_size + 1));
-    defer allocator.free(buffer);
-
-    const success = c.CFStringGetCString(process_name_ref, buffer.ptr, @intCast(buffer.len), c.kCFStringEncodingUTF8);
-    if (success == 0) {
-        return try allocator.dupe(u8, "unknown");
-    }
-
-    // Find the actual length of the string
-    const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
-    const name = buffer[0..c_string_len];
-
-    // Convert to lowercase to match original skhd behavior
-    var result = try allocator.alloc(u8, name.len);
-    for (name, 0..) |char, i| {
-        result[i] = std.ascii.toLower(char);
-    }
-
-    return result;
-}
 /// Signal handler for SIGUSR1 - reload configuration
 fn handleSigusr1(_: c_int) callconv(.C) void {
     if (global_skhd) |skhd| {

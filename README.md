@@ -432,7 +432,10 @@ Key differences from the original:
 3. **Commit Changes**: Commit both the version and changelog updates
 4. **Create Tag**: Create an annotated tag: `git tag -a v0.0.X -m "Release v0.0.X"`
 5. **Push**: Push commits and tag: `git push origin main && git push origin v0.0.X`
-6. **Create Release**: GitHub Actions will automatically build binaries for both architectures
+6. **Create Release**: GitHub Actions will automatically:
+   - Build binaries for both architectures
+   - Upload artifacts to the release
+   - Update the Homebrew tap formula
 
 ### GitHub Actions
 
@@ -454,7 +457,7 @@ These binaries are automatically built and uploaded to GitHub Releases when a ne
 
 A Homebrew tap is available for easy installation:
 ```bash
-brew tap jackielii/tap
+brew tap jackielii/homebrew-tap
 brew install skhd-zig
 ```
 

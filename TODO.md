@@ -4,6 +4,14 @@ This file tracks features and improvements that are not yet implemented but coul
 
 ## Performance Optimizations
 
+### Critical Performance Issues
+- [ ] **High CPU usage investigation**: Current implementation uses ~1.6% CPU vs original's ~0.6% during repeated key presses
+  - Profile event handler callback overhead
+  - Investigate allocator usage in hot path
+  - Check for unnecessary string operations
+  - Optimize process name retrieval caching
+  - Review HashMap lookup performance
+
 ### Memory and CPU Optimizations
 - [ ] **SOA for process map**: Convert process mapping from array-of-structures to structure-of-arrays for better cache locality
 - [ ] **Profiling infrastructure**: Add timing/profiling infrastructure with `-P` flag support
@@ -149,8 +157,12 @@ This file tracks features and improvements that are not yet implemented but coul
 ## Implementation Priority
 
 ### High Priority (Performance & Stability)
-1. FSEvents-based file watching
-2. Profiling infrastructure
+1. **Performance profiling and optimization**: Implement comprehensive profiling to identify why our implementation uses ~1.6% CPU vs original's ~0.6%
+   - Add `-P` / `--profile` flag support
+   - Integrate with modern profiling tools (Tracy, Spall, or custom timing)
+   - Profile hot path (event handling, hotkey lookup, process name retrieval)
+   - Identify and optimize CPU-intensive operations
+2. FSEvents-based file watching
 3. Memory usage optimization
 4. Better error handling and recovery
 

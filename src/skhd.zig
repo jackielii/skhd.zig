@@ -566,28 +566,16 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
 fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
     // Log the command execution
     try self.logger.logInfo("Executing command: {s}", .{command});
-    
+
     const argv = [_][]const u8{ shell, "-c", command };
 
     var child = std.process.Child.init(&argv, self.allocator);
     child.stdin_behavior = .Ignore;
-    
-    // Redirect stdout and stderr to our log files
-    if (self.logger.out_file) |out_file| {
-        // Duplicate the file handle for the child process
-        const out_fd = try std.os.dup(out_file.handle);
-        child.stdout_behavior = .{ .Handle = out_fd };
-    } else {
-        child.stdout_behavior = .Ignore;
-    }
-    
-    if (self.logger.err_file) |err_file| {
-        // Duplicate the file handle for the child process
-        const err_fd = try std.os.dup(err_file.handle);
-        child.stderr_behavior = .{ .Handle = err_fd };
-    } else {
-        child.stderr_behavior = .Ignore;
-    }
+
+    // For now, ignore stdout/stderr since we're already logging the command
+    // TODO: In the future, we could capture output by using pipes
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
 
     try child.spawn();
     // Don't wait for the child to finish - let it run in background

@@ -130,8 +130,8 @@ pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
 }
 
 /// Log command execution with output
-/// Note: This is now mainly used for testing since actual command output
-/// is redirected directly to log files
+/// Note: This is currently only used for testing.
+/// TODO: Implement actual command output capture in skhd.zig
 pub fn logCommand(self: *Logger, command: []const u8, stdout: []const u8, stderr: []const u8) !void {
     try self.logInfo("Executing command: {s}", .{command});
 

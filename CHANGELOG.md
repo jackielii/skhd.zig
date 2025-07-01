@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2] - 2025-01-01
+
+### Fixed
+- Support for uppercase option names (.SHELL, .BLACKLIST) in configuration files
+- Improved error reporting to show parse errors with line numbers during initialization
+- Simplified release workflow to build natively for x86_64 (Apple Silicon users can build from source)
+
 ## [0.0.1] - 2025-01-01
 
 ### Added

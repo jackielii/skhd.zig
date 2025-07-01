@@ -22,8 +22,13 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, key_string: []const u8) !void
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
     
-    // Parse the key specification
-    try parser.parse(&mappings, key_string);
+    // For synthesis, we need to add a dummy command since the parser expects a complete hotkey
+    // The command won't be executed, we just need it for parsing
+    const key_with_command = try std.fmt.allocPrint(allocator, "{s} : __dummy__", .{key_string});
+    defer allocator.free(key_with_command);
+    
+    // Parse the key specification with dummy command
+    try parser.parse(&mappings, key_with_command);
     
     // Find the first hotkey that was parsed
     var mode_iter = mappings.mode_map.iterator();

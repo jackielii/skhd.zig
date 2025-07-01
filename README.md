@@ -24,6 +24,7 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [x] Key synthesis (-k option) for testing
 - [x] Text synthesis (-t option) for text input
 - [x] Comprehensive unit tests
+- [x] Logging facility with `/tmp/skhd_$USER.{out,err}.log`
 
 ## TODO
 

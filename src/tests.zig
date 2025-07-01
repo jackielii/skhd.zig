@@ -7,6 +7,7 @@ const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
+const Logger = @import("Logger.zig");
 
 test "ModifierFlag basic operations" {
     // Test basic flag creation
@@ -282,36 +283,36 @@ test "Blacklist parsing" {
 
 test "Shell option parsing" {
     const allocator = testing.allocator;
-    
+
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Default shell should be from environment or /bin/bash
     const initial_shell = mappings.shell;
     try testing.expect(initial_shell.len > 0);
-    
+
     var parser = try Parser.init(allocator);
     defer parser.deinit();
-    
+
     // Test parsing shell option
-    const config = 
+    const config =
         \\.shell "/usr/bin/env zsh"
         \\cmd - a : echo "test"
     ;
-    
+
     try parser.parse(&mappings, config);
-    
+
     // Shell should be updated
     try testing.expectEqualStrings("/usr/bin/env zsh", mappings.shell);
 }
 
 test "Shell from environment" {
     const allocator = testing.allocator;
-    
+
     // Test that SHELL env var is respected on init
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Should use SHELL env var if set, otherwise /bin/bash
     if (std.posix.getenv("SHELL")) |env_shell| {
         try testing.expectEqualStrings(env_shell, mappings.shell);
@@ -322,21 +323,21 @@ test "Shell from environment" {
 
 test "Config file resolution" {
     const allocator = testing.allocator;
-    
+
     // Test getting config file
     const getConfigFile = @import("main.zig").getConfigFile;
-    
+
     // This should resolve to a path based on environment
     const config_path = try getConfigFile(allocator, "skhdrc");
     defer allocator.free(config_path);
-    
+
     // Should be one of:
     // - $XDG_CONFIG_HOME/skhd/skhdrc
-    // - $HOME/.config/skhd/skhdrc  
+    // - $HOME/.config/skhd/skhdrc
     // - $HOME/.skhdrc
     // - skhdrc (in current dir)
     try testing.expect(config_path.len > 0);
-    
+
     // Test that the function returns a valid path
     if (std.posix.getenv("HOME")) |home| {
         // If we have HOME, the path should contain it or be the fallback
@@ -344,4 +345,63 @@ test "Config file resolution" {
         const is_fallback = std.mem.eql(u8, config_path, "skhdrc");
         try testing.expect(has_home or is_fallback);
     }
+}
+
+test "Logger file paths" {
+    const allocator = testing.allocator;
+
+    // Create unique test files
+    const test_id = std.crypto.random.int(u32);
+    const out_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.out.log", .{test_id});
+    defer allocator.free(out_path);
+    const err_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.err.log", .{test_id});
+    defer allocator.free(err_path);
+
+    // Create logger with unique files
+    var logger = try Logger.initWithPaths(allocator, false, out_path, err_path);
+    defer logger.deinit();
+
+    // Clean up test files
+    defer std.fs.deleteFileAbsolute(out_path) catch {};
+    defer std.fs.deleteFileAbsolute(err_path) catch {};
+
+    // Verify logger was created
+    try testing.expect(logger.out_file != null);
+    try testing.expect(logger.err_file != null);
+
+    // Test logging functions
+    try logger.logInfo("Test info message", .{});
+    try logger.logError("Test error message", .{});
+    try logger.logDebug("Test debug message", .{});
+
+    // Since verbose is false, debug should not be logged to stdout
+    // but the functions should not fail
+}
+
+test "Logger with verbose mode" {
+    const allocator = testing.allocator;
+
+    // Create unique test files
+    const test_id = std.crypto.random.int(u32);
+    const out_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.out.log", .{test_id});
+    defer allocator.free(out_path);
+    const err_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.err.log", .{test_id});
+    defer allocator.free(err_path);
+
+    // Create logger with verbose mode and unique files
+    var logger = try Logger.initWithPaths(allocator, true, out_path, err_path);
+    defer logger.deinit();
+
+    // Clean up test files
+    defer std.fs.deleteFileAbsolute(out_path) catch {};
+    defer std.fs.deleteFileAbsolute(err_path) catch {};
+
+    // Test various log operations
+    try logger.logInfo("Verbose info: {s}", .{"test"});
+    try logger.logError("Verbose error: {d}", .{42});
+    try logger.logDebug("Verbose debug: {any}", .{true});
+
+    // Test command logging
+    try logger.logCommand("echo 'hello'", "hello\nworld\n", "");
+    try logger.logCommand("false", "", "command failed\n");
 }

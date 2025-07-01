@@ -1,0 +1,2 @@
+# Test config to verify logging
+cmd - l : echo "Logging test successful!"

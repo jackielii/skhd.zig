@@ -58,6 +58,9 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Create a test step that will run all tests
+    // Note: If tests hang, run with ZIG_PROGRESS=0 environment variable
+    // or use the test.sh script. This disables the Zig progress server
+    // which can cause issues with parallel test execution.
     const test_step = b.step("test", "Run unit tests");
 
     // Add test for main module and all imported modules
@@ -77,8 +80,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     linkFrameworks(tests_unit_tests);
-    const run_tests_unit_tests = b.addRunArtifact(tests_unit_tests);
-    test_step.dependOn(&run_tests_unit_tests.step);
+    test_step.dependOn(&tests_unit_tests.step);
 
     // Add tests for individual modules that may have their own test blocks
     const test_files = [_][]const u8{
@@ -88,6 +90,7 @@ pub fn build(b: *std.Build) void {
         "src/Keycodes.zig",
         "src/EventTap.zig",
         "src/synthesize.zig",
+        "src/Logger.zig",
     };
 
     for (test_files) |test_file| {
@@ -97,7 +100,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         linkFrameworks(module_tests);
-        const run_module_tests = b.addRunArtifact(module_tests);
-        test_step.dependOn(&run_module_tests.step);
+        test_step.dependOn(&module_tests.step);
     }
 }

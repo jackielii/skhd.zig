@@ -5,6 +5,7 @@ const Parser = @import("Parser.zig");
 const Hotkey = @import("Hotkey.zig");
 const Mode = @import("Mode.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
+const Logger = @import("Logger.zig");
 const c = @import("c.zig");
 
 const Skhd = @This();
@@ -15,8 +16,15 @@ current_mode: ?*Mode = null,
 event_tap: EventTap,
 verbose: bool = false,
 config_file: []const u8,
+logger: Logger,
 
 pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool) !Skhd {
+    // Initialize logger first
+    var logger = try Logger.init(allocator, verbose);
+    errdefer logger.deinit();
+
+    try logger.logInfo("Initializing skhd with config: {s}", .{config_file});
+
     var mappings = try Mappings.init(allocator);
     errdefer mappings.deinit();
 
@@ -38,14 +46,27 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
         current_mode = mode;
     }
 
-    if (verbose) {
-        // Debug: print all modes
-        var mode_iter = mappings.mode_map.iterator();
-        std.debug.print("skhd: loaded modes: ", .{});
-        while (mode_iter.next()) |entry| {
-            std.debug.print("'{s}' ", .{entry.key_ptr.*});
+    // Log loaded modes
+    var mode_iter = mappings.mode_map.iterator();
+    var modes_list = std.ArrayList(u8).init(allocator);
+    defer modes_list.deinit();
+    while (mode_iter.next()) |entry| {
+        try modes_list.writer().print("'{s}' ", .{entry.key_ptr.*});
+    }
+    try logger.logInfo("Loaded modes: {s}", .{modes_list.items});
+
+    // Log shell configuration
+    try logger.logInfo("Using shell: {s}", .{mappings.shell});
+
+    // Log blacklisted applications
+    if (mappings.blacklist.count() > 0) {
+        var blacklist_iter = mappings.blacklist.keyIterator();
+        var blacklist_buf = std.ArrayList(u8).init(allocator);
+        defer blacklist_buf.deinit();
+        while (blacklist_iter.next()) |app| {
+            try blacklist_buf.writer().print("{s} ", .{app.*});
         }
-        std.debug.print("\n", .{});
+        try logger.logInfo("Blacklisted applications: {s}", .{blacklist_buf.items});
     }
 
     // Create event tap with keyboard and system defined events
@@ -58,6 +79,7 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
         .event_tap = EventTap{ .mask = mask },
         .verbose = verbose,
         .config_file = try allocator.dupe(u8, config_file),
+        .logger = logger,
     };
 }
 
@@ -65,13 +87,11 @@ pub fn deinit(self: *Skhd) void {
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
+    self.logger.deinit();
 }
 
 pub fn run(self: *Skhd) !void {
-    if (self.verbose) {
-        std.debug.print("skhd: starting event tap\n", .{});
-    }
-
+    try self.logger.logInfo("Starting event tap", .{});
     try self.event_tap.run(keyHandler, self);
 }
 
@@ -448,7 +468,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                             }
                             // Execute mode command if exists
                             if (target_mode.command) |mode_cmd| {
-                                try executeCommand(self.allocator, self.mappings.shell, mode_cmd);
+                                try self.executeCommand(self.mappings.shell, mode_cmd);
                             }
                             return true;
                         } else if (std.mem.eql(u8, mode_name, "default")) {
@@ -507,9 +527,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                             return false; // Unbound key
                         },
                         .forwarded => |_| {
-                            if (self.verbose) {
-                                std.debug.print("skhd: forwarding key for process '{s}'\n", .{process_name});
-                            }
+                            self.logger.logDebug("Forwarding key for process '{s}'", .{process_name}) catch {};
                             // Note: We should only reach here if findAndForwardHotkey didn't handle it
                             // This shouldn't happen with current logic, but handling for completeness
                             return false;
@@ -527,9 +545,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                     .command => |cmd| command_to_exec = cmd,
                     .unbound => return false,
                     .forwarded => |_| {
-                        if (self.verbose) {
-                            std.debug.print("skhd: forwarding key (wildcard)\n", .{});
-                        }
+                        self.logger.logDebug("Forwarding key (wildcard)", .{}) catch {};
                         // Note: We should only reach here if findAndForwardHotkey didn't handle it
                         return false;
                     },
@@ -539,7 +555,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
 
         // Execute the command
         if (command_to_exec) |cmd| {
-            try executeCommand(self.allocator, self.mappings.shell, cmd);
+            try self.executeCommand(self.mappings.shell, cmd);
             return !hotkey.flags.passthrough;
         }
     }
@@ -547,13 +563,31 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
     return false;
 }
 
-fn executeCommand(allocator: std.mem.Allocator, shell: []const u8, command: []const u8) !void {
+fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
+    // Log the command execution
+    try self.logger.logInfo("Executing command: {s}", .{command});
+    
     const argv = [_][]const u8{ shell, "-c", command };
 
-    var child = std.process.Child.init(&argv, allocator);
+    var child = std.process.Child.init(&argv, self.allocator);
     child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    
+    // Redirect stdout and stderr to our log files
+    if (self.logger.out_file) |out_file| {
+        // Duplicate the file handle for the child process
+        const out_fd = try std.os.dup(out_file.handle);
+        child.stdout_behavior = .{ .Handle = out_fd };
+    } else {
+        child.stdout_behavior = .Ignore;
+    }
+    
+    if (self.logger.err_file) |err_file| {
+        // Duplicate the file handle for the child process
+        const err_fd = try std.os.dup(err_file.handle);
+        child.stderr_behavior = .{ .Handle = err_fd };
+    } else {
+        child.stderr_behavior = .Ignore;
+    }
 
     try child.spawn();
     // Don't wait for the child to finish - let it run in background

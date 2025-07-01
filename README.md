@@ -95,3 +95,6 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [ ] Mouse event handling (clicks, drag, scroll)
 - [ ] System power management integration
 - [ ] `iokit_power_management_sleep_system` - Put system to sleep command
+
+### Advanced Features
+- [ ] device detection

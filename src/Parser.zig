@@ -23,11 +23,17 @@ content: []const u8 = undefined,
 previous_token: ?Token = undefined,
 next_token: ?Token = undefined,
 keycodes: Keycodes = undefined,
+load_directives: std.ArrayList(LoadDirective) = undefined,
+current_file_path: ?[]const u8 = null,
 
 pub fn deinit(self: *Parser) void {
     // self.allocator.free(self.filename);
     // self.allocator.free(self.content);
     self.keycodes.deinit();
+    for (self.load_directives.items) |directive| {
+        self.allocator.free(directive.filename);
+    }
+    self.load_directives.deinit();
     self.* = undefined;
 }
 
@@ -40,12 +46,18 @@ pub fn init(allocator: std.mem.Allocator) !Parser {
         .previous_token = null,
         .next_token = null,
         .keycodes = try Keycodes.init(allocator),
+        .load_directives = std.ArrayList(LoadDirective).init(allocator),
     };
 }
 
 pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
+    try self.parseWithPath(mappings, content, null);
+}
+
+pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, file_path: ?[]const u8) !void {
     self.content = content;
     self.tokenizer = try Tokenizer.init(content);
+    self.current_file_path = file_path;
 
     // Create default mode if it doesn't exist
     if (!mappings.mode_map.contains("default")) {
@@ -343,7 +355,16 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
     const option = self.previous().text;
 
     if (std.mem.eql(u8, option, "load")) {
-        @panic("load directive not implemented");
+        if (self.match(.Token_String)) {
+            const filename_token = self.previous();
+            const filename = try self.allocator.dupe(u8, filename_token.text);
+            try self.load_directives.append(LoadDirective{
+                .filename = filename,
+                .token = filename_token,
+            });
+        } else {
+            return error.@"Expected filename";
+        }
     } else if (std.mem.eql(u8, option, "blacklist")) {
         if (self.match(.Token_BeginList)) {
             while (self.match(.Token_String)) {
@@ -365,6 +386,52 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
     } else {
         return error.@"Unknown option";
     }
+}
+
+pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
+    // Process each load directive
+    for (self.load_directives.items) |directive| {
+        const resolved_path = try self.resolveLoadPath(directive.filename);
+        defer self.allocator.free(resolved_path);
+
+        // Read the file content
+        const content = std.fs.cwd().readFileAlloc(self.allocator, resolved_path, 1 << 20) catch |err| {
+            // Report error with line info from the .load directive
+            std.debug.print("skhd: could not open file '{s}' from load directive #{d}:{d}\n", .{
+                resolved_path,
+                directive.token.line,
+                directive.token.cursor,
+            });
+            return err;
+        };
+        defer self.allocator.free(content);
+
+        // Create a new parser for the included file
+        var included_parser = try Parser.init(self.allocator);
+        defer included_parser.deinit();
+
+        // Parse the included file
+        try included_parser.parseWithPath(mappings, content, resolved_path);
+
+        // Recursively process any load directives in the included file
+        try included_parser.processLoadDirectives(mappings);
+    }
+}
+
+fn resolveLoadPath(self: *Parser, filename: []const u8) ![]const u8 {
+    // If the path is absolute, return it as-is
+    if (std.fs.path.isAbsolute(filename)) {
+        return try self.allocator.dupe(u8, filename);
+    }
+
+    // If we have a current file path, resolve relative to its directory
+    if (self.current_file_path) |current_path| {
+        const dir_path = std.fs.path.dirname(current_path) orelse ".";
+        return try std.fs.path.join(self.allocator, &[_][]const u8{ dir_path, filename });
+    }
+
+    // Otherwise, treat as relative to current working directory
+    return try self.allocator.dupe(u8, filename);
 }
 
 test "init" {
@@ -463,4 +530,153 @@ test "double mode free" {
         \\ game, work < ctrl + shift - h: echo
     );
     // print("{s}\n", .{mappings});
+}
+
+test "load directive" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // First, write a test included file
+    const included_content = "cmd - i : echo 'from included file'";
+    const included_path = "test_included_temp.skhdrc";
+    const file = try std.fs.cwd().createFile(included_path, .{});
+    defer std.fs.cwd().deleteFile(included_path) catch {};
+    defer file.close();
+    try file.writeAll(included_content);
+
+    // Parse main content with .load directive
+    const main_content = try std.fmt.allocPrint(alloc,
+        \\.load "{s}"
+        \\cmd - m : echo 'from main file'
+    , .{included_path});
+    defer alloc.free(main_content);
+
+    try parser.parse(&mappings, main_content);
+    try parser.processLoadDirectives(&mappings);
+
+    // Check that both hotkeys were loaded
+    try std.testing.expect(mappings.hotkey_map.count() >= 2);
+}
+
+test "load directive with cross-file mode reference" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // First, write a test included file that references a mode from main file
+    const included_content = "mymode < cmd - t : echo 'cross-file mode reference'";
+    const included_path = "test_included_mode_temp.skhdrc";
+    const file = try std.fs.cwd().createFile(included_path, .{});
+    defer std.fs.cwd().deleteFile(included_path) catch {};
+    defer file.close();
+    try file.writeAll(included_content);
+
+    // Parse main content with mode definition and .load directive
+    const main_content = try std.fmt.allocPrint(alloc,
+        \\:: mymode
+        \\.load "{s}"
+        \\cmd - m : echo 'from main file'
+    , .{included_path});
+    defer alloc.free(main_content);
+
+    try parser.parse(&mappings, main_content);
+    try parser.processLoadDirectives(&mappings);
+
+    // Check that mode exists and has the hotkey from included file
+    try std.testing.expect(mappings.mode_map.contains("mymode"));
+    const mode = mappings.mode_map.get("mymode").?;
+    try std.testing.expect(mode.hotkey_map.count() > 0);
+}
+
+test "nested load directives" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Create the deepest file
+    const nested2_content = "cmd - n : echo 'from nested2'";
+    const nested2_path = "test_nested2_temp.skhdrc";
+    const file2 = try std.fs.cwd().createFile(nested2_path, .{});
+    defer std.fs.cwd().deleteFile(nested2_path) catch {};
+    defer file2.close();
+    try file2.writeAll(nested2_content);
+
+    // Create the middle file that loads nested2
+    const nested1_content = try std.fmt.allocPrint(alloc,
+        \\.load "{s}"
+        \\cmd - o : echo 'from nested1'
+    , .{nested2_path});
+    defer alloc.free(nested1_content);
+    const nested1_path = "test_nested1_temp.skhdrc";
+    const file1 = try std.fs.cwd().createFile(nested1_path, .{});
+    defer std.fs.cwd().deleteFile(nested1_path) catch {};
+    defer file1.close();
+    try file1.writeAll(nested1_content);
+
+    // Parse main content that loads nested1
+    const main_content = try std.fmt.allocPrint(alloc,
+        \\.load "{s}"
+        \\cmd - m : echo 'from main'
+    , .{nested1_path});
+    defer alloc.free(main_content);
+
+    try parser.parse(&mappings, main_content);
+    try parser.processLoadDirectives(&mappings);
+
+    // Check that all three hotkeys were loaded
+    try std.testing.expect(mappings.hotkey_map.count() >= 3);
+}
+
+test "load directive with relative paths" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Create a subdirectory
+    try std.fs.cwd().makePath("test_subdir_temp");
+    defer std.fs.cwd().deleteDir("test_subdir_temp") catch {};
+
+    // Create a file in the subdirectory
+    const sub_content = "cmd - s : echo 'from subdir'";
+    const sub_path = "test_subdir_temp/sub.skhdrc";
+    const sub_file = try std.fs.cwd().createFile(sub_path, .{});
+    defer std.fs.cwd().deleteFile(sub_path) catch {};
+    defer sub_file.close();
+    try sub_file.writeAll(sub_content);
+
+    // Create another file in the subdirectory that loads the first with a relative path
+    const loader_content =
+        \\.load "sub.skhdrc"
+        \\cmd - l : echo 'from loader'
+    ;
+    const loader_path = "test_subdir_temp/loader.skhdrc";
+    const loader_file = try std.fs.cwd().createFile(loader_path, .{});
+    defer std.fs.cwd().deleteFile(loader_path) catch {};
+    defer loader_file.close();
+    try loader_file.writeAll(loader_content);
+
+    // Parse main content that loads the loader from subdirectory
+    const main_content =
+        \\.load "test_subdir_temp/loader.skhdrc"
+        \\cmd - m : echo 'from main'
+    ;
+
+    try parser.parse(&mappings, main_content);
+    try parser.processLoadDirectives(&mappings);
+
+    // Check that all hotkeys were loaded (main + loader + sub)
+    try std.testing.expect(mappings.hotkey_map.count() >= 3);
 }

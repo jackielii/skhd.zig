@@ -27,7 +27,10 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
     const content = try std.fs.cwd().readFileAlloc(allocator, config_file, 1 << 20); // 1MB max
     defer allocator.free(content);
 
-    try parser.parse(&mappings, content);
+    try parser.parseWithPath(&mappings, content, config_file);
+
+    // Process any .load directives
+    try parser.processLoadDirectives(&mappings);
 
     // Initialize with default mode if exists
     var current_mode: ?*Mode = null;

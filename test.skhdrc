@@ -51,7 +51,7 @@ cmd - 0 : echo "CMD+0: Number 0"
 #############################################
 
 # Test mode with capture (@)
-:: test @ : echo ">>> Entering TEST mode (capture enabled)"
+:: test @ : kitten notify "TEST MODE ACTIVATED"
 cmd - t ; test
 
 # In test mode - basic keys work without modifiers due to @ capture
@@ -61,7 +61,7 @@ test < e : echo "TEST mode: E key (captured)"
 test < escape ; default
 
 # Window management mode
-:: window : echo ">>> Entering WINDOW mode"
+:: window : kitten notify ">>> Entering WINDOW mode"
 cmd - w ; window
 
 window < h : echo "WINDOW: Focus left"

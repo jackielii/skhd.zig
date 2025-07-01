@@ -1,5 +1,10 @@
 name: Update Homebrew Tap
 
+# This workflow requires a Personal Access Token with repo access
+# to update the homebrew-tap repository.
+# Create a token at https://github.com/settings/tokens
+# and add it as HOMEBREW_TAP_TOKEN secret in repository settings.
+
 on:
   release:
     types: [published]
@@ -20,7 +25,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: jackielii/homebrew-tap
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
         path: homebrew-tap
 
     - name: Get release info

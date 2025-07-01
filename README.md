@@ -444,6 +444,7 @@ The project uses GitHub Actions for:
 - **Releases**: Automatically builds and uploads binaries for:
   - ARM64 (Apple Silicon) on `macos-latest`
   - x86_64 (Intel) on `macos-13`
+- **Homebrew Updates**: Automatically updates the tap formula (requires `HOMEBREW_TAP_TOKEN` secret)
 
 ### Binary Distribution
 

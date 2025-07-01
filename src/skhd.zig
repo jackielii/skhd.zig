@@ -4,7 +4,8 @@ const Mappings = @import("Mappings.zig");
 const Parser = @import("Parser.zig");
 const Hotkey = @import("Hotkey.zig");
 const Mode = @import("Mode.zig");
-const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
+const Keycodes = @import("Keycodes.zig");
+const ModifierFlag = Keycodes.ModifierFlag;
 const Logger = @import("Logger.zig");
 const Hotload = @import("Hotload.zig");
 const c = @import("c.zig");
@@ -416,10 +417,19 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                 if (i < hotkey.commands.items.len) {
                     switch (hotkey.commands.items[i]) {
                         .forwarded => |target_key| {
-                            self.logger.logDebug("Forwarding key for process '{s}'", .{process_name}) catch {};
+                            const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
+                            defer self.allocator.free(key_str);
+                            self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
                             return try forwardKey(target_key, event);
                         },
-                        else => {}, // Not a forwarded key
+                        .unbound => {
+                            self.logger.logDebug("Key is unbound for process '{s}', not forwarding", .{process_name}) catch {};
+                            return false; // Key is unbound, don't forward
+                        },
+                        .command => {
+                            self.logger.logDebug("Key has command for process '{s}', not forwarding", .{process_name}) catch {};
+                            return false; // Key has a command, not a forward
+                        },
                     }
                 }
                 break;
@@ -430,7 +440,9 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         if (hotkey.wildcard_command) |wildcard| {
             switch (wildcard) {
                 .forwarded => |target_key| {
-                    self.logger.logDebug("Forwarding key (wildcard)", .{}) catch {};
+                    const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
+                    defer self.allocator.free(key_str);
+                    self.logger.logDebug("Forwarding key '{s}' (wildcard), current process {s}", .{ key_str, process_name }) catch {};
                     return try forwardKey(target_key, event);
                 },
                 else => {}, // Not a forwarded key
@@ -532,8 +544,10 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                             self.logger.logDebug("key is unbound for process '{s}'", .{process_name}) catch {};
                             return false; // Unbound key
                         },
-                        .forwarded => |_| {
-                            self.logger.logDebug("Forwarding key for process '{s}'", .{process_name}) catch {};
+                        .forwarded => |target_key| {
+                            const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
+                            defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
+                            self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
                             // Note: We should only reach here if findAndForwardHotkey didn't handle it
                             // This shouldn't happen with current logic, but handling for completeness
                             return false;
@@ -550,8 +564,10 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                 switch (wildcard) {
                     .command => |cmd| command_to_exec = cmd,
                     .unbound => return false,
-                    .forwarded => |_| {
-                        self.logger.logDebug("Forwarding key (wildcard)", .{}) catch {};
+                    .forwarded => |target_key| {
+                        const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
+                        defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
+                        self.logger.logDebug("Forwarding key '{s}' (wildcard)", .{key_str}) catch {};
                         // Note: We should only reach here if findAndForwardHotkey didn't handle it
                         return false;
                     },

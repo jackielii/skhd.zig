@@ -3,8 +3,8 @@ const c = @import("c.zig");
 const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
 const Hotkey = @import("Hotkey.zig");
-const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
-const strForKey = @import("echo.zig").strForKey;
+const Keycodes = @import("Keycodes.zig");
+const ModifierFlag = Keycodes.ModifierFlag;
 
 // Modifier keycodes from original skhd
 const Modifier_Keycode_Alt = 0x3A;
@@ -55,7 +55,7 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, key_string: []const u8) !void
             // Release modifiers
             synthesizeModifiers(hotkey.flags, false);
 
-            std.log.scoped(.synthesize).debug("Synthesized key: {any} + {s}", .{ hotkey.flags, strForKey(hotkey.key) });
+            std.log.scoped(.synthesize).debug("Synthesized key: {any} + {s}", .{ hotkey.flags, Keycodes.getKeyString(hotkey.key) });
         } else {
             std.debug.print("Error: Failed to parse key specification: {s}\n", .{key_string});
         }

@@ -14,13 +14,10 @@ mode: Mode = .service,
 
 /// Initialize logger
 pub fn init(allocator: std.mem.Allocator, mode: Mode) !Logger {
-    var logger = Logger{
+    const logger = Logger{
         .allocator = allocator,
         .mode = mode,
     };
-
-    // Log startup
-    try logger.logInfo("skhd started", .{});
 
     return logger;
 }
@@ -39,6 +36,11 @@ pub fn deinit(self: *Logger) void {
 
 /// Log info message
 pub fn logInfo(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
+    // Only log info messages in interactive mode
+    if (self.mode == .service) {
+        return;
+    }
+
     self.mutex.lock();
     defer self.mutex.unlock();
 
@@ -50,8 +52,25 @@ pub fn logInfo(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
     defer self.allocator.free(message);
 
     // Always write to stdout
-    const stdout = std.io.getStdOut().writer();
-    try stdout.writeAll(message);
+    const stdout = std.io.getStdOut();
+    try stdout.writer().writeAll(message);
+}
+
+/// Always log message regardless of mode
+pub fn logAlways(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    const timestamp = try self.getTimestamp();
+    defer self.allocator.free(timestamp);
+
+    // Format message with timestamp
+    const message = try std.fmt.allocPrint(self.allocator, "[{s}] " ++ fmt ++ "\n", .{timestamp} ++ args);
+    defer self.allocator.free(message);
+
+    // Always write to stdout
+    const stdout = std.io.getStdOut();
+    try stdout.writer().writeAll(message);
 }
 
 /// Log error message (always logged in both modes)
@@ -67,8 +86,8 @@ pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
     defer self.allocator.free(message);
 
     // Always write to stderr
-    const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll(message);
+    const stderr = std.io.getStdErr();
+    try stderr.writer().writeAll(message);
 }
 
 /// Log command execution with output

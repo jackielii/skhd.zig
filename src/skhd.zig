@@ -152,6 +152,14 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
                 "3. Add this binary: {s}\n" ++
                 "4. Make sure it's enabled (checkbox checked)\n" ++
                 "5. Restart skhd\n" ++
+                "\n" ++
+                "Troubleshooting:\n" ++
+                "If skhd is already listed but still not working:\n" ++
+                "- Remove the existing skhd entry\n" ++
+                "- Stop the service: skhd --stop-service\n" ++
+                "- Re-add skhd to the list " ++
+                "- Or just restart the service to see the entry added\n" ++
+                "- Enable the entry and run skhd --restart-service\n" ++
                 "=====================================================\n", .{std.fs.selfExePathAlloc(self.allocator) catch "/opt/homebrew/bin/skhd"});
         }
         return err;
@@ -160,8 +168,14 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Call NSApplicationLoad() like the original skhd
     c.NSApplicationLoad();
 
+    // Always log successful event tap creation
+    try self.logger.logAlways("Event tap created successfully. skhd is now running.", .{});
+
     // Now start the run loop - this will handle both event tap and FSEvents
     c.CFRunLoopRun();
+
+    // If we get here, the run loop has exited
+    try self.logger.logInfo("Run loop exited", .{});
 }
 
 fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, user_info: ?*anyopaque) callconv(.c) c.CGEventRef {

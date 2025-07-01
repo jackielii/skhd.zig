@@ -78,6 +78,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--restart-service")) {
             try service.restartService(allocator);
             return;
+        } else if (std.mem.eql(u8, args[i], "--status")) {
+            try service.checkServiceStatus(allocator);
+            return;
         } else if (std.mem.eql(u8, args[i], "-r") or std.mem.eql(u8, args[i], "--reload")) {
             try service.reloadConfig(allocator);
             return;
@@ -200,6 +203,7 @@ fn printHelp() void {
         \\      --start-service     Start the service
         \\      --stop-service      Stop the service
         \\      --restart-service   Restart the service
+        \\      --status            Check service status
         \\
     , .{});
 }

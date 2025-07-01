@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3] - 2025-01-01
+
+### Added
+- `--start-service` now automatically installs/updates the service plist to ensure it uses the current binary
+- `--status` command to check service installation status, running state, and accessibility permissions
+- Clear startup message in service mode to confirm skhd is running
+- Improved accessibility permission error message with troubleshooting steps for when permissions are "stuck"
+
+### Changed
+- Service mode now only logs errors and startup messages, reducing log verbosity
+- Removed unnecessary stdout/stderr syncing in logger for better performance
+
+### Fixed
+- Service management commands now provide better error messages and guidance
+- Homebrew service integration now works more reliably with proper binary path updates
+
 ## [0.0.2] - 2025-01-01
 
 ### Fixed

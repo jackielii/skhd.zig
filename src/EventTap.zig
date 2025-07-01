@@ -13,7 +13,7 @@ pub fn enabled(self: *EventTap) bool {
 
 // pub const CGEventTapCallBack = ?*const fn (CGEventTapProxy, CGEventType, CGEventRef, ?*anyopaque) callconv(.c) CGEventRef;
 
-pub fn run(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyopaque) !void {
+pub fn begin(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyopaque) !void {
     self.handle = c.CGEventTapCreate(c.kCGSessionEventTap, c.kCGHeadInsertEventTap, //
         c.kCGEventTapOptionDefault, self.mask, callback, user_info);
     if (self.enabled()) {
@@ -22,7 +22,6 @@ pub fn run(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyopaq
     } else {
         return error.@"Failed to create event tap";
     }
-    c.CFRunLoopRun();
 }
 
 pub fn deinit(self: *EventTap) void {

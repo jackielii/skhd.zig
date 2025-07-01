@@ -426,7 +426,7 @@ test "Config reload memory leak test" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd with initial config
-    var skhd = try Skhd.init(allocator, config_path, false);
+    var skhd = try Skhd.init(allocator, config_path, .service);
     defer skhd.deinit();
 
     // Verify initial state
@@ -525,7 +525,7 @@ test "Config reload preserves current mode" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd
-    var skhd = try Skhd.init(allocator, config_path, false);
+    var skhd = try Skhd.init(allocator, config_path, .service);
     defer skhd.deinit();
 
     // Switch to special mode
@@ -539,4 +539,46 @@ test "Config reload preserves current mode" {
     // Should be back in default mode after reload
     try testing.expect(skhd.current_mode != null);
     try testing.expectEqualStrings("default", skhd.current_mode.?.name);
+}
+
+test "Hot reload enable/disable" {
+    const allocator = testing.allocator;
+
+    // Create temporary config file
+    const test_id = std.crypto.random.int(u32);
+    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_{d}.skhdrc", .{test_id});
+    defer allocator.free(config_path);
+
+    // Write initial config
+    {
+        const config = "cmd - a : echo \"test A\"";
+        const file = try std.fs.createFileAbsolute(config_path, .{});
+        defer file.close();
+        try file.writeAll(config);
+    }
+
+    defer std.fs.deleteFileAbsolute(config_path) catch {};
+
+    // Initialize skhd
+    var skhd = try Skhd.init(allocator, config_path, .service);
+    defer skhd.deinit();
+
+    // Test enabling hot reload
+    try testing.expect(!skhd.hotload_enabled);
+    try skhd.enableHotReload();
+    try testing.expect(skhd.hotload_enabled);
+    try testing.expect(skhd.hotloader != null);
+
+    // Test disabling hot reload
+    skhd.disableHotReload();
+    try testing.expect(!skhd.hotload_enabled);
+    try testing.expect(skhd.hotloader == null);
+
+    // Test re-enabling
+    try skhd.enableHotReload();
+    try testing.expect(skhd.hotload_enabled);
+
+    // Double enable should be safe
+    try skhd.enableHotReload();
+    try testing.expect(skhd.hotload_enabled);
 }

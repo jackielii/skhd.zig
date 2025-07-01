@@ -1,5 +1,6 @@
 const std = @import("std");
 const Skhd = @import("skhd.zig");
+const Logger = @import("Logger.zig");
 const synthesize = @import("synthesize.zig");
 const service = @import("service.zig");
 
@@ -20,6 +21,7 @@ pub fn main() !void {
     var config_file: ?[]const u8 = null;
     var verbose = false;
     var observe_mode = false;
+    var no_hotload = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -77,6 +79,8 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "-r") or std.mem.eql(u8, args[i], "--reload")) {
             try service.reloadConfig(allocator);
             return;
+        } else if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--no-hotload")) {
+            no_hotload = true;
         }
     }
 
@@ -111,14 +115,21 @@ pub fn main() !void {
     defer service.removePidFile(allocator);
 
     // Initialize and run skhd
-    var skhd = try Skhd.init(allocator, resolved_config_file, verbose);
+    const mode: Logger.Mode = if (verbose) .interactive else .service;
+    var skhd = try Skhd.init(allocator, resolved_config_file, mode);
     defer skhd.deinit();
 
     if (verbose) {
-        std.debug.print("skhd: using config file: {s}\n", .{resolved_config_file});
+        try skhd.logger.logInfo("Using config file: {s}", .{resolved_config_file});
+        if (no_hotload) {
+            try skhd.logger.logInfo("Hot reload disabled", .{});
+        } else {
+            try skhd.logger.logInfo("Hot reload enabled", .{});
+        }
     }
 
-    try skhd.run();
+    // Pass the hotload flag to run
+    try skhd.run(!no_hotload);
 }
 
 /// Resolve config file path following XDG spec
@@ -174,6 +185,7 @@ fn printHelp() void {
         \\  -c, --config <file>    Specify config file (default: skhdrc)
         \\  -V, --verbose          Enable verbose output (interactive mode)
         \\  -o, --observe          Observe mode - print key events
+        \\  -h, --no-hotload       Disable system for hotloading config file
         \\  -k, --key <keyspec>    Synthesize a keypress
         \\  -t, --text <text>      Synthesize text input
         \\  -r, --reload           Reload config on running instance

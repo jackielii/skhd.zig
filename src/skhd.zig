@@ -6,6 +6,7 @@ const Hotkey = @import("Hotkey.zig");
 const Mode = @import("Mode.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const Logger = @import("Logger.zig");
+const Hotload = @import("Hotload.zig");
 const c = @import("c.zig");
 
 const Skhd = @This();
@@ -17,13 +18,13 @@ allocator: std.mem.Allocator,
 mappings: Mappings,
 current_mode: ?*Mode = null,
 event_tap: EventTap,
-verbose: bool = false,
 config_file: []const u8,
 logger: Logger,
+hotloader: ?Hotload = null,
+hotload_enabled: bool = false,
 
-pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool) !Skhd {
+pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.Mode) !Skhd {
     // Initialize logger first
-    const mode: Logger.Mode = if (verbose) .interactive else .service;
     var logger = try Logger.init(allocator, mode);
     errdefer logger.deinit();
 
@@ -81,20 +82,22 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
         .mappings = mappings,
         .current_mode = current_mode,
         .event_tap = EventTap{ .mask = mask },
-        .verbose = verbose,
         .config_file = try allocator.dupe(u8, config_file),
         .logger = logger,
     };
 }
 
 pub fn deinit(self: *Skhd) void {
+    if (self.hotloader) |*hotloader| {
+        hotloader.deinit();
+    }
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
     self.logger.deinit();
 }
 
-pub fn run(self: *Skhd) !void {
+pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Set up signal handler for config reload
     const act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigusr1 },
@@ -106,8 +109,20 @@ pub fn run(self: *Skhd) !void {
     // Store a global reference for the signal handler
     global_skhd = self;
 
+    // Enable hot reload if requested (must be done before run loop starts)
+    if (enable_hotload) {
+        try self.enableHotReload();
+    }
+
+    // Set up event tap (but don't start run loop yet)
     try self.logger.logInfo("Starting event tap", .{});
-    try self.event_tap.run(keyHandler, self);
+    try self.event_tap.begin(keyHandler, self);
+
+    // Call NSApplicationLoad() like the original skhd
+    c.NSApplicationLoad();
+
+    // Now start the run loop - this will handle both event tap and FSEvents
+    c.CFRunLoopRun();
 }
 
 fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, user_info: ?*anyopaque) callconv(.c) c.CGEventRef {
@@ -117,21 +132,19 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
 
     switch (typ) {
         c.kCGEventTapDisabledByTimeout, c.kCGEventTapDisabledByUserInput => {
-            if (self.verbose) {
-                std.debug.print("skhd: restarting event-tap\n", .{});
-            }
+            self.logger.logInfo("Restarting event-tap", .{}) catch {};
             c.CGEventTapEnable(self.event_tap.handle, true);
             return event;
         },
         c.kCGEventKeyDown => {
             return self.handleKeyDown(event) catch |err| {
-                std.debug.print("skhd: error handling key down: {}\n", .{err});
+                self.logger.logError("Error handling key down: {}", .{err}) catch {};
                 return event;
             };
         },
         c.NX_SYSDEFINED => {
             return self.handleSystemKey(event) catch |err| {
-                std.debug.print("skhd: error handling system key: {}\n", .{err});
+                self.logger.logError("Error handling system key: {}", .{err}) catch {};
                 return event;
             };
         },
@@ -397,9 +410,7 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                 if (i < hotkey.commands.items.len) {
                     switch (hotkey.commands.items[i]) {
                         .forwarded => |target_key| {
-                            if (self.verbose) {
-                                std.debug.print("skhd: forwarding key for process '{s}'\n", .{process_name});
-                            }
+                            self.logger.logDebug("Forwarding key for process '{s}'", .{process_name}) catch {};
                             return try forwardKey(target_key, event);
                         },
                         else => {}, // Not a forwarded key
@@ -413,9 +424,7 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         if (hotkey.wildcard_command) |wildcard| {
             switch (wildcard) {
                 .forwarded => |target_key| {
-                    if (self.verbose) {
-                        std.debug.print("skhd: forwarding key (wildcard)\n", .{});
-                    }
+                    self.logger.logDebug("Forwarding key (wildcard)", .{}) catch {};
                     return try forwardKey(target_key, event);
                 },
                 else => {}, // Not a forwarded key
@@ -449,38 +458,28 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
     }
 
     if (found_hotkey) |hotkey| {
-        if (self.verbose) {
-            std.debug.print("skhd: found hotkey match - key: {d}, flags: {any} in mode '{s}'\n", .{ hotkey.key, hotkey.flags, mode.name });
-        }
+        self.logger.logDebug("Found hotkey match - key: {d}, flags: {any} in mode '{s}'", .{ hotkey.key, hotkey.flags, mode.name }) catch {};
 
         // Get current process name for process-specific commands
         const process_name = try getCurrentProcessName(self.allocator);
         defer self.allocator.free(process_name);
 
-        if (self.verbose) {
-            std.debug.print("skhd: current process name: '{s}'\n", .{process_name});
-        }
+        self.logger.logDebug("Current process name: '{s}'", .{process_name}) catch {};
 
         // Check for mode activation
         if (hotkey.flags.activate) {
-            if (self.verbose) {
-                std.debug.print("skhd: mode activation hotkey triggered\n", .{});
-            }
+            self.logger.logDebug("Mode activation hotkey triggered", .{}) catch {};
             // Get the mode name from the command
             if (hotkey.wildcard_command) |cmd| {
                 switch (cmd) {
                     .command => |mode_name| {
-                        if (self.verbose) {
-                            std.debug.print("skhd: attempting to switch to mode '{s}'\n", .{mode_name});
-                        }
+                        self.logger.logDebug("Attempting to switch to mode '{s}'", .{mode_name}) catch {};
                         // Try to find the mode
                         const new_mode = self.mappings.mode_map.getPtr(mode_name);
 
                         if (new_mode) |target_mode| {
                             self.current_mode = target_mode;
-                            if (self.verbose) {
-                                std.debug.print("skhd: successfully switched to mode '{s}'\n", .{target_mode.name});
-                            }
+                            self.logger.logInfo("Switched to mode '{s}'", .{target_mode.name}) catch {};
                             // Execute mode command if exists
                             if (target_mode.command) |mode_cmd| {
                                 try self.executeCommand(self.mappings.shell, mode_cmd);
@@ -490,9 +489,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                             // Switching to default mode which should always exist
                             if (self.mappings.mode_map.getPtr("default")) |default_mode| {
                                 self.current_mode = default_mode;
-                                if (self.verbose) {
-                                    std.debug.print("skhd: switched to default mode\n", .{});
-                                }
+                                self.logger.logInfo("Switched to default mode", .{}) catch {};
                                 return true;
                             }
                         }
@@ -502,15 +499,11 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                         return true;
                     },
                     else => {
-                        if (self.verbose) {
-                            std.debug.print("skhd: activate flag set but no command found\n", .{});
-                        }
+                        self.logger.logDebug("Activate flag set but no command found", .{}) catch {};
                     },
                 }
             } else {
-                if (self.verbose) {
-                    std.debug.print("skhd: activate flag set but no wildcard_command\n", .{});
-                }
+                self.logger.logDebug("Activate flag set but no wildcard_command", .{}) catch {};
             }
             return false;
         }
@@ -520,20 +513,14 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
 
         // Check process-specific commands
         for (hotkey.process_names.items, 0..) |proc_name, i| {
-            if (self.verbose) {
-                std.debug.print("skhd: checking process '{s}' against current '{s}'\n", .{ proc_name, process_name });
-            }
+            self.logger.logDebug("Checking process '{s}' against current '{s}'", .{ proc_name, process_name }) catch {};
             if (std.mem.eql(u8, proc_name, process_name)) {
-                if (self.verbose) {
-                    std.debug.print("skhd: process match found for '{s}'\n", .{process_name});
-                }
+                self.logger.logDebug("Process match found for '{s}'", .{process_name}) catch {};
                 if (i < hotkey.commands.items.len) {
                     switch (hotkey.commands.items[i]) {
                         .command => |cmd| {
                             command_to_exec = cmd;
-                            if (self.verbose) {
-                                std.debug.print("skhd: using process-specific command: '{s}'\n", .{cmd});
-                            }
+                            self.logger.logDebug("Using process-specific command: '{s}'", .{cmd}) catch {};
                         },
                         .unbound => {
                             self.logger.logDebug("key is unbound for process '{s}'", .{process_name}) catch {};
@@ -697,6 +684,46 @@ pub fn reloadConfig(self: *Skhd) !void {
     }
 
     try self.logger.logInfo("Configuration reloaded successfully", .{});
+}
+
+pub fn enableHotReload(self: *Skhd) !void {
+    if (self.hotload_enabled) return;
+
+    try self.logger.logInfo("Enabling hot reload...", .{});
+
+    // Create hotloader
+    var hotloader = Hotload.init(self.allocator, hotloadCallback);
+
+    try self.logger.logInfo("Watching file: {s}", .{self.config_file});
+    try hotloader.watchFile(self.config_file);
+
+    self.hotloader = hotloader;
+    self.hotload_enabled = true;
+
+    try self.logger.logInfo("Hot reload enabled successfully", .{});
+}
+
+pub fn disableHotReload(self: *Skhd) void {
+    if (!self.hotload_enabled) return;
+
+    if (self.hotloader) |*hotloader| {
+        hotloader.stop();
+    }
+
+    self.hotloader = null;
+    self.hotload_enabled = false;
+
+    self.logger.logInfo("Hot reload disabled", .{}) catch {};
+}
+
+fn hotloadCallback(path: []const u8) void {
+    _ = path;
+
+    // FSEvents callbacks can run on different threads
+    // Send SIGUSR1 to trigger reload from main thread
+    // Use C directly to avoid any Zig runtime issues
+    const pid = std.c.getpid();
+    _ = std.c.kill(pid, 10); // SIGUSR1 = 10
 }
 /// Read child process output in a separate thread
 fn readChildOutput(self: *Skhd, child: *std.process.Child) void {

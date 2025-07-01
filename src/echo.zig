@@ -15,7 +15,8 @@ pub fn echo() !void {
     var event_tap = EventTap{ .mask = mask };
     defer event_tap.deinit();
     std.debug.print("Ctrl+C to exit\n", .{});
-    try event_tap.run(callback, null);
+    try event_tap.begin(callback, null);
+    c.CFRunLoopRun();
 }
 
 fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {

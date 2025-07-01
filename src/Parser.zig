@@ -377,7 +377,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         } else {
             return error.@"Expected '['";
         }
-    } else if (std.mem.eql(u8, option, "shell")) {
+    } else if (std.mem.eql(u8, option, "shell") or std.mem.eql(u8, option, "SHELL")) {
         if (self.match(.Token_String)) {
             try mappings.set_shell(self.previous().text);
         } else {

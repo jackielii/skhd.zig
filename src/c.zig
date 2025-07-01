@@ -4,3 +4,6 @@ pub usingnamespace @cImport({
     @cInclude("objc/objc.h");
     @cInclude("objc/runtime.h");
 });
+
+// Additional declarations
+pub extern fn NSApplicationLoad() void;

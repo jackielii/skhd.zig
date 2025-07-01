@@ -33,27 +33,45 @@ pub fn initWithPath(allocator: std.mem.Allocator, mode: Mode, log_path: []const 
     };
 
     // In interactive mode, we primarily log to console
-    // In service mode, we log to file
+    // In service mode, check if we're running under launchd
     if (mode == .service) {
-        // Open log file (create if it doesn't exist, append mode)
-        logger.log_file = std.fs.openFileAbsolute(log_path, .{
-            .mode = .write_only,
-            .lock = .none,
-        }) catch |err| switch (err) {
-            error.FileNotFound => try std.fs.createFileAbsolute(log_path, .{
-                .truncate = false,
-            }),
-            else => return err,
+        // If stdout is redirected (likely by launchd), don't open a separate log file
+        const stdout_stat = std.posix.fstat(std.posix.STDOUT_FILENO) catch {
+            // If we can't stat stdout, assume we need a log file
+            logger.log_file = try openOrCreateLogFile(log_path);
+            return logger;
         };
 
-        // Seek to end for appending
-        try logger.log_file.?.seekFromEnd(0);
+        // Check if stdout is a regular file (redirected by launchd)
+        if (stdout_stat.mode & std.posix.S.IFMT == std.posix.S.IFREG) {
+            // Running under launchd with redirected output, don't open log file
+            logger.log_file = null;
+        } else {
+            // Not under launchd, open log file
+            logger.log_file = try openOrCreateLogFile(log_path);
+        }
     }
 
     // Log startup
     try logger.logInfo("skhd started", .{});
 
     return logger;
+}
+
+fn openOrCreateLogFile(log_path: []const u8) !std.fs.File {
+    return std.fs.openFileAbsolute(log_path, .{
+        .mode = .write_only,
+        .lock = .none,
+    }) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const file = try std.fs.createFileAbsolute(log_path, .{
+                .truncate = false,
+            });
+            try file.seekFromEnd(0);
+            break :blk file;
+        },
+        else => return err,
+    };
 }
 
 /// Initialize logger without file output (for testing)
@@ -89,8 +107,11 @@ pub fn logInfo(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
     defer self.allocator.free(message);
 
     // In interactive mode, always write to stdout
-    const stdout = std.io.getStdOut().writer();
-    try stdout.writeAll(message);
+    // In service mode without log file, also write to stdout (launchd)
+    if (self.mode == .interactive or (self.mode == .service and self.log_file == null)) {
+        const stdout = std.io.getStdOut().writer();
+        try stdout.writeAll(message);
+    }
 
     // Also write to log file if available
     if (self.log_file) |file| {
@@ -111,12 +132,13 @@ pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
     defer self.allocator.free(message);
 
     // In interactive mode, write to stderr
-    if (self.mode == .interactive) {
+    // In service mode without log file (launchd), also write to stderr
+    if (self.mode == .interactive or (self.mode == .service and self.log_file == null)) {
         const stderr = std.io.getStdErr().writer();
         try stderr.writeAll(message);
     }
 
-    // Always write to log file if available
+    // Also write to log file if available
     if (self.log_file) |file| {
         try file.writeAll(message);
     }

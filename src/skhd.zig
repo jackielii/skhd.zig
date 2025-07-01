@@ -579,9 +579,8 @@ fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
 
         try child.spawn();
 
-        // Create a thread to read and display output
-        const thread = try std.Thread.spawn(.{}, readChildOutput, .{ self, &child });
-        thread.detach();
+        // Read output synchronously to avoid race conditions
+        self.readChildOutputSync(&child) catch {};
     } else {
         // In service mode, ignore output
         child.stdout_behavior = .Ignore;
@@ -725,38 +724,32 @@ fn hotloadCallback(path: []const u8) void {
     const pid = std.c.getpid();
     _ = std.c.kill(pid, 10); // SIGUSR1 = 10
 }
-/// Read child process output in a separate thread
-fn readChildOutput(self: *Skhd, child: *std.process.Child) void {
-    // Read stdout
-    if (child.stdout) |stdout| {
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = stdout.read(&buf) catch break;
-            if (n == 0) break;
+/// Read child process output synchronously
+fn readChildOutputSync(self: *Skhd, child: *std.process.Child) !void {
+    var stdout_data = std.ArrayListUnmanaged(u8){};
+    defer stdout_data.deinit(self.allocator);
+    var stderr_data = std.ArrayListUnmanaged(u8){};
+    defer stderr_data.deinit(self.allocator);
 
-            // Log the output line by line
-            var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
-            while (lines.next()) |line| {
-                self.logger.logInfo("  stdout: {s}", .{line}) catch {};
-            }
-        }
-    }
-
-    // Read stderr
-    if (child.stderr) |stderr| {
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = stderr.read(&buf) catch break;
-            if (n == 0) break;
-
-            // Log the error output line by line
-            var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
-            while (lines.next()) |line| {
-                self.logger.logError("  stderr: {s}", .{line}) catch {};
-            }
-        }
-    }
+    // Collect all output first
+    try child.collectOutput(self.allocator, &stdout_data, &stderr_data, 8192);
 
     // Wait for child to finish
-    _ = child.wait() catch {};
+    _ = try child.wait();
+
+    // Log stdout if not empty
+    if (stdout_data.items.len > 0) {
+        var lines = std.mem.tokenizeScalar(u8, stdout_data.items, '\n');
+        while (lines.next()) |line| {
+            try self.logger.logInfo("  stdout: {s}", .{line});
+        }
+    }
+
+    // Log stderr if not empty
+    if (stderr_data.items.len > 0) {
+        var lines = std.mem.tokenizeScalar(u8, stderr_data.items, '\n');
+        while (lines.next()) |line| {
+            try self.logger.logError("  stderr: {s}", .{line});
+        }
+    }
 }

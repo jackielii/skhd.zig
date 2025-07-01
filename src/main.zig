@@ -16,7 +16,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    var config_file: []const u8 = "skhdrc";
+    var config_file: ?[]const u8 = null;
     var verbose = false;
     var observe_mode = false;
 
@@ -67,15 +67,65 @@ pub fn main() !void {
         return;
     }
 
+    // Resolve config file path
+    const resolved_config_file = if (config_file) |cf|
+        try allocator.dupe(u8, cf)
+    else
+        try getConfigFile(allocator, "skhdrc");
+    defer allocator.free(resolved_config_file);
+
     // Initialize and run skhd
-    var skhd = try Skhd.init(allocator, config_file, verbose);
+    var skhd = try Skhd.init(allocator, resolved_config_file, verbose);
     defer skhd.deinit();
 
     if (verbose) {
-        std.debug.print("skhd: using config file: {s}\n", .{config_file});
+        std.debug.print("skhd: using config file: {s}\n", .{resolved_config_file});
     }
 
     try skhd.run();
+}
+
+/// Resolve config file path following XDG spec
+/// Tries in order:
+/// 1. $XDG_CONFIG_HOME/skhd/<filename>
+/// 2. $HOME/.config/skhd/<filename>
+/// 3. $HOME/.<filename>
+pub fn getConfigFile(allocator: std.mem.Allocator, filename: []const u8) ![]const u8 {
+    // Try XDG_CONFIG_HOME first
+    if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg_home| {
+        const path = try std.fmt.allocPrint(allocator, "{s}/skhd/{s}", .{ xdg_home, filename });
+        defer allocator.free(path);
+
+        if (fileExists(path)) {
+            return try allocator.dupe(u8, path);
+        }
+    }
+
+    // Try HOME/.config/skhd
+    if (std.posix.getenv("HOME")) |home| {
+        const config_path = try std.fmt.allocPrint(allocator, "{s}/.config/skhd/{s}", .{ home, filename });
+        defer allocator.free(config_path);
+
+        if (fileExists(config_path)) {
+            return try allocator.dupe(u8, config_path);
+        }
+
+        // Try HOME/.skhdrc (dotfile in home)
+        const dotfile_path = try std.fmt.allocPrint(allocator, "{s}/.{s}", .{ home, filename });
+        defer allocator.free(dotfile_path);
+
+        if (fileExists(dotfile_path)) {
+            return try allocator.dupe(u8, dotfile_path);
+        }
+    }
+
+    // Default to filename in current directory
+    return try allocator.dupe(u8, filename);
+}
+
+fn fileExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }
 
 fn printHelp() void {

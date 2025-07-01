@@ -279,3 +279,69 @@ test "Blacklist parsing" {
     try testing.expect(mappings.blacklist.contains("finder"));
     try testing.expect(!mappings.blacklist.contains("safari"));
 }
+
+test "Shell option parsing" {
+    const allocator = testing.allocator;
+    
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+    
+    // Default shell should be from environment or /bin/bash
+    const initial_shell = mappings.shell;
+    try testing.expect(initial_shell.len > 0);
+    
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+    
+    // Test parsing shell option
+    const config = 
+        \\.shell "/usr/bin/env zsh"
+        \\cmd - a : echo "test"
+    ;
+    
+    try parser.parse(&mappings, config);
+    
+    // Shell should be updated
+    try testing.expectEqualStrings("/usr/bin/env zsh", mappings.shell);
+}
+
+test "Shell from environment" {
+    const allocator = testing.allocator;
+    
+    // Test that SHELL env var is respected on init
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+    
+    // Should use SHELL env var if set, otherwise /bin/bash
+    if (std.posix.getenv("SHELL")) |env_shell| {
+        try testing.expectEqualStrings(env_shell, mappings.shell);
+    } else {
+        try testing.expectEqualStrings("/bin/bash", mappings.shell);
+    }
+}
+
+test "Config file resolution" {
+    const allocator = testing.allocator;
+    
+    // Test getting config file
+    const getConfigFile = @import("main.zig").getConfigFile;
+    
+    // This should resolve to a path based on environment
+    const config_path = try getConfigFile(allocator, "skhdrc");
+    defer allocator.free(config_path);
+    
+    // Should be one of:
+    // - $XDG_CONFIG_HOME/skhd/skhdrc
+    // - $HOME/.config/skhd/skhdrc  
+    // - $HOME/.skhdrc
+    // - skhdrc (in current dir)
+    try testing.expect(config_path.len > 0);
+    
+    // Test that the function returns a valid path
+    if (std.posix.getenv("HOME")) |home| {
+        // If we have HOME, the path should contain it or be the fallback
+        const has_home = std.mem.indexOf(u8, config_path, home) != null;
+        const is_fallback = std.mem.eql(u8, config_path, "skhdrc");
+        try testing.expect(has_home or is_fallback);
+    }
+}

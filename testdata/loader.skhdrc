@@ -1,0 +1,2 @@
+.load "sub.skhdrc"
+cmd - l : echo 'from loader'

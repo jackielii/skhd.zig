@@ -348,3 +348,20 @@ test "format token" {
     try std.testing.expectEqual(TokenType.Token_Identifier, token.type);
     try std.testing.expectEqualStrings("hello", token.text);
 }
+
+test "tokenize option" {
+    const test_content = ".shell \"/bin/zsh\"";
+    var tokenizer = try init(test_content);
+
+    // First token should be .shell
+    const token1 = tokenizer.get_token();
+    try std.testing.expect(token1 != null);
+    try std.testing.expectEqual(TokenType.Token_Option, token1.?.type);
+    try std.testing.expectEqualStrings("shell", token1.?.text);
+
+    // Second token should be the string
+    const token2 = tokenizer.get_token();
+    try std.testing.expect(token2 != null);
+    try std.testing.expectEqual(TokenType.Token_String, token2.?.type);
+    try std.testing.expectEqualStrings("/bin/zsh", token2.?.text);
+}

@@ -1,0 +1,2 @@
+.load "test_nested2.skhdrc"
+cmd - o : echo 'from nested1'

@@ -51,10 +51,10 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [ ] Service logging (`/tmp/skhd_$USER.{out,err}.log`)
 
 ### Configuration Features
-- [ ] Default config file resolution (`~/.skhdrc`, `~/.config/skhd/skhdrc`)
-- [ ] `.load` directive for including other config files
+- [x] Default config file resolution (`~/.skhdrc`, `~/.config/skhd/skhdrc`)
+- [x] `.load` directive for including other config files
 - [x] `.blacklist` directive for application blacklisting
-- [ ] `.shell` directive for custom shell
+- [x] `.shell` directive for custom shell
 - [x] Modal activation commands
 - [x] Capture mode (`@` modifier) for modes
 - [ ] Config file error reporting with line numbers

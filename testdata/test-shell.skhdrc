@@ -1,0 +1,5 @@
+# Test shell option
+.SHELL "/usr/bin/env zsh"
+
+# Simple test command
+cmd - t : echo "Test from custom shell: $SHELL" > /tmp/skhd-test.txt

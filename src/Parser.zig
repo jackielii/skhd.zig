@@ -377,7 +377,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         } else {
             return error.@"Expected '['";
         }
-    } else if (std.mem.eql(u8, option, "SHELL")) {
+    } else if (std.mem.eql(u8, option, "shell")) {
         if (self.match(.Token_String)) {
             try mappings.set_shell(self.previous().text);
         } else {
@@ -540,20 +540,11 @@ test "load directive" {
     var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
 
-    // First, write a test included file
-    const included_content = "cmd - i : echo 'from included file'";
-    const included_path = "test_included_temp.skhdrc";
-    const file = try std.fs.cwd().createFile(included_path, .{});
-    defer std.fs.cwd().deleteFile(included_path) catch {};
-    defer file.close();
-    try file.writeAll(included_content);
-
     // Parse main content with .load directive
-    const main_content = try std.fmt.allocPrint(alloc,
-        \\.load "{s}"
+    const main_content =
+        \\.load "testdata/test_included.skhdrc"
         \\cmd - m : echo 'from main file'
-    , .{included_path});
-    defer alloc.free(main_content);
+    ;
 
     try parser.parse(&mappings, main_content);
     try parser.processLoadDirectives(&mappings);
@@ -570,21 +561,12 @@ test "load directive with cross-file mode reference" {
     var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
 
-    // First, write a test included file that references a mode from main file
-    const included_content = "mymode < cmd - t : echo 'cross-file mode reference'";
-    const included_path = "test_included_mode_temp.skhdrc";
-    const file = try std.fs.cwd().createFile(included_path, .{});
-    defer std.fs.cwd().deleteFile(included_path) catch {};
-    defer file.close();
-    try file.writeAll(included_content);
-
     // Parse main content with mode definition and .load directive
-    const main_content = try std.fmt.allocPrint(alloc,
+    const main_content =
         \\:: mymode
-        \\.load "{s}"
+        \\.load "testdata/test_included_mode.skhdrc"
         \\cmd - m : echo 'from main file'
-    , .{included_path});
-    defer alloc.free(main_content);
+    ;
 
     try parser.parse(&mappings, main_content);
     try parser.processLoadDirectives(&mappings);
@@ -603,32 +585,11 @@ test "nested load directives" {
     var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
 
-    // Create the deepest file
-    const nested2_content = "cmd - n : echo 'from nested2'";
-    const nested2_path = "test_nested2_temp.skhdrc";
-    const file2 = try std.fs.cwd().createFile(nested2_path, .{});
-    defer std.fs.cwd().deleteFile(nested2_path) catch {};
-    defer file2.close();
-    try file2.writeAll(nested2_content);
-
-    // Create the middle file that loads nested2
-    const nested1_content = try std.fmt.allocPrint(alloc,
-        \\.load "{s}"
-        \\cmd - o : echo 'from nested1'
-    , .{nested2_path});
-    defer alloc.free(nested1_content);
-    const nested1_path = "test_nested1_temp.skhdrc";
-    const file1 = try std.fs.cwd().createFile(nested1_path, .{});
-    defer std.fs.cwd().deleteFile(nested1_path) catch {};
-    defer file1.close();
-    try file1.writeAll(nested1_content);
-
     // Parse main content that loads nested1
-    const main_content = try std.fmt.allocPrint(alloc,
-        \\.load "{s}"
+    const main_content =
+        \\.load "testdata/test_nested1.skhdrc"
         \\cmd - m : echo 'from main'
-    , .{nested1_path});
-    defer alloc.free(main_content);
+    ;
 
     try parser.parse(&mappings, main_content);
     try parser.processLoadDirectives(&mappings);
@@ -645,38 +606,70 @@ test "load directive with relative paths" {
     var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
 
-    // Create a subdirectory
-    try std.fs.cwd().makePath("test_subdir_temp");
-    defer std.fs.cwd().deleteDir("test_subdir_temp") catch {};
-
-    // Create a file in the subdirectory
-    const sub_content = "cmd - s : echo 'from subdir'";
-    const sub_path = "test_subdir_temp/sub.skhdrc";
-    const sub_file = try std.fs.cwd().createFile(sub_path, .{});
-    defer std.fs.cwd().deleteFile(sub_path) catch {};
-    defer sub_file.close();
-    try sub_file.writeAll(sub_content);
-
-    // Create another file in the subdirectory that loads the first with a relative path
-    const loader_content =
-        \\.load "sub.skhdrc"
-        \\cmd - l : echo 'from loader'
-    ;
-    const loader_path = "test_subdir_temp/loader.skhdrc";
-    const loader_file = try std.fs.cwd().createFile(loader_path, .{});
-    defer std.fs.cwd().deleteFile(loader_path) catch {};
-    defer loader_file.close();
-    try loader_file.writeAll(loader_content);
-
-    // Parse main content that loads the loader from subdirectory
+    // Parse main content that loads the loader from testdata directory
     const main_content =
-        \\.load "test_subdir_temp/loader.skhdrc"
+        \\.load "testdata/loader.skhdrc"
         \\cmd - m : echo 'from main'
     ;
 
-    try parser.parse(&mappings, main_content);
+    try parser.parseWithPath(&mappings, main_content, "test.skhdrc");
     try parser.processLoadDirectives(&mappings);
 
     // Check that all hotkeys were loaded (main + loader + sub)
     try std.testing.expect(mappings.hotkey_map.count() >= 3);
+}
+
+test "shell directive" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test default shell (should be from $SHELL env or /bin/bash)
+    const default_shell = mappings.shell;
+    try std.testing.expect(default_shell.len > 0);
+
+    // Parse config with .shell directive
+    const content =
+        \\.shell "/bin/zsh"
+        \\cmd - t : echo "test"
+    ;
+    try parser.parse(&mappings, content);
+
+    // Verify shell was updated
+    try std.testing.expectEqualStrings("/bin/zsh", mappings.shell);
+}
+
+test "shell directive with spaces" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Parse config with .shell directive containing spaces
+    const content =
+        \\.shell "/usr/local/bin/fish"
+        \\cmd - f : echo "fish shell"
+    ;
+    try parser.parse(&mappings, content);
+
+    // Verify shell was updated
+    try std.testing.expectEqualStrings("/usr/local/bin/fish", mappings.shell);
+}
+
+test "shell directive error handling" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test missing shell path
+    const content = ".shell";
+    try std.testing.expectError(error.@"Expected string", parser.parse(&mappings, content));
 }

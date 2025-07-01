@@ -2,11 +2,51 @@
 
 Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiya/skhd) to Zig.
 
-This implementation provides a fully functional hotkey daemon with modal support, process-specific bindings, key forwarding, and comprehensive configuration options that is fully compatible with the original skhd configuration format.
+This implementation is **fully compatible with the original skhd configuration format** - your existing `.skhdrc` files will work without modification. Additionally, it includes new features like process groups (`.define`) for cleaner configs and improved error reporting.
+
+## Installation
+
+### Homebrew
+
+The easiest way to install skhd.zig:
+
+```bash
+brew tap jackielii/homebrew-tap
+brew install skhd-zig
+```
+
+### Pre-built Binaries
+
+Download the latest release for your architecture:
+
+- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs (M1/M2/M3)
+- `skhd-x86_64-macos.tar.gz` - For Intel Macs
+
+Extract and install:
+
+```bash
+tar -xzf skhd-*.tar.gz
+sudo cp skhd /usr/local/bin/
+```
+
+### Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/jackielii/skhd.zig
+cd skhd.zig
+
+# Build in release mode
+zig build -Doptimize=ReleaseFast
+
+# Install (copy to /usr/local/bin)
+sudo cp zig-out/bin/skhd /usr/local/bin/
+```
 
 ## Features
 
 ### Core Functionality
+
 - **Event capturing**: Uses macOS Core Graphics Event Tap for system-wide keyboard event interception
 - **Hotkey mapping**: Maps key combinations to shell commands with full modifier support
 - **Process-specific bindings**: Different commands for different applications
@@ -16,6 +56,7 @@ This implementation provides a fully functional hotkey daemon with modal support
 - **Hot reloading**: Automatic config reload on file changes
 
 ### Command-Line Interface
+
 - `--version` / `-v` - Display version information
 - `--help` - Show usage information
 - `-c` / `--config` - Specify config file location
@@ -27,6 +68,7 @@ This implementation provides a fully functional hotkey daemon with modal support
 - `-h` / `--no-hotload` - Disable hotloading
 
 ### Service Management
+
 - `--install-service` - Install launchd service
 - `--uninstall-service` - Remove launchd service
 - `--start-service` - Start as service
@@ -36,6 +78,7 @@ This implementation provides a fully functional hotkey daemon with modal support
 - Service logging (`/tmp/skhd_$USER.log`)
 
 ### Advanced Features
+
 - **Blacklisting**: Exclude applications from hotkey processing
 - **Shell customization**: Use custom shell for command execution
 - **Left/right modifier distinction**: Support for lcmd, rcmd, lalt, ralt, etc.
@@ -43,22 +86,6 @@ This implementation provides a fully functional hotkey daemon with modal support
 - **Passthrough mode**: Execute command but still send keypress to application
 - **Config includes**: Load additional config files with `.load` directive
 - **Comprehensive error reporting**: Detailed error messages with line numbers
-
-## Installation
-
-### Build from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/skhd.zig
-cd skhd.zig
-
-# Build in release mode
-zig build -Doptimize=ReleaseFast
-
-# Install (copy to /usr/local/bin)
-sudo cp zig-out/bin/skhd /usr/local/bin/
-```
 
 ### Build Commands
 
@@ -84,13 +111,14 @@ zig build test
 ### Default Configuration Locations
 
 skhd.zig looks for configuration files in the following order:
+
 1. Path specified with `-c` flag
 2. `~/.config/skhd/skhdrc`
 3. `~/.skhdrc`
 
 ### Configuration Syntax
 
-The configuration syntax is fully compatible with the original skhd. Here's a comprehensive overview:
+The configuration syntax is fully compatible with the original skhd. See [SYNTAX.md](SYNTAX.md) for the complete syntax reference and grammar. Here's a quick overview:
 
 #### Basic Hotkey Syntax
 
@@ -112,7 +140,7 @@ shift - f1 : echo "Shift+F1"
 ```bash
 # Basic modifiers
 cmd     # Command key
-ctrl    # Control key  
+ctrl    # Control key
 alt     # Alt/Option key
 shift   # Shift key
 fn      # Function key
@@ -166,7 +194,7 @@ brightness_down : echo "Brightness Down"
 # Different commands for different applications
 cmd - n [
     "terminal" : echo "New terminal window"
-    "safari"   : echo "New safari window"  
+    "safari"   : echo "New safari window"
     "finder"   : echo "New finder window"
     *          : echo "New window in other apps"
 ]
@@ -188,7 +216,7 @@ ctrl - j | down        # Remap Ctrl+J to Down Arrow
 # Process-specific forwarding
 home [
     "kitty"    ~           # Let kitty handle Home key natively
-    "terminal" ~           # Let terminal handle Home key natively  
+    "terminal" ~           # Let terminal handle Home key natively
     *          | cmd - left # In other apps, send Cmd+Left instead
 ]
 
@@ -210,7 +238,7 @@ cmd - w ; window
 
 # Commands in mode (no modifiers needed)
 window < h : echo "Focus left window"
-window < j : echo "Focus down window"  
+window < j : echo "Focus down window"
 window < k : echo "Focus up window"
 window < l : echo "Focus right window"
 window < escape ; default  # Return to default mode
@@ -259,7 +287,7 @@ cmd - p -> : echo "This runs but Cmd+P still goes to app"
 ```bash
 # Focus windows
 cmd - h : yabai -m window --focus west
-cmd - j : yabai -m window --focus south  
+cmd - j : yabai -m window --focus south
 cmd - k : yabai -m window --focus north
 cmd - l : yabai -m window --focus east
 
@@ -290,7 +318,7 @@ alt - c : open -a "Visual Studio Code"
 # Linux-style editing in macOS
 ctrl - left [
     "terminal" ~           # Let terminal handle it
-    "kitty" ~             # Let kitty handle it  
+    "kitty" ~             # Let kitty handle it
     *       | alt - left  # In other apps, word left
 ]
 
@@ -300,14 +328,14 @@ ctrl - right [
     *       | alt - right # In other apps, word right
 ]
 
-# Home/End key fixes  
+# Home/End key fixes
 home [
     "terminal" ~          # Let terminal handle it
     *          | cmd - left # In other apps, go to line start
 ]
 
 end [
-    "terminal" ~           # Let terminal handle it  
+    "terminal" ~           # Let terminal handle it
     *          | cmd - right # In other apps, go to line end
 ]
 ```
@@ -353,12 +381,12 @@ cmd - w ; window
 
 window < h : yabai -m window --focus west
 window < j : yabai -m window --focus south
-window < k : yabai -m window --focus north  
+window < k : yabai -m window --focus north
 window < l : yabai -m window --focus east
 
 # Resize submode
 window < r ; resize
-:: resize : echo ">>> Resize Mode"  
+:: resize : echo ">>> Resize Mode"
 resize < h : yabai -m window --resize left:-20:0
 resize < l : yabai -m window --resize right:20:0
 resize < escape ; window
@@ -406,10 +434,10 @@ skhd -r
 
 ## Compatibility
 
-This Zig implementation is fully compatible with original skhd configuration files. You can use your existing `.skhdrc` files without modification.
+Key improvements over the original skhd:
 
-Key differences from the original:
 - Written in Zig for better memory safety and performance
+- **New**: Process groups with `.define` for cleaner configs
 - Improved error reporting with detailed line numbers
 - Enhanced logging system
 - More robust event handling
@@ -440,27 +468,12 @@ Key differences from the original:
 ### GitHub Actions
 
 The project uses GitHub Actions for:
+
 - **CI**: Runs tests on every push and pull request
 - **Releases**: Automatically builds and uploads binaries for:
   - ARM64 (Apple Silicon) on `macos-latest`
   - x86_64 (Intel) on `macos-13`
 - **Homebrew Updates**: Automatically updates the tap formula (requires `HOMEBREW_TAP_TOKEN` secret)
-
-### Binary Distribution
-
-Pre-built binaries are available for each release:
-- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs (M1/M2/M3)
-- `skhd-x86_64-macos.tar.gz` - For Intel Macs
-
-These binaries are automatically built and uploaded to GitHub Releases when a new tag is pushed.
-
-### Homebrew
-
-A Homebrew tap is available for easy installation:
-```bash
-brew tap jackielii/homebrew-tap
-brew install skhd-zig
-```
 
 ## License
 

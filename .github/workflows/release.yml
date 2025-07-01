@@ -9,14 +9,14 @@ permissions:
 
 jobs:
   build-release:
-    runs-on: macos-latest
     strategy:
       matrix:
         include:
-          - target: aarch64-macos
+          - os: macos-latest
             arch: arm64
-          - target: x86_64-macos
+          - os: macos-13
             arch: x86_64
+    runs-on: ${{ matrix.os }}
     
     steps:
     - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
     
     - name: Build Release
       run: |
-        zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        zig build -Doptimize=ReleaseFast
         mv zig-out/bin/skhd skhd-${{ matrix.arch }}-macos
     
     - name: Create tarball

@@ -1,0 +1,35 @@
+# Test file for parser error messages
+
+# Missing '<' after mode
+mymode cmd - a : echo test
+
+# Unknown modifier
+foo - b : echo test
+
+# Missing '-' after modifier
+cmd b : echo test  
+
+# Unknown key
+cmd - unknown_key : echo test
+
+# Missing command after ':'
+cmd - c :
+
+# Unknown option
+.unknown_option
+
+# Empty process list
+cmd - d []
+
+# Missing ']' in process list
+cmd - e [ "app" : echo test
+
+# Mode already exists
+:: test_mode
+:: test_mode
+
+# Missing mode name after '::'
+::
+
+# Unknown literal key
+cmd - unknown_literal : echo

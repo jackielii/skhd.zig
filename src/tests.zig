@@ -9,6 +9,8 @@ const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
 const Logger = @import("Logger.zig");
 const Skhd = @import("skhd.zig");
+const ParseError = @import("ParseError.zig").ParseError;
+const print = std.debug.print;
 
 test "ModifierFlag basic operations" {
     // Test basic flag creation
@@ -539,6 +541,135 @@ test "Config reload preserves current mode" {
     // Should be back in default mode after reload
     try testing.expect(skhd.current_mode != null);
     try testing.expectEqualStrings("default", skhd.current_mode.?.name);
+}
+
+test "Parser error messages" {
+    const allocator = testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test missing '<' after mode
+    parser.error_info = null;
+    const err1 = parser.parse(&mappings, "mymode cmd - a : echo test");
+    try testing.expectError(error.ParseErrorOccurred, err1);
+    try testing.expect(parser.getError() != null);
+    const parse_err1 = parser.getError().?;
+    try testing.expectEqualStrings("Mode not found", parse_err1.message);
+    try testing.expect(parse_err1.line == 1);
+
+    // Create the mode first, then test missing '<'
+    _ = try Mode.init(allocator, "mymode");
+    try mappings.put_mode(try Mode.init(allocator, "mymode"));
+    parser.error_info = null;
+    const err1b = parser.parse(&mappings, "mymode cmd - a : echo test");
+    try testing.expectError(error.ParseErrorOccurred, err1b);
+    const parse_err1b = parser.getError().?;
+    try testing.expectEqualStrings("Expected '<' after mode identifier", parse_err1b.message);
+
+    // Test unknown modifier
+    parser.error_info = null;
+    const err2 = parser.parse(&mappings, "foo - b : echo test");
+    try testing.expectError(error.ParseErrorOccurred, err2);
+    try testing.expect(parser.getError() != null);
+    const parse_err2 = parser.getError().?;
+    try testing.expectEqualStrings("Unknown modifier", parse_err2.message);
+
+    // Test missing '-' after modifier
+    parser.error_info = null;
+    const err3 = parser.parse(&mappings, "cmd b : echo test");
+    try testing.expectError(error.ParseErrorOccurred, err3);
+    try testing.expect(parser.getError() != null);
+    const parse_err3 = parser.getError().?;
+    try testing.expectEqualStrings("Expected '-' after modifier", parse_err3.message);
+
+    // Test unknown key
+    parser.error_info = null;
+    const err4 = parser.parse(&mappings, "cmd - unknown_key : echo test");
+    try testing.expectError(error.ParseErrorOccurred, err4);
+    try testing.expect(parser.getError() != null);
+    const parse_err4 = parser.getError().?;
+    try testing.expectEqualStrings("Unknown key", parse_err4.message);
+
+    // Test empty process list
+    parser.error_info = null;
+    const err5 = parser.parse(&mappings, "cmd - d []");
+    try testing.expectError(error.ParseErrorOccurred, err5);
+    try testing.expect(parser.getError() != null);
+    const parse_err5 = parser.getError().?;
+    try testing.expectEqualStrings("Empty process list", parse_err5.message);
+
+    // Test duplicate mode declaration
+    parser.error_info = null;
+    const err6 = parser.parse(&mappings, ":: test_mode\n:: test_mode");
+    try testing.expectError(error.ParseErrorOccurred, err6);
+    try testing.expect(parser.getError() != null);
+    const parse_err6 = parser.getError().?;
+    try testing.expectEqualStrings("Mode already exists", parse_err6.message);
+    try testing.expect(parse_err6.line == 2);
+
+    // Test unknown option
+    parser.error_info = null;
+    const err7 = parser.parse(&mappings, ".unknown_option");
+    try testing.expectError(error.ParseErrorOccurred, err7);
+    try testing.expect(parser.getError() != null);
+    const parse_err7 = parser.getError().?;
+    try testing.expectEqualStrings("Unknown option", parse_err7.message);
+}
+
+test "Parser error message formatting" {
+
+    // Test error formatting without file path
+    const err1 = ParseError.fromPosition(5, 10, "Test error message", null);
+    var buf: [256]u8 = undefined;
+    const result1 = try std.fmt.bufPrint(&buf, "{}", .{err1});
+    try testing.expectEqualStrings("5:10: error: Test error message", result1);
+
+    // Test error formatting with file path
+    const err2 = ParseError.fromPosition(3, 7, "Another error", "test.skhdrc");
+    const result2 = try std.fmt.bufPrint(&buf, "{}", .{err2});
+    try testing.expectEqualStrings("test.skhdrc:3:7: error: Another error", result2);
+
+    // Test error with token text
+    const token = @import("Tokenizer.zig").Token{
+        .type = .Token_Key,
+        .text = "badkey",
+        .line = 2,
+        .cursor = 15,
+    };
+    const err3 = ParseError.fromToken(token, "Unknown key", "config.skhdrc");
+    const result3 = try std.fmt.bufPrint(&buf, "{}", .{err3});
+    try testing.expectEqualStrings("config.skhdrc:2:15: error: Unknown key near 'badkey'", result3);
+}
+
+test "Parser error with multiline input" {
+    const allocator = testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test error on line 3
+    const multiline_config =
+        \\# Comment line
+        \\cmd - a : echo "valid"
+        \\bad - x : echo "error"
+        \\cmd - b : echo "another"
+    ;
+
+    parser.error_info = null;
+    const err = parser.parse(&mappings, multiline_config);
+    try testing.expectError(error.ParseErrorOccurred, err);
+
+    const parse_err = parser.getError().?;
+    try testing.expectEqualStrings("Unknown modifier", parse_err.message);
+    try testing.expect(parse_err.line == 3);
+    try testing.expectEqualStrings("bad", parse_err.token_text.?);
 }
 
 test "Hot reload enable/disable" {

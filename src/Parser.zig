@@ -2,13 +2,13 @@ const std = @import("std");
 const Tokenizer = @import("./Tokenizer.zig");
 const Token = Tokenizer.Token;
 const Hotkey = @import("./Hotkey.zig");
-const print = std.debug.print;
 const assert = std.debug.assert;
 const Mode = @import("./Mode.zig");
 const Mappings = @import("./Mappings.zig");
 const Keycodes = @import("./Keycodes.zig");
 const utils = @import("./utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
+const ParseError = @import("./ParseError.zig").ParseError;
 
 const Parser = @This();
 
@@ -25,6 +25,7 @@ next_token: ?Token = undefined,
 keycodes: Keycodes = undefined,
 load_directives: std.ArrayList(LoadDirective) = undefined,
 current_file_path: ?[]const u8 = null,
+error_info: ?ParseError = null,
 
 pub fn deinit(self: *Parser) void {
     // self.allocator.free(self.filename);
@@ -35,6 +36,10 @@ pub fn deinit(self: *Parser) void {
     }
     self.load_directives.deinit();
     self.* = undefined;
+}
+
+pub fn getError(self: *const Parser) ?ParseError {
+    return self.error_info;
 }
 
 pub fn init(allocator: std.mem.Allocator) !Parser {
@@ -79,7 +84,8 @@ pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, fi
                 try self.parse_option(mappings);
             },
             else => {
-                return error.@"Unexpected token";
+                self.error_info = ParseError.fromToken(token, "Unexpected token", self.current_file_path);
+                return error.ParseErrorOccurred;
             },
         }
     }
@@ -97,7 +103,6 @@ fn previous(self: *Parser) Token {
 fn advance(self: *Parser) void {
     self.previous_token = self.next_token;
     self.next_token = self.tokenizer.get_token();
-    // print("token: {?}\n", .{self.next_token});
 }
 
 /// peek next token and check if it's the expected type
@@ -125,7 +130,9 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
 
     if (hotkey.mode_list.count() > 0) {
         if (!self.match(.Token_Insert)) {
-            return error.@"Expected '<'";
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected '<' after mode identifier", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     } else {
         const default_mode = try mappings.get_mode_or_create_default("default") orelse unreachable;
@@ -139,7 +146,9 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
 
     if (found_modifier) {
         if (!self.match(.Token_Dash)) {
-            return error.@"Unexpected token";
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected '-' after modifier", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     }
 
@@ -152,7 +161,9 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         hotkey.flags = hotkey.flags.merge(keypress.flags);
         hotkey.key = keypress.key;
     } else {
-        return error.@"Expected key, key hex, literal or modifier";
+        const token = self.peek() orelse self.previous();
+        self.error_info = ParseError.fromToken(token, "Expected key, key hex, or literal", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
 
     if (self.match(.Token_Arrow)) {
@@ -182,13 +193,18 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     assert(token.type == .Token_Identifier);
 
     const name = token.text;
-    const mode = try mappings.get_mode_or_create_default(name) orelse return error.@"Mode not found";
+    const mode = try mappings.get_mode_or_create_default(name) orelse {
+        self.error_info = ParseError.fromToken(token, "Mode not found", self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
     try hotkey.add_mode(mode);
     if (self.match(.Token_Comma)) {
         if (self.match(.Token_Identifier)) {
             try self.parse_mode(mappings, hotkey);
         } else {
-            return error.@"Expected identifier";
+            const error_token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(error_token, "Expected mode identifier after comma", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     }
 }
@@ -200,14 +216,17 @@ fn parse_modifier(self: *Parser) !ModifierFlag {
     if (ModifierFlag.get(token.text)) |modifier_flags_value| {
         flags = flags.merge(modifier_flags_value);
     } else {
-        return error.@"Unknown modifier";
+        self.error_info = ParseError.fromToken(token, "Unknown modifier", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
 
     if (self.match(.Token_Plus)) {
         if (self.match(.Token_Modifier)) {
             flags = flags.merge(try self.parse_modifier());
         } else {
-            return error.@"Expected modifier";
+            const error_token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(error_token, "Expected modifier after '+'", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     }
     return flags;
@@ -216,7 +235,13 @@ fn parse_modifier(self: *Parser) !ModifierFlag {
 fn parse_key(self: *Parser) !u32 {
     const token = self.previous();
     const key = token.text;
-    const keycode = try self.keycodes.get_keycode(key);
+    const keycode = self.keycodes.get_keycode(key) catch |err| {
+        if (err == error.@"Key not found") {
+            self.error_info = ParseError.fromToken(token, "Unknown key", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return err;
+    };
     return keycode;
 }
 
@@ -250,7 +275,8 @@ fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
             break;
         }
     } else {
-        return error.@"Unknown literal key";
+        self.error_info = ParseError.fromToken(token, "Unknown literal key", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
 
     return Hotkey.KeyPress{ .flags = flags, .key = keycode };
@@ -266,7 +292,10 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
     }
 
     if (found_modifier and !self.match(.Token_Dash)) {
-        return error.@"Unexpected token";
+        const token = self.peek() orelse self.previous();
+        self.error_info = ParseError.fromToken(token, "Expected '-' after modifier", self.current_file_path);
+        // Error already set in self.error_info
+        return error.ParseErrorOccurred;
     }
 
     if (self.match(.Token_Key)) {
@@ -278,7 +307,9 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
         flags = flags.merge(keypress.flags);
         keycode = keypress.key;
     } else {
-        return error.@"Expected key, key hex, literal or modifier";
+        const token = self.peek() orelse self.previous();
+        self.error_info = ParseError.fromToken(token, "Expected key, key hex, or literal", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
 
     return Hotkey.KeyPress{ .flags = flags, .key = keycode };
@@ -295,7 +326,9 @@ fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
         } else if (self.match(.Token_Unbound)) {
             try hotkey.add_proc_unbound();
         } else {
-            return error.@"Expected command ':', forward '|' or unbound '~'";
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected command ':', forward '|' or unbound '~' after process name", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
         try self.parse_proc_list(hotkey);
     } else if (self.match(.Token_Wildcard)) {
@@ -306,22 +339,30 @@ fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
         } else if (self.match(.Token_Unbound)) {
             hotkey.set_wildcard_unbound();
         } else {
-            return error.@"Expected command ':', forward '|' or unbound '~'";
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected command ':', forward '|' or unbound '~' after wildcard", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
         try self.parse_proc_list(hotkey);
     } else if (self.match(.Token_EndList)) {
         if (hotkey.process_names.items.len == 0) {
-            return error.@"Expected string, wildcard or end list";
+            const token = self.previous();
+            self.error_info = ParseError.fromToken(token, "Empty process list", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     } else {
-        return error.@"Expected string, wildcard or end list";
+        const token = self.peek() orelse self.previous();
+        self.error_info = ParseError.fromToken(token, "Expected process name, wildcard '*' or ']'", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
 }
 
 fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
     assert(self.match(.Token_Decl));
     if (!self.match(.Token_Identifier)) {
-        return error.@"Expected identifier";
+        const token = self.peek() orelse self.previous();
+        self.error_info = ParseError.fromToken(token, "Expected mode name after '::'", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
     const token = self.previous();
     const mode_name = token.text;
@@ -343,7 +384,8 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
             existing_mode.capture = mode.capture;
             if (mode.command) |cmd| try existing_mode.set_command(cmd);
         } else if (std.mem.eql(u8, existing_mode.name, mode_name)) {
-            return error.@"Mode already exists";
+            self.error_info = ParseError.fromToken(self.previous(), "Mode already exists", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     } else {
         try mappings.put_mode(mode);
@@ -363,7 +405,9 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
                 .token = filename_token,
             });
         } else {
-            return error.@"Expected filename";
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected filename after '.load'", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     } else if (std.mem.eql(u8, option, "blacklist")) {
         if (self.match(.Token_BeginList)) {
@@ -372,19 +416,26 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
                 try mappings.add_blacklist(token.text);
             }
             if (!self.match(.Token_EndList)) {
-                return error.@"Expected ']'";
+                const token = self.peek() orelse self.previous();
+                self.error_info = ParseError.fromToken(token, "Expected ']' to close blacklist", self.current_file_path);
+                return error.ParseErrorOccurred;
             }
         } else {
-            return error.@"Expected '['";
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected '[' after '.blacklist'", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     } else if (std.mem.eql(u8, option, "shell") or std.mem.eql(u8, option, "SHELL")) {
         if (self.match(.Token_String)) {
             try mappings.set_shell(self.previous().text);
         } else {
-            return error.@"Expected string";
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected shell path after '.shell'", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
     } else {
-        return error.@"Unknown option";
+        self.error_info = ParseError.fromToken(self.previous(), "Unknown option", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
 }
 
@@ -395,14 +446,10 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         defer self.allocator.free(resolved_path);
 
         // Read the file content
-        const content = std.fs.cwd().readFileAlloc(self.allocator, resolved_path, 1 << 20) catch |err| {
+        const content = std.fs.cwd().readFileAlloc(self.allocator, resolved_path, 1 << 20) catch {
             // Report error with line info from the .load directive
-            std.debug.print("skhd: could not open file '{s}' from load directive #{d}:{d}\n", .{
-                resolved_path,
-                directive.token.line,
-                directive.token.cursor,
-            });
-            return err;
+            self.error_info = ParseError.fromToken(directive.token, "Could not open included file", self.current_file_path);
+            return error.ParseErrorOccurred;
         };
         defer self.allocator.free(content);
 
@@ -475,22 +522,6 @@ test "Parse" {
     );
     // print("{s}\n", .{mappings});
 }
-
-// TODO: This test times out because it prints the entire mappings structure
-// test "Parse my skhd.conf" {
-//     const alloc = std.testing.allocator;
-//     const content = try std.fs.cwd().readFileAlloc(alloc, "/Users/jackieli/.config/skhd/skhdrc", 1 << 16);
-//     defer alloc.free(content);
-
-//     var parser = try Parser.init(alloc);
-//     defer parser.deinit();
-
-//     var mappings = try Mappings.init(alloc);
-//     defer mappings.deinit();
-
-//     try parser.parse(&mappings, content);
-//     // print("{s}\n", .{mappings});
-// }
 
 test "Parse mode decl" {
     const alloc = std.testing.allocator;
@@ -671,5 +702,5 @@ test "shell directive error handling" {
 
     // Test missing shell path
     const content = ".shell";
-    try std.testing.expectError(error.@"Expected string", parser.parse(&mappings, content));
+    try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 }

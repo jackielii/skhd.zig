@@ -40,7 +40,13 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
     const content = try std.fs.cwd().readFileAlloc(allocator, config_file, 1 << 20); // 1MB max
     defer allocator.free(content);
 
-    try parser.parseWithPath(&mappings, content, config_file);
+    parser.parseWithPath(&mappings, content, config_file) catch |err| {
+        if (err == error.ParseErrorOccurred) {
+            // Parse errors have already been logged by the parser
+            return err;
+        }
+        return err;
+    };
 
     // Process any .load directives
     try parser.processLoadDirectives(&mappings);
@@ -668,7 +674,16 @@ pub fn reloadConfig(self: *Skhd) !void {
     const content = try std.fs.cwd().readFileAlloc(self.allocator, self.config_file, 1 << 20);
     defer self.allocator.free(content);
 
-    try parser.parseWithPath(&new_mappings, content, self.config_file);
+    parser.parseWithPath(&new_mappings, content, self.config_file) catch |err| {
+        if (err == error.ParseErrorOccurred) {
+            // Log the parse error with proper formatting
+            if (parser.getError()) |parse_err| {
+                try self.logger.logError("skhd: {}", .{parse_err});
+            }
+            return err;
+        }
+        return err;
+    };
     try parser.processLoadDirectives(&new_mappings);
 
     // Swap old mappings with new ones

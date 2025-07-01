@@ -39,17 +39,17 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [x] `-k` / `--key` - Synthesize keypress
 - [x] `-t` / `--text` - Synthesize text input
 - [ ] `-P` / `--profile` - Profiling output
-- [ ] `-r` / `--reload` - Signal reload to running instance
-- [ ] `-h` / `--no-hotload` - Disable hotloading
+- [x] `-r` / `--reload` - Signal reload to running instance
+- [x] `-h` / `--no-hotload` - Disable hotloading
 
 ### Service Management
-- [ ] `--install-service` - Install launchd service
-- [ ] `--uninstall-service` - Remove launchd service
-- [ ] `--start-service` - Start as service
-- [ ] `--restart-service` - Restart service
-- [ ] `--stop-service` - Stop service
-- [ ] PID file management (`/tmp/skhd_$USER.pid`)
-- [ ] Service logging (`/tmp/skhd_$USER.{out,err}.log`)
+- [x] `--install-service` - Install launchd service
+- [x] `--uninstall-service` - Remove launchd service
+- [x] `--start-service` - Start as service
+- [x] `--restart-service` - Restart service
+- [x] `--stop-service` - Stop service
+- [x] PID file management (`/tmp/skhd_$USER.pid`)
+- [x] Service logging (`/tmp/skhd_$USER.log`)
 
 ### Configuration Features
 - [x] Default config file resolution (`~/.skhdrc`, `~/.config/skhd/skhdrc`)
@@ -58,16 +58,16 @@ This implementation provides a fully functional hotkey daemon with modal support
 - [x] `.shell` directive for custom shell
 - [x] Modal activation commands
 - [x] Capture mode (`@` modifier) for modes
-- [ ] Config file error reporting with line numbers
+- [x] Config file error reporting with line numbers
 
 ### Hotkey Features
-- [ ] Hyper and Meh modifier support
-- [ ] Function key modifier
-- [ ] Media key support (brightness, volume, playbook)
+- [x] Hyper and Meh modifier support
+- [x] Function key modifier
+- [x] Media key support (brightness, volume, playbook)
 - [x] Passthrough mode (`->` operator)
-- [ ] Wildcard commands (`*` in process lists)
-- [ ] Unbound keys (`~` operator)
-- [ ] System-defined key events (NX_SYSDEFINED)
+- [x] Wildcard commands (`*` in process lists)
+- [x] Unbound keys (`~` operator)
+- [x] System-defined key events (NX_SYSDEFINED)
 
 ### Hotloading
 - [ ] FSEvents-based file watching

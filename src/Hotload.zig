@@ -1,76 +1,98 @@
 const std = @import("std");
-const posix = std.posix;
-const c = @cImport({
-    @cInclude("CoreFoundation/CoreFoundation.h");
-});
+const c = @import("c.zig");
 
-const Self = @This();
+const Hotload = @This();
 
+// Public callback type - simplified to just take the file path
+pub const Callback = *const fn (path: []const u8) void;
+
+// Watched file entry - simplified
+const WatchedFile = struct {
+    absolutepath: []u8,
+};
+
+// Core fields
 allocator: std.mem.Allocator,
-kq_fd: i32 = -1,
-dir_fd: i32 = -1,
-callback: *const fn (path: []const u8) void,
-watch_path: []u8,
+callback: Callback,
+watch_list: std.ArrayList(WatchedFile),
 enabled: bool = false,
-timer: ?c.CFRunLoopTimerRef = null,
 
-pub fn init(allocator: std.mem.Allocator, callback: *const fn (path: []const u8) void) Self {
+// FSEvents fields
+stream: ?c.FSEventStreamRef = null,
+paths: ?c.CFMutableArrayRef = null,
+
+pub fn init(allocator: std.mem.Allocator, callback: Callback) Hotload {
     return .{
         .allocator = allocator,
         .callback = callback,
-        .watch_path = &[_]u8{},
+        .watch_list = std.ArrayList(WatchedFile).init(allocator),
     };
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *Hotload) void {
     self.stop();
-    if (self.watch_path.len > 0) {
-        self.allocator.free(self.watch_path);
+
+    // Free all watched files
+    for (self.watch_list.items) |*entry| {
+        self.allocator.free(entry.absolutepath);
     }
+    self.watch_list.deinit();
 }
 
-pub fn watchFile(self: *Self, path: []const u8) !void {
-    if (self.enabled) return error.AlreadyRunning;
+pub fn addFile(self: *Hotload, file_path: []const u8) !bool {
+    if (self.enabled) return false;
 
-    // Get the directory of the file to watch
-    const last_slash = std.mem.lastIndexOf(u8, path, "/") orelse return error.InvalidPath;
-    const dir_path = path[0..last_slash];
+    // Resolve symlinks and get real path
+    const real_path = try resolveSymlink(self.allocator, file_path);
+    errdefer self.allocator.free(real_path);
 
-    // Store the directory path
-    self.watch_path = try self.allocator.dupe(u8, dir_path);
-    errdefer self.allocator.free(self.watch_path);
-
-    // Create kqueue
-    self.kq_fd = try posix.kqueue();
-    errdefer {
-        posix.close(self.kq_fd);
-        self.kq_fd = -1;
+    // Verify it's a file
+    const stat = try std.fs.cwd().statFile(real_path);
+    if (stat.kind != .file) {
+        self.allocator.free(real_path);
+        return false;
     }
 
-    // Open directory for watching
-    const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
-    defer self.allocator.free(dir_path_z);
+    // Add to watch list
+    try self.watch_list.append(.{
+        .absolutepath = real_path,
+    });
 
-    self.dir_fd = try posix.open(dir_path_z, .{ .ACCMODE = .RDONLY }, 0);
+    return true;
+}
+
+pub fn start(self: *Hotload) !bool {
+    if (self.enabled or self.watch_list.items.len == 0) return false;
+
+    // Create array of paths to watch
+    self.paths = c.CFArrayCreateMutable(c.kCFAllocatorDefault, 0, &c.kCFTypeArrayCallBacks);
+    if (self.paths == null) return error.CFArrayCreationFailed;
     errdefer {
-        posix.close(self.dir_fd);
-        self.dir_fd = -1;
+        if (self.paths) |p| c.CFRelease(@ptrCast(p));
+        self.paths = null;
     }
 
-    // Register directory for watching with kqueue
-    const changes = [1]posix.Kevent{.{
-        .ident = @bitCast(@as(isize, self.dir_fd)),
-        .filter = std.c.EVFILT.VNODE,
-        .flags = std.c.EV.ADD | std.c.EV.ENABLE | std.c.EV.CLEAR,
-        .fflags = std.c.NOTE.DELETE | std.c.NOTE.WRITE | std.c.NOTE.RENAME | std.c.NOTE.REVOKE,
-        .data = 0,
-        .udata = 0,
-    }};
+    // Collect unique directories to watch
+    var seen_dirs = std.StringHashMap(void).init(self.allocator);
+    defer seen_dirs.deinit();
 
-    _ = try posix.kevent(self.kq_fd, &changes, &.{}, null);
+    // Extract directories from file paths and add to FSEvents
+    for (self.watch_list.items) |entry| {
+        // Get directory from file path
+        const last_slash = std.mem.lastIndexOf(u8, entry.absolutepath, "/") orelse continue;
+        const directory = entry.absolutepath[0..last_slash];
 
-    // Create CFRunLoopTimer for periodic kqueue checking
-    var context = c.CFRunLoopTimerContext{
+        // Only add each directory once
+        if (seen_dirs.contains(directory)) continue;
+        try seen_dirs.put(directory, {});
+
+        const cf_path = createCFString(directory) orelse return error.CFStringCreationFailed;
+        c.CFArrayAppendValue(self.paths.?, @ptrCast(cf_path));
+        c.CFRelease(@ptrCast(cf_path)); // Array retains it
+    }
+
+    // Create FSEventStream context
+    var context = c.FSEventStreamContext{
         .version = 0,
         .info = @ptrCast(self),
         .retain = null,
@@ -78,66 +100,207 @@ pub fn watchFile(self: *Self, path: []const u8) !void {
         .copyDescription = null,
     };
 
-    self.timer = c.CFRunLoopTimerCreate(null, c.CFAbsoluteTimeGetCurrent() + 0.5, // Start in 0.5 seconds
-        0.5, // Repeat every 0.5 seconds
-        0, 0, timerCallback, &context);
+    // Create the event stream
+    const flags = c.kFSEventStreamCreateFlagNoDefer | c.kFSEventStreamCreateFlagFileEvents;
+    self.stream = c.FSEventStreamCreate(
+        c.kCFAllocatorDefault,
+        fseventsCallback,
+        &context,
+        self.paths.?,
+        c.kFSEventStreamEventIdSinceNow,
+        0.5, // latency in seconds
+        flags,
+    );
 
-    if (self.timer == null) {
-        return error.TimerCreationFailed;
+    if (self.stream == null) return error.StreamCreationFailed;
+    errdefer {
+        if (self.stream) |s| c.FSEventStreamRelease(s);
+        self.stream = null;
     }
 
-    // Add timer to current run loop
-    c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), self.timer.?, c.kCFRunLoopDefaultMode);
+    // Schedule with run loop
+    c.FSEventStreamScheduleWithRunLoop(
+        self.stream.?,
+        c.CFRunLoopGetMain(),
+        c.kCFRunLoopDefaultMode,
+    );
+
+    // Start the stream
+    const started = c.FSEventStreamStart(self.stream.?);
+    if (started == 0) return error.StreamStartFailed;
 
     self.enabled = true;
-    std.log.warn("Hot reload timer started, checking every 0.5 seconds", .{});
+    return true;
 }
 
-pub fn stop(self: *Self) void {
+pub fn stop(self: *Hotload) void {
     if (!self.enabled) return;
 
-    // Remove and release timer
-    if (self.timer) |timer| {
-        c.CFRunLoopTimerInvalidate(timer);
-        c.CFRelease(timer);
-        self.timer = null;
+    if (self.stream) |stream| {
+        c.FSEventStreamStop(stream);
+        c.FSEventStreamInvalidate(stream);
+        c.FSEventStreamRelease(stream);
+        self.stream = null;
     }
 
-    // Clean up file descriptors
-    if (self.dir_fd != -1) {
-        posix.close(self.dir_fd);
-        self.dir_fd = -1;
-    }
-
-    if (self.kq_fd != -1) {
-        posix.close(self.kq_fd);
-        self.kq_fd = -1;
+    if (self.paths) |paths| {
+        c.CFRelease(@ptrCast(paths));
+        self.paths = null;
     }
 
     self.enabled = false;
 }
 
-fn checkForEvents(self: *Self) void {
-    if (!self.enabled or self.kq_fd == -1) return;
+// Helper functions
 
-    var event_buffer: [10]posix.Kevent = undefined;
-    var timeout = posix.timespec{ .sec = 0, .nsec = 0 }; // Non-blocking
-
-    const n = posix.kevent(self.kq_fd, &.{}, &event_buffer, &timeout) catch |err| {
-        std.log.warn("kqueue error: {s}", .{@errorName(err)});
-        return;
+fn resolveSymlink(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    // Try to stat the file
+    const stat = std.fs.cwd().statFile(path) catch {
+        // If stat fails, just return a copy of the path
+        return allocator.dupe(u8, path);
     };
 
-    if (n > 0) {
-        std.log.warn("File system events detected ({d} events), triggering reload", .{n});
-        // File system events detected - trigger callback
-        self.callback(self.watch_path);
+    // If it's not a symlink, return a copy
+    if (stat.kind != .sym_link) {
+        return allocator.dupe(u8, path);
+    }
+
+    // Resolve the symlink
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const real_path = try std.fs.cwd().realpath(path, &buffer);
+    return allocator.dupe(u8, real_path);
+}
+
+fn createCFString(str: []const u8) ?c.CFStringRef {
+    return c.CFStringCreateWithBytes(
+        c.kCFAllocatorDefault,
+        str.ptr,
+        @intCast(str.len),
+        c.kCFStringEncodingUTF8,
+        0, // false
+    );
+}
+
+// FSEvents callback
+fn fseventsCallback(
+    stream: c.ConstFSEventStreamRef,
+    client_info: ?*anyopaque,
+    num_events: usize,
+    event_paths: ?*anyopaque,
+    event_flags: [*c]const c.FSEventStreamEventFlags,
+    event_ids: [*c]const c.FSEventStreamEventId,
+) callconv(.C) void {
+    _ = stream;
+    _ = event_flags;
+    _ = event_ids;
+
+    const self = @as(*Hotload, @ptrCast(@alignCast(client_info.?)));
+    // FSEvents passes paths as char**, not CFStringRef*
+    const paths = @as([*][*:0]const u8, @ptrCast(@alignCast(event_paths.?)));
+
+    for (0..num_events) |i| {
+        // Get the path that changed - it's already a C string!
+        const changed_path = std.mem.span(paths[i]);
+
+        // Check which watched file matches
+        for (self.watch_list.items) |entry| {
+            if (std.mem.eql(u8, changed_path, entry.absolutepath)) {
+                self.callback(entry.absolutepath);
+                break;
+            }
+        }
     }
 }
 
-fn timerCallback(timer: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
-    _ = timer;
-    if (info == null) return;
-    const self: *Self = @ptrCast(@alignCast(info.?));
-    self.checkForEvents();
+// Test support
+var test_reload_count: u32 = 0;
+
+fn testCallback(path: []const u8) void {
+    _ = path;
+    test_reload_count += 1;
+}
+
+test "hotload file watching" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Reset test state
+    test_reload_count = 0;
+
+    // Create a test file with absolute path
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_path = try std.fs.cwd().realpath(".", &path_buf);
+    const test_file = try std.fmt.allocPrint(allocator, "{s}/test_hotload_file.txt", .{cwd_path});
+    defer allocator.free(test_file);
+
+    try std.fs.cwd().writeFile(.{ .sub_path = "test_hotload_file.txt", .data = "Initial content\n" });
+
+    // Initialize hotloader
+    var hotloader = init(allocator, testCallback);
+    defer hotloader.deinit();
+
+    // Add the test file
+    const added = try hotloader.addFile(test_file);
+    try testing.expect(added);
+
+    // Start watching
+    const started = try hotloader.start();
+    try testing.expect(started);
+
+    // Create a timer to modify the file and stop the run loop
+    const TimerContext = struct {
+        count: u32 = 0,
+
+        fn timerCallback(timer: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
+            _ = timer;
+            const self = @as(*@This(), @ptrCast(@alignCast(info.?)));
+            self.count += 1;
+
+            // Modify the file
+            const new_content = std.fmt.allocPrint(
+                std.heap.c_allocator,
+                "Modified content {}\n",
+                .{self.count},
+            ) catch return;
+            defer std.heap.c_allocator.free(new_content);
+
+            std.fs.cwd().writeFile(.{ .sub_path = "test_hotload_file.txt", .data = new_content }) catch return;
+
+            if (self.count >= 3) {
+                // Stop after 3 modifications
+                c.CFRunLoopStop(c.CFRunLoopGetCurrent());
+            }
+        }
+    };
+
+    var timer_ctx = TimerContext{};
+    var timer_context = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = @ptrCast(&timer_ctx),
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+
+    const timer = c.CFRunLoopTimerCreate(
+        null,
+        c.CFAbsoluteTimeGetCurrent() + 0.5, // Start in 0.5 seconds
+        0.5, // Repeat every 0.5 seconds
+        0,
+        0,
+        TimerContext.timerCallback,
+        &timer_context,
+    );
+    defer c.CFRelease(timer);
+
+    c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopDefaultMode);
+
+    // Run the event loop for a limited time
+    _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 3.0, 0); // Run for max 3 seconds
+
+    // Clean up test file before checking
+    std.fs.cwd().deleteFile("test_hotload_file.txt") catch {};
+
+    // Verify we got at least 2 file change events (sometimes FSEvents coalesces)
+    try testing.expect(test_reload_count >= 2);
 }

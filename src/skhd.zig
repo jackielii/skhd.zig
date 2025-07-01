@@ -705,11 +705,29 @@ pub fn enableHotReload(self: *Skhd) !void {
 
     try self.logger.logInfo("Enabling hot reload...", .{});
 
-    // Create hotloader
+    // Store self reference for callback
+    global_skhd = self;
+
+    // Create hotloader with a callback that can access self
     var hotloader = Hotload.init(self.allocator, hotloadCallback);
 
-    try self.logger.logInfo("Watching file: {s}", .{self.config_file});
-    try hotloader.watchFile(self.config_file);
+    // Resolve to absolute path for FSEvents
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_path = try std.fs.cwd().realpath(self.config_file, &path_buf);
+
+    try self.logger.logInfo("Watching file: {s} (resolved to: {s})", .{ self.config_file, abs_path });
+    const added = try hotloader.addFile(abs_path);
+    if (!added) {
+        hotloader.deinit();
+        return error.FailedToWatchFile;
+    }
+
+    // Start the hotloader
+    const started = try hotloader.start();
+    if (!started) {
+        hotloader.deinit();
+        return error.FailedToStartHotloader;
+    }
 
     self.hotloader = hotloader;
     self.hotload_enabled = true;
@@ -733,11 +751,13 @@ pub fn disableHotReload(self: *Skhd) void {
 fn hotloadCallback(path: []const u8) void {
     _ = path;
 
-    // FSEvents callbacks can run on different threads
-    // Send SIGUSR1 to trigger reload from main thread
-    // Use C directly to avoid any Zig runtime issues
-    const pid = std.c.getpid();
-    _ = std.c.kill(pid, 10); // SIGUSR1 = 10
+    // Follow the original skhd approach - directly reload the config
+    if (global_skhd) |skhd| {
+        skhd.logger.logInfo("Config file has been modified.. reloading config", .{}) catch {};
+        skhd.reloadConfig() catch |err| {
+            skhd.logger.logError("Failed to reload config: {}", .{err}) catch {};
+        };
+    }
 }
 /// Read child process output synchronously
 fn readChildOutputSync(self: *Skhd, child: *std.process.Child) !void {

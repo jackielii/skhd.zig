@@ -91,6 +91,7 @@ pub fn build(b: *std.Build) void {
         "src/EventTap.zig",
         "src/synthesize.zig",
         "src/Logger.zig",
+        "src/Hotload.zig",
     };
 
     for (test_files) |test_file| {

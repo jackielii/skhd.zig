@@ -10,8 +10,13 @@ permissions:
 jobs:
   build-release:
     runs-on: macos-latest
-    # Only build for the native architecture for now
-    # Cross-compilation for macOS frameworks is complex
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-macos
+            arch: arm64
+          - target: x86_64-macos
+            arch: x86_64
     
     steps:
     - uses: actions/checkout@v4
@@ -23,13 +28,12 @@ jobs:
     
     - name: Build Release
       run: |
-        zig build -Doptimize=ReleaseFast
-        # GitHub Actions runs on x86_64 for now
-        mv zig-out/bin/skhd skhd-x86_64-macos
+        zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        mv zig-out/bin/skhd skhd-${{ matrix.arch }}-macos
     
     - name: Create tarball
       run: |
-        tar -czf skhd-x86_64-macos.tar.gz skhd-x86_64-macos
+        tar -czf skhd-${{ matrix.arch }}-macos.tar.gz skhd-${{ matrix.arch }}-macos
     
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
@@ -37,7 +41,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./skhd-x86_64-macos.tar.gz
-        asset_name: skhd-x86_64-macos.tar.gz
+        asset_path: ./skhd-${{ matrix.arch }}-macos.tar.gz
+        asset_name: skhd-${{ matrix.arch }}-macos.tar.gz
         asset_content_type: application/gzip
 

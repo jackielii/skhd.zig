@@ -138,7 +138,24 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
 
     // Set up event tap (but don't start run loop yet)
     try self.logger.logInfo("Starting event tap", .{});
-    try self.event_tap.begin(keyHandler, self);
+    self.event_tap.begin(keyHandler, self) catch |err| {
+        if (err == error.AccessibilityPermissionDenied) {
+            try self.logger.logError("\n" ++
+                "=====================================================\n" ++
+                "ACCESSIBILITY PERMISSIONS REQUIRED\n" ++
+                "=====================================================\n" ++
+                "skhd requires accessibility permissions to function.\n" ++
+                "\n" ++
+                "Please grant accessibility permissions:\n" ++
+                "1. Open System Settings → Privacy & Security → Accessibility\n" ++
+                "2. Click the lock to make changes\n" ++
+                "3. Add this binary: {s}\n" ++
+                "4. Make sure it's enabled (checkbox checked)\n" ++
+                "5. Restart skhd\n" ++
+                "=====================================================\n", .{std.fs.selfExePathAlloc(self.allocator) catch "/opt/homebrew/bin/skhd"});
+        }
+        return err;
+    };
 
     // Call NSApplicationLoad() like the original skhd
     c.NSApplicationLoad();

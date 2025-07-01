@@ -20,7 +20,7 @@ pub fn begin(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyop
         self.runloop_source = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, self.handle, 0);
         c.CFRunLoopAddSource(c.CFRunLoopGetMain(), self.runloop_source, c.kCFRunLoopCommonModes);
     } else {
-        return error.@"Failed to create event tap";
+        return error.AccessibilityPermissionDenied;
     }
 }
 

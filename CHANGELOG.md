@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for uppercase option names (.SHELL, .BLACKLIST) in configuration files
 - Improved error reporting to show parse errors with line numbers during initialization
 - Parser now properly handles comma-separated lists in .define directives
-- Simplified release workflow to build natively for x86_64 (Apple Silicon users can build from source)
+- Exit with proper error when config file is not a regular file (e.g., /dev/null)
+- Fixed release workflow permissions for uploading artifacts
+- Simplified release workflow to build natively for each architecture
 
 ## [0.0.1] - 2025-01-01
 

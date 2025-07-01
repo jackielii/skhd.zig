@@ -120,6 +120,17 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Store a global reference for the signal handler
     global_skhd = self;
 
+    // Check if config file is a regular file
+    const stat = std.fs.cwd().statFile(self.config_file) catch |err| {
+        try self.logger.logError("Cannot stat config file {s}: {}", .{ self.config_file, err });
+        return err;
+    };
+
+    if (stat.kind != .file) {
+        try self.logger.logError("Config file {s} is not a regular file", .{self.config_file});
+        return error.InvalidConfigFile;
+    }
+
     // Enable hot reload if requested (must be done before run loop starts)
     if (enable_hotload) {
         try self.enableHotReload();

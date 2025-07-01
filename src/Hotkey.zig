@@ -18,7 +18,8 @@ const ModifierFlag = @import("./Keycodes.zig").ModifierFlag;
 pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
     pub fn hash(self: @This(), key: *Hotkey) u32 {
         _ = self;
-        return @as(u32, @bitCast(key.flags)) ^ key.key;
+        // Like original skhd, only hash by key code to allow modifier matching during lookup
+        return key.key;
     }
     pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
         _ = self;
@@ -33,16 +34,17 @@ pub const KeyPress = struct {
 
 pub fn eql(a: *Hotkey, b: *Hotkey) bool {
     // Implement left/right modifier comparison logic like original skhd
-    return compareLRMod(a, b, .alt) and
-        compareLRMod(a, b, .cmd) and
-        compareLRMod(a, b, .control) and
-        compareLRMod(a, b, .shift) and
-        compareFn(a, b) and
-        compareNX(a, b) and
+    // Note: This is for HashMap equality check, both are from config
+    return compareLRMod(a.flags, b.flags, .alt) and
+        compareLRMod(a.flags, b.flags, .cmd) and
+        compareLRMod(a.flags, b.flags, .control) and
+        compareLRMod(a.flags, b.flags, .shift) and
+        a.flags.@"fn" == b.flags.@"fn" and
+        a.flags.nx == b.flags.nx and
         a.key == b.key;
 }
 
-fn compareLRMod(a: *Hotkey, b: *Hotkey, comptime mod: enum { alt, cmd, control, shift }) bool {
+fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd, control, shift }) bool {
     const general_field = switch (mod) {
         .alt => "alt",
         .cmd => "cmd",
@@ -62,29 +64,17 @@ fn compareLRMod(a: *Hotkey, b: *Hotkey, comptime mod: enum { alt, cmd, control, 
         .shift => "rshift",
     };
 
-    const a_general = @field(a.flags, general_field);
-    const a_left = @field(a.flags, left_field);
-    const a_right = @field(a.flags, right_field);
+    const a_general = @field(a, general_field);
+    const a_left = @field(a, left_field);
+    const a_right = @field(a, right_field);
 
-    const b_general = @field(b.flags, general_field);
-    const b_left = @field(b.flags, left_field);
-    const b_right = @field(b.flags, right_field);
+    const b_general = @field(b, general_field);
+    const b_left = @field(b, left_field);
+    const b_right = @field(b, right_field);
 
-    // If hotkey A has general modifier, it matches any of general/left/right in B
-    if (a_general) {
-        return b_left or b_right or b_general;
-    }
-
-    // Otherwise, each specific modifier must match exactly
-    return a_left == b_left and a_right == b_right and a_general == b_general;
-}
-
-fn compareFn(a: *Hotkey, b: *Hotkey) bool {
-    return a.flags.@"fn" == b.flags.@"fn";
-}
-
-fn compareNX(a: *Hotkey, b: *Hotkey) bool {
-    return a.flags.nx == b.flags.nx;
+    // For HashMap equality, we need exact match
+    // Both hotkeys are from config, so exact comparison is correct
+    return a_general == b_general and a_left == b_left and a_right == b_right;
 }
 
 const processCommand = union(enum) {

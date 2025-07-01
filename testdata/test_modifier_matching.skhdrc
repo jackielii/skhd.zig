@@ -1,0 +1,12 @@
+# Test modifier matching behavior
+# General modifiers in config should match any specific modifier from keyboard
+
+# General alt should match alt, lalt, or ralt
+alt - a : echo "alt - a pressed"
+
+# Specific lalt should only match lalt
+lalt - b : echo "lalt - b pressed"
+
+# Test with multiple modifiers
+cmd + shift - c : echo "cmd + shift - c pressed"
+lcmd + lshift - d : echo "lcmd + lshift - d pressed"

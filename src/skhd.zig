@@ -337,35 +337,35 @@ fn forwardKey(target_key: Hotkey.KeyPress, original_event: c.CGEventRef) !bool {
 }
 
 /// Compare hotkey flags, handling left/right modifier logic
-/// a = hotkey from config, b = event from keyboard
-fn hotkeyFlagsMatch(a_flags: ModifierFlag, b_flags: ModifierFlag) bool {
+/// config = hotkey from config file, keyboard = event from keyboard
+pub fn hotkeyFlagsMatch(config: ModifierFlag, keyboard: ModifierFlag) bool {
     // Match logic from original skhd:
     // If config has general modifier (alt), keyboard can have general, left, or right
     // If config has specific modifier (lalt), keyboard must match exactly
 
-    const alt_match = if (a_flags.alt)
-        (b_flags.alt or b_flags.lalt or b_flags.ralt)
+    const alt_match = if (config.alt)
+        (keyboard.alt or keyboard.lalt or keyboard.ralt)
     else
-        (a_flags.lalt == b_flags.lalt and a_flags.ralt == b_flags.ralt and a_flags.alt == b_flags.alt);
+        (config.lalt == keyboard.lalt and config.ralt == keyboard.ralt and config.alt == keyboard.alt);
 
-    const cmd_match = if (a_flags.cmd)
-        (b_flags.cmd or b_flags.lcmd or b_flags.rcmd)
+    const cmd_match = if (config.cmd)
+        (keyboard.cmd or keyboard.lcmd or keyboard.rcmd)
     else
-        (a_flags.lcmd == b_flags.lcmd and a_flags.rcmd == b_flags.rcmd and a_flags.cmd == b_flags.cmd);
+        (config.lcmd == keyboard.lcmd and config.rcmd == keyboard.rcmd and config.cmd == keyboard.cmd);
 
-    const ctrl_match = if (a_flags.control)
-        (b_flags.control or b_flags.lcontrol or b_flags.rcontrol)
+    const ctrl_match = if (config.control)
+        (keyboard.control or keyboard.lcontrol or keyboard.rcontrol)
     else
-        (a_flags.lcontrol == b_flags.lcontrol and a_flags.rcontrol == b_flags.rcontrol and a_flags.control == b_flags.control);
+        (config.lcontrol == keyboard.lcontrol and config.rcontrol == keyboard.rcontrol and config.control == keyboard.control);
 
-    const shift_match = if (a_flags.shift)
-        (b_flags.shift or b_flags.lshift or b_flags.rshift)
+    const shift_match = if (config.shift)
+        (keyboard.shift or keyboard.lshift or keyboard.rshift)
     else
-        (a_flags.lshift == b_flags.lshift and a_flags.rshift == b_flags.rshift and a_flags.shift == b_flags.shift);
+        (config.lshift == keyboard.lshift and config.rshift == keyboard.rshift and config.shift == keyboard.shift);
 
     return alt_match and cmd_match and ctrl_match and shift_match and
-        a_flags.@"fn" == b_flags.@"fn" and
-        a_flags.nx == b_flags.nx;
+        config.@"fn" == keyboard.@"fn" and
+        config.nx == keyboard.nx;
 }
 
 fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
@@ -423,21 +423,54 @@ fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
     return flags;
 }
 
+// Context for looking up hotkeys from keyboard events
+// This uses our custom modifier matching logic
+pub const KeyboardLookupContext = struct {
+    pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
+        // Must match the hash function used by HotkeyMap for lookup to work
+        return key.key;
+    }
+
+    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
+        // Match keyboard event against config hotkey
+        return config.key == keyboard.key and hotkeyFlagsMatch(config.flags, keyboard.flags);
+    }
+};
+
+/// Find a hotkey in the mode that matches the keyboard event
+/// Returns the hotkey pointer if found, null otherwise
+pub fn findHotkeyInMode(mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+    // Method 1: HashMap lookup with adapted context (O(1) average case)
+    // return findHotkeyHashMap(mode, eventkey);
+
+    // Method 2: Linear array search (O(n) but potentially faster for small sets)
+    return findHotkeyLinear(mode, eventkey);
+}
+
+/// HashMap-based lookup using adapted context
+fn findHotkeyHashMap(mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+    const ctx = KeyboardLookupContext{};
+    return mode.hotkey_map.getKeyAdapted(eventkey, ctx);
+}
+
+/// Linear search through all hotkeys in the mode
+fn findHotkeyLinear(mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+    var it = mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
+            return hotkey;
+        }
+    }
+    return null;
+}
+
 fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef) !bool {
     // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
-    // Find matching hotkey in the mode without allocation
-    var found_hotkey: ?*Hotkey = null;
-    var it = mode.hotkey_map.iterator();
-    while (it.next()) |entry| {
-        const hotkey = entry.key_ptr.*;
-        // Compare directly without creating a temporary hotkey
-        if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
-            found_hotkey = hotkey;
-            break;
-        }
-    }
+    // Find matching hotkey using our lookup abstraction
+    const found_hotkey = findHotkeyInMode(mode, eventkey.*);
 
     if (found_hotkey) |hotkey| {
         // Get current process name using stack buffer
@@ -493,16 +526,13 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
     // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
-    // Find matching hotkey in the mode without allocation
-    var found_hotkey: ?*Hotkey = null;
-    var it = mode.hotkey_map.iterator();
-    while (it.next()) |entry| {
-        const hotkey = entry.key_ptr.*;
-        // Compare directly without creating a temporary hotkey
-        if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
-            found_hotkey = hotkey;
-            break;
-        }
+    // Find matching hotkey using our lookup abstraction
+    const found_hotkey = findHotkeyInMode(mode, eventkey.*);
+
+    if (self.logger.mode == .interactive and found_hotkey == null) {
+        const key_str = try Keycodes.formatKeyPress(self.allocator, eventkey.flags, eventkey.key);
+        defer self.allocator.free(key_str);
+        self.logger.logDebug("No matching hotkey found for key (exec): {s}", .{key_str}) catch {};
     }
 
     if (found_hotkey) |hotkey| {
@@ -643,24 +673,10 @@ fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
 
         try child.spawn();
     }
-
-    // Note: Differences from the original C implementation:
-    // 1. The C version uses fork() + setsid() + execvp() to fully detach the child process
-    //    - setsid() creates a new session, preventing the child from receiving terminal signals
-    //    - Zig's std.process.Child doesn't support setsid() directly
-    // 2. The C version sets signal(SIGCHLD, SIG_IGN) to automatically reap zombie children
-    //    - Without this, child processes remain as zombies until skhd exits
-    //    - We could add SIGCHLD handling in main.zig if zombie processes become an issue
-    // 3. Both implementations run commands asynchronously without waiting for completion
-    //
-    // For most use cases this should work fine, but be aware that:
-    // - Child processes will remain in the same session as skhd
-    // - Zombie processes will accumulate until skhd exits
-
-    // Don't wait for the child to finish - let it run in background
 }
 
 /// Get current process name without allocation, using a provided buffer
+/// Matches the original skhd implementation exactly
 fn getCurrentProcessNameBuf(buffer: []u8) ![]const u8 {
     var psn: c.ProcessSerialNumber = undefined;
 
@@ -692,45 +708,50 @@ fn getCurrentProcessNameBuf(buffer: []u8) ![]const u8 {
 
     // Find the actual length of the string
     const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
-    const raw_name = buffer[0..c_string_len];
+    const process_name = buffer[0..c_string_len];
 
-    // Trim invisible characters from the start
-    var start: usize = 0;
-    while (start < raw_name.len) {
-        const char_len = std.unicode.utf8ByteSequenceLength(raw_name[start]) catch 1;
-        if (char_len == 1 and raw_name[start] < 0x20) {
-            // ASCII control character
-            start += 1;
-        } else if (char_len > 1) {
-            // Check for Unicode invisible characters
-            const codepoint = std.unicode.utf8Decode(raw_name[start..][0..char_len]) catch {
-                start += char_len;
-                continue;
-            };
-            // Common invisible Unicode characters
-            if (codepoint == 0x200E or // LEFT-TO-RIGHT MARK
-                codepoint == 0x200F or // RIGHT-TO-LEFT MARK
-                codepoint == 0x200B or // ZERO WIDTH SPACE
-                codepoint == 0x200C or // ZERO WIDTH NON-JOINER
-                codepoint == 0x200D or // ZERO WIDTH JOINER
-                codepoint == 0xFEFF) // ZERO WIDTH NO-BREAK SPACE
-            {
-                start += char_len;
-            } else {
-                break;
-            }
+    // // Convert to lowercase like original skhd
+    // for (process_name) |*char| {
+    //     char.* = std.ascii.toLower(char.*);
+    // }
+
+    // Clean invisible Unicode characters that some apps (like WhatsApp) have
+    return cleanInvisibleChars(process_name);
+}
+
+/// Remove invisible Unicode characters from the beginning of a string
+/// This handles cases like WhatsApp which has U+200E (LEFT-TO-RIGHT MARK) in its process name
+fn cleanInvisibleChars(name: []const u8) []const u8 {
+    // Common invisible Unicode characters as UTF-8 byte sequences
+    const ltr_mark = "\u{200E}"; // LEFT-TO-RIGHT MARK
+    const rtl_mark = "\u{200F}"; // RIGHT-TO-LEFT MARK
+    const zwsp = "\u{200B}"; // ZERO WIDTH SPACE
+    const zwnj = "\u{200C}"; // ZERO WIDTH NON-JOINER
+    const zwj = "\u{200D}"; // ZERO WIDTH JOINER
+    const bom = "\u{FEFF}"; // ZERO WIDTH NO-BREAK SPACE (BOM)
+
+    var result = name;
+
+    // Keep removing invisible chars from the start until we find a visible char
+    while (result.len > 0) {
+        if (std.mem.startsWith(u8, result, ltr_mark)) {
+            result = result[ltr_mark.len..];
+        } else if (std.mem.startsWith(u8, result, rtl_mark)) {
+            result = result[rtl_mark.len..];
+        } else if (std.mem.startsWith(u8, result, zwsp)) {
+            result = result[zwsp.len..];
+        } else if (std.mem.startsWith(u8, result, zwnj)) {
+            result = result[zwnj.len..];
+        } else if (std.mem.startsWith(u8, result, zwj)) {
+            result = result[zwj.len..];
+        } else if (std.mem.startsWith(u8, result, bom)) {
+            result = result[bom.len..];
         } else {
             break;
         }
     }
 
-    // If we trimmed, move the cleaned string to the beginning of the buffer
-    if (start > 0) {
-        std.mem.copyForwards(u8, buffer[0 .. raw_name.len - start], raw_name[start..]);
-        return buffer[0 .. raw_name.len - start];
-    }
-
-    return raw_name;
+    return result;
 }
 
 /// Signal handler for SIGUSR1 - reload configuration

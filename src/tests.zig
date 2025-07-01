@@ -713,3 +713,167 @@ test "Hot reload enable/disable" {
     try skhd.enableHotReload();
     try testing.expect(skhd.hotload_enabled);
 }
+
+test "modifier matching - general modifiers match specific ones" {
+    const allocator = std.testing.allocator;
+
+    // Create test config
+    const config_path = "/tmp/skhd_test_modifier_matching.txt";
+    {
+        const config =
+            \\# Test modifier matching
+            \\alt - a : echo "alt - a"
+            \\lalt - b : echo "lalt - b"
+            \\cmd + shift - c : echo "cmd + shift - c"
+            \\lcmd + lshift - d : echo "lcmd + lshift - d"
+        ;
+        const file = try std.fs.createFileAbsolute(config_path, .{});
+        defer file.close();
+        try file.writeAll(config);
+    }
+    defer std.fs.deleteFileAbsolute(config_path) catch {};
+
+    var skhd = try Skhd.init(allocator, config_path, .service);
+    defer skhd.deinit();
+
+    // Get default mode
+    const mode = skhd.mappings.mode_map.get("default").?;
+
+    // Test 1: Config "alt - a" should be found with keyboard "lalt - a"
+    {
+        const keyboard_key = Hotkey.KeyPress{
+            .flags = ModifierFlag{ .lalt = true },
+            .key = 0, // 'a' key
+        };
+
+        // Find matching hotkey using our lookup abstraction
+        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+
+        try testing.expect(found != null);
+        try testing.expect(found.?.flags.alt);
+        try testing.expect(!found.?.flags.lalt);
+    }
+
+    // Test 2: Config "lalt - b" should NOT be found with keyboard "ralt - b"
+    {
+        const keyboard_key = Hotkey.KeyPress{
+            .flags = ModifierFlag{ .ralt = true },
+            .key = 11, // 'b' key
+        };
+
+        // Find matching hotkey using our lookup abstraction
+        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+
+        try testing.expect(found == null);
+    }
+
+    // Test 3: Config "cmd + shift - c" should match "lcmd + lshift - c"
+    {
+        const keyboard_key = Hotkey.KeyPress{
+            .flags = ModifierFlag{ .lcmd = true, .lshift = true },
+            .key = 8, // 'c' key
+        };
+
+        // Find matching hotkey using our lookup abstraction
+        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+
+        try testing.expect(found != null);
+        try testing.expect(found.?.flags.cmd);
+        try testing.expect(found.?.flags.shift);
+    }
+}
+
+test "keyboard lalt should match config alt" {
+    const allocator = std.testing.allocator;
+
+    // Create test config with just "alt - a"
+    const config_path = "/tmp/skhd_test_lalt_matches_alt.txt";
+    {
+        const config = "alt - a : echo \"alt - a pressed\"";
+        const file = try std.fs.createFileAbsolute(config_path, .{});
+        defer file.close();
+        try file.writeAll(config);
+    }
+    defer std.fs.deleteFileAbsolute(config_path) catch {};
+
+    var skhd = try Skhd.init(allocator, config_path, .service);
+    defer skhd.deinit();
+
+    // Get default mode
+    const mode = skhd.mappings.mode_map.get("default").?;
+
+    // Test: Keyboard "lalt - a" should match config "alt - a"
+    {
+        const keyboard_key = Hotkey.KeyPress{
+            .flags = ModifierFlag{ .lalt = true },
+            .key = 0, // 'a' key
+        };
+
+        // Find matching hotkey using our lookup abstraction
+        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+
+        if (found == null) {
+            std.debug.print("Test failed: Could not find hotkey for lalt - a\n", .{});
+            std.debug.print("Looking for keyboard_key: flags={any}, key={d}\n", .{ keyboard_key.flags, keyboard_key.key });
+            std.debug.print("Available hotkeys in map:\n", .{});
+            var it = mode.hotkey_map.iterator();
+            while (it.next()) |entry| {
+                const hotkey = entry.key_ptr.*;
+                std.debug.print("  config hotkey: flags={any}, key={d}\n", .{ hotkey.flags, hotkey.key });
+            }
+        }
+        try testing.expect(found != null);
+        try testing.expect(found.?.flags.alt);
+        try testing.expect(!found.?.flags.lalt);
+    }
+
+    // Also test ralt should match
+    {
+        const keyboard_key = Hotkey.KeyPress{
+            .flags = ModifierFlag{ .ralt = true },
+            .key = 0, // 'a' key
+        };
+
+        const ctx = Skhd.KeyboardLookupContext{};
+        const found = mode.hotkey_map.getKeyAdapted(keyboard_key, ctx);
+
+        try testing.expect(found != null);
+        try testing.expect(found.?.flags.alt);
+        try testing.expect(!found.?.flags.ralt);
+    }
+
+    // And general alt should also match
+    {
+        const keyboard_key = Hotkey.KeyPress{
+            .flags = ModifierFlag{ .alt = true },
+            .key = 0, // 'a' key
+        };
+
+        const ctx = Skhd.KeyboardLookupContext{};
+        const found = mode.hotkey_map.getKeyAdapted(keyboard_key, ctx);
+
+        try testing.expect(found != null);
+        try testing.expect(found.?.flags.alt);
+    }
+}
+
+test "findProcessInList function" {
+    const allocator = std.testing.allocator;
+
+    // Create a hotkey with some process names
+    var hotkey = try Hotkey.create(allocator);
+    defer hotkey.destroy();
+
+    try hotkey.add_process_name("chrome");
+    try hotkey.add_process_name("firefox");
+    try hotkey.add_process_name("whatsapp");
+
+    // Test finding existing processes
+    try testing.expect(Skhd.findProcessInList(hotkey, "chrome") == 0);
+    try testing.expect(Skhd.findProcessInList(hotkey, "firefox") == 1);
+    try testing.expect(Skhd.findProcessInList(hotkey, "whatsapp") == 2);
+
+    // Test not finding non-existent process
+    try testing.expect(Skhd.findProcessInList(hotkey, "notepad") == null);
+    try testing.expect(Skhd.findProcessInList(hotkey, "Chrome") == null); // Case sensitive
+}

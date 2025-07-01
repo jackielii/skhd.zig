@@ -8,6 +8,7 @@ const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
 const Logger = @import("Logger.zig");
+const Skhd = @import("skhd.zig");
 
 test "ModifierFlag basic operations" {
     // Test basic flag creation
@@ -397,4 +398,145 @@ test "Logger with interactive mode" {
     // Test command logging
     try logger.logCommand("echo 'hello'", "hello\nworld\n", "");
     try logger.logCommand("false", "", "command failed\n");
+}
+test "Config reload memory leak test" {
+    const allocator = testing.allocator;
+
+    // Create temporary config files
+    const test_id = std.crypto.random.int(u32);
+    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_reload_{d}.skhdrc", .{test_id});
+    defer allocator.free(config_path);
+
+    // Write initial config
+    {
+        const initial_config =
+            \\# Initial test config
+            \\cmd - a : echo "initial A"
+            \\cmd - b : echo "initial B"
+            \\:: test_mode
+            \\test_mode < cmd - x : echo "test mode X"
+        ;
+
+        const file = try std.fs.createFileAbsolute(config_path, .{});
+        defer file.close();
+        try file.writeAll(initial_config);
+    }
+
+    // Clean up config file after test
+    defer std.fs.deleteFileAbsolute(config_path) catch {};
+
+    // Initialize skhd with initial config
+    var skhd = try Skhd.init(allocator, config_path, false);
+    defer skhd.deinit();
+
+    // Verify initial state
+    try testing.expect(skhd.mappings.mode_map.count() == 2); // default and test_mode
+    const default_mode = skhd.mappings.mode_map.get("default");
+    try testing.expect(default_mode != null);
+    try testing.expect(default_mode.?.hotkey_map.count() == 2); // a and b keys
+
+    // Write modified config
+    {
+        const modified_config =
+            \\# Modified test config
+            \\cmd - a : echo "modified A"
+            \\cmd - c : echo "new C"
+            \\cmd - d : echo "new D"
+            \\:: another_mode
+            \\another_mode < cmd - y : echo "another mode Y"
+            \\.blacklist [
+            \\    "terminal"
+            \\]
+        ;
+
+        const file = std.fs.openFileAbsolute(config_path, .{ .mode = .write_only }) catch unreachable;
+        defer file.close();
+        try file.setEndPos(0); // Truncate file
+        try file.writeAll(modified_config);
+    }
+
+    // Reload config
+    try skhd.reloadConfig();
+
+    // Verify reloaded state
+    try testing.expect(skhd.mappings.mode_map.count() == 2); // default and another_mode
+    const reloaded_default = skhd.mappings.mode_map.get("default");
+    try testing.expect(reloaded_default != null);
+    try testing.expect(reloaded_default.?.hotkey_map.count() == 3); // a, c, and d keys
+
+    // Check that test_mode is gone and another_mode exists
+    try testing.expect(skhd.mappings.mode_map.get("test_mode") == null);
+    try testing.expect(skhd.mappings.mode_map.get("another_mode") != null);
+
+    // Check blacklist was loaded
+    try testing.expect(skhd.mappings.blacklist.contains("terminal"));
+
+    // Test multiple reloads to ensure no memory leaks
+    for (0..5) |i| {
+        // Modify config again
+        const multi_config = try std.fmt.allocPrint(allocator,
+            \\# Reload test {d}
+            \\cmd - {c} : echo "reload {d}"
+        , .{ i, 'a' + @as(u8, @intCast(i)), i });
+        defer allocator.free(multi_config);
+
+        const file = std.fs.openFileAbsolute(config_path, .{ .mode = .write_only }) catch unreachable;
+        defer file.close();
+        try file.setEndPos(0);
+        try file.writeAll(multi_config);
+
+        // Reload
+        try skhd.reloadConfig();
+
+        // Verify state after each reload
+        const mode = skhd.mappings.mode_map.get("default");
+        try testing.expect(mode != null);
+        try testing.expect(mode.?.hotkey_map.count() == 1);
+    }
+
+    // The testing allocator will detect any memory leaks when skhd.deinit() is called
+}
+
+test "Config reload preserves current mode" {
+    const allocator = testing.allocator;
+
+    // Create temporary config file
+    const test_id = std.crypto.random.int(u32);
+    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_mode_{d}.skhdrc", .{test_id});
+    defer allocator.free(config_path);
+
+    // Write config with modes
+    {
+        const config =
+            \\:: default
+            \\cmd - a : echo "default A"
+            \\
+            \\:: special @ : echo "entered special mode"
+            \\cmd - t ; special
+            \\special < cmd - b : echo "special B"
+            \\special < escape ; default
+        ;
+
+        const file = try std.fs.createFileAbsolute(config_path, .{});
+        defer file.close();
+        try file.writeAll(config);
+    }
+
+    defer std.fs.deleteFileAbsolute(config_path) catch {};
+
+    // Initialize skhd
+    var skhd = try Skhd.init(allocator, config_path, false);
+    defer skhd.deinit();
+
+    // Switch to special mode
+    skhd.current_mode = skhd.mappings.mode_map.getPtr("special");
+    try testing.expect(skhd.current_mode != null);
+    try testing.expectEqualStrings("special", skhd.current_mode.?.name);
+
+    // Reload config
+    try skhd.reloadConfig();
+
+    // Should be back in default mode after reload
+    try testing.expect(skhd.current_mode != null);
+    try testing.expectEqualStrings("default", skhd.current_mode.?.name);
 }

@@ -1,0 +1,3 @@
+# Modified config for reload test
+cmd - a : echo " A key now does something different!"
+cmd - b : echo " B key also changed!"

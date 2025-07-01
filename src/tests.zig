@@ -12,7 +12,7 @@ test "ModifierFlag basic operations" {
     // Test basic flag creation
     const flag1 = ModifierFlag{ .cmd = true, .shift = true };
     const flag2 = ModifierFlag{ .alt = true };
-    
+
     // Test merging
     const merged = flag1.merge(flag2);
     try testing.expect(merged.cmd);
@@ -24,11 +24,11 @@ test "ModifierFlag basic operations" {
 test "ModifierFlag left/right distinction" {
     const lcmd = ModifierFlag{ .lcmd = true };
     const rcmd = ModifierFlag{ .rcmd = true };
-    
+
     try testing.expect(lcmd.lcmd);
     try testing.expect(!lcmd.rcmd);
     try testing.expect(!lcmd.cmd);
-    
+
     try testing.expect(rcmd.rcmd);
     try testing.expect(!rcmd.lcmd);
     try testing.expect(!rcmd.cmd);
@@ -39,33 +39,33 @@ test "ModifierFlag parsing" {
     const alt_flag = ModifierFlag.get("alt");
     try testing.expect(alt_flag != null);
     try testing.expect(alt_flag.?.alt);
-    
+
     const lalt_flag = ModifierFlag.get("lalt");
     try testing.expect(lalt_flag != null);
     try testing.expect(lalt_flag.?.lalt);
     try testing.expect(!lalt_flag.?.alt);
-    
+
     const invalid_flag = ModifierFlag.get("invalid");
     try testing.expect(invalid_flag == null);
 }
 
 test "Hotkey creation and equality" {
     const allocator = testing.allocator;
-    
+
     // Create two identical hotkeys
     var hotkey1 = try Hotkey.create(allocator);
     defer hotkey1.destroy();
     hotkey1.key = 0x31; // '1' key
     hotkey1.flags = ModifierFlag{ .cmd = true };
-    
+
     var hotkey2 = try Hotkey.create(allocator);
     defer hotkey2.destroy();
     hotkey2.key = 0x31; // '1' key
     hotkey2.flags = ModifierFlag{ .cmd = true };
-    
+
     // Test equality
     try testing.expect(Hotkey.eql(hotkey1, hotkey2));
-    
+
     // Change one and test inequality
     hotkey2.key = 0x32; // '2' key
     try testing.expect(!Hotkey.eql(hotkey1, hotkey2));
@@ -73,37 +73,37 @@ test "Hotkey creation and equality" {
 
 test "Hotkey left/right modifier comparison" {
     const allocator = testing.allocator;
-    
+
     // Test that general modifier matches specific modifiers
     var general_cmd = try Hotkey.create(allocator);
     defer general_cmd.destroy();
     general_cmd.key = 0x31;
     general_cmd.flags = ModifierFlag{ .cmd = true };
-    
+
     var left_cmd = try Hotkey.create(allocator);
     defer left_cmd.destroy();
     left_cmd.key = 0x31;
     left_cmd.flags = ModifierFlag{ .lcmd = true };
-    
+
     var right_cmd = try Hotkey.create(allocator);
     defer right_cmd.destroy();
     right_cmd.key = 0x31;
     right_cmd.flags = ModifierFlag{ .rcmd = true };
-    
+
     // General modifier should match specific modifiers
     try testing.expect(Hotkey.eql(general_cmd, left_cmd));
     try testing.expect(Hotkey.eql(general_cmd, right_cmd));
-    
+
     // But specific modifiers should not match each other
     try testing.expect(!Hotkey.eql(left_cmd, right_cmd));
 }
 
 test "Mode creation and management" {
     const allocator = testing.allocator;
-    
+
     var mode = try Mode.init(allocator, "test");
     defer mode.deinit();
-    
+
     try testing.expectEqualStrings("test", mode.name);
     try testing.expect(!mode.capture);
     try testing.expect(mode.command == null);
@@ -111,20 +111,20 @@ test "Mode creation and management" {
 
 test "Basic parsing" {
     const allocator = testing.allocator;
-    
+
     var parser = try Parser.init(allocator);
     defer parser.deinit();
-    
+
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Parse a simple hotkey
     try parser.parse(&mappings, "cmd - a : echo test");
-    
+
     // Should have a default mode
     const default_mode = mappings.mode_map.get("default");
     try testing.expect(default_mode != null);
-    
+
     // Should have one hotkey
     const hotkey_count = default_mode.?.hotkey_map.count();
     try testing.expect(hotkey_count == 1);
@@ -132,19 +132,19 @@ test "Basic parsing" {
 
 test "Mode declaration parsing" {
     const allocator = testing.allocator;
-    
+
     var parser = try Parser.init(allocator);
     defer parser.deinit();
-    
+
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Parse mode declaration
     try parser.parse(&mappings, ":: test : echo \"test mode\"");
-    
+
     // Should have both default and test modes
     try testing.expect(mappings.mode_map.count() == 2);
-    
+
     const test_mode = mappings.mode_map.get("test");
     try testing.expect(test_mode != null);
     try testing.expectEqualStrings("test", test_mode.?.name);
@@ -152,29 +152,29 @@ test "Mode declaration parsing" {
 
 test "Mode switching hotkey" {
     const allocator = testing.allocator;
-    
+
     var parser = try Parser.init(allocator);
     defer parser.deinit();
-    
+
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Parse mode declaration and mode switching hotkey
-    try parser.parse(&mappings, 
+    try parser.parse(&mappings,
         \\:: test
         \\cmd - t ; test
     );
-    
+
     // Should have default and test modes
     try testing.expect(mappings.mode_map.count() == 2);
-    
+
     // Find the mode switching hotkey in default mode
     const default_mode = mappings.mode_map.get("default");
     try testing.expect(default_mode != null);
-    
+
     const hotkey_count = default_mode.?.hotkey_map.count();
     try testing.expect(hotkey_count == 1);
-    
+
     // Check if the hotkey has the activate flag
     var hotkey_iter = default_mode.?.hotkey_map.iterator();
     if (hotkey_iter.next()) |entry| {
@@ -185,30 +185,30 @@ test "Mode switching hotkey" {
 
 test "Left/right modifier parsing" {
     const allocator = testing.allocator;
-    
+
     var parser = try Parser.init(allocator);
     defer parser.deinit();
-    
+
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Parse hotkeys with left/right modifiers
-    try parser.parse(&mappings, 
+    try parser.parse(&mappings,
         \\lcmd - a : echo "left command"
         \\rcmd - b : echo "right command"
         \\lalt + rshift - c : echo "left alt + right shift"
     );
-    
+
     const default_mode = mappings.mode_map.get("default");
     try testing.expect(default_mode != null);
     try testing.expect(default_mode.?.hotkey_map.count() == 3);
-    
+
     // Check that the flags are parsed correctly
     var hotkey_iter = default_mode.?.hotkey_map.iterator();
     var found_lcmd = false;
     var found_rcmd = false;
     var found_mixed = false;
-    
+
     while (hotkey_iter.next()) |entry| {
         const hotkey = entry.key_ptr.*;
         if (hotkey.flags.lcmd and !hotkey.flags.rcmd and !hotkey.flags.cmd) {
@@ -221,7 +221,7 @@ test "Left/right modifier parsing" {
             found_mixed = true;
         }
     }
-    
+
     try testing.expect(found_lcmd);
     try testing.expect(found_rcmd);
     try testing.expect(found_mixed);
@@ -229,26 +229,26 @@ test "Left/right modifier parsing" {
 
 test "Process-specific hotkey parsing" {
     const allocator = testing.allocator;
-    
+
     var parser = try Parser.init(allocator);
     defer parser.deinit();
-    
+
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Parse process-specific hotkey
-    try parser.parse(&mappings, 
+    try parser.parse(&mappings,
         \\cmd - n [
         \\    "terminal" : echo "terminal command"
         \\    "safari"   : echo "safari command"
         \\    *          : echo "default command"
         \\]
     );
-    
+
     const default_mode = mappings.mode_map.get("default");
     try testing.expect(default_mode != null);
     try testing.expect(default_mode.?.hotkey_map.count() == 1);
-    
+
     // Check the hotkey has process-specific commands
     var hotkey_iter = default_mode.?.hotkey_map.iterator();
     if (hotkey_iter.next()) |entry| {
@@ -260,21 +260,21 @@ test "Process-specific hotkey parsing" {
 
 test "Blacklist parsing" {
     const allocator = testing.allocator;
-    
+
     var parser = try Parser.init(allocator);
     defer parser.deinit();
-    
+
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
-    
+
     // Parse blacklist
-    try parser.parse(&mappings, 
+    try parser.parse(&mappings,
         \\.blacklist [
         \\    "terminal"
         \\    "finder"
         \\]
     );
-    
+
     try testing.expect(mappings.blacklist.contains("terminal"));
     try testing.expect(mappings.blacklist.contains("finder"));
     try testing.expect(!mappings.blacklist.contains("safari"));

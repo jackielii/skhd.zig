@@ -318,17 +318,17 @@ test "tokenize" {
     const test_content = "cmd - a : echo test";
 
     var tokenizer = try init(test_content);
-    
+
     // Just verify we can tokenize a simple hotkey
     const token1 = tokenizer.get_token();
     try std.testing.expect(token1 != null);
     try std.testing.expectEqual(TokenType.Token_Modifier, token1.?.type);
     try std.testing.expectEqualStrings("cmd", token1.?.text);
-    
+
     const token2 = tokenizer.get_token();
     try std.testing.expect(token2 != null);
     try std.testing.expectEqual(TokenType.Token_Dash, token2.?.type);
-    
+
     const token3 = tokenizer.get_token();
     try std.testing.expect(token3 != null);
     try std.testing.expectEqual(TokenType.Token_Key, token3.?.type);

@@ -152,4 +152,3 @@ test "synthesize key parsing" {
     const hotkey_count = default_mode.?.hotkey_map.count();
     try testing.expect(hotkey_count == 1);
 }
-

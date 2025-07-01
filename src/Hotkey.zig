@@ -34,25 +34,25 @@ pub const KeyPress = struct {
 pub fn eql(a: *Hotkey, b: *Hotkey) bool {
     // Implement left/right modifier comparison logic like original skhd
     return compareLRMod(a, b, .alt) and
-           compareLRMod(a, b, .cmd) and
-           compareLRMod(a, b, .control) and
-           compareLRMod(a, b, .shift) and
-           compareFn(a, b) and
-           compareNX(a, b) and
-           a.key == b.key;
+        compareLRMod(a, b, .cmd) and
+        compareLRMod(a, b, .control) and
+        compareLRMod(a, b, .shift) and
+        compareFn(a, b) and
+        compareNX(a, b) and
+        a.key == b.key;
 }
 
 fn compareLRMod(a: *Hotkey, b: *Hotkey, comptime mod: enum { alt, cmd, control, shift }) bool {
     const general_field = switch (mod) {
         .alt => "alt",
-        .cmd => "cmd", 
+        .cmd => "cmd",
         .control => "control",
         .shift => "shift",
     };
     const left_field = switch (mod) {
         .alt => "lalt",
         .cmd => "lcmd",
-        .control => "lcontrol", 
+        .control => "lcontrol",
         .shift => "lshift",
     };
     const right_field = switch (mod) {
@@ -61,20 +61,20 @@ fn compareLRMod(a: *Hotkey, b: *Hotkey, comptime mod: enum { alt, cmd, control, 
         .control => "rcontrol",
         .shift => "rshift",
     };
-    
+
     const a_general = @field(a.flags, general_field);
     const a_left = @field(a.flags, left_field);
     const a_right = @field(a.flags, right_field);
-    
+
     const b_general = @field(b.flags, general_field);
     const b_left = @field(b.flags, left_field);
     const b_right = @field(b.flags, right_field);
-    
+
     // If hotkey A has general modifier, it matches any of general/left/right in B
     if (a_general) {
         return b_left or b_right or b_general;
     }
-    
+
     // Otherwise, each specific modifier must match exactly
     return a_left == b_left and a_right == b_right and a_general == b_general;
 }

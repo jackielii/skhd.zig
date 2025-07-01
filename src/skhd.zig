@@ -44,7 +44,10 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
 
     parser.parseWithPath(&mappings, content, config_file) catch |err| {
         if (err == error.ParseErrorOccurred) {
-            // Parse errors have already been logged by the parser
+            // Log the parse error with proper formatting
+            if (parser.getError()) |parse_err| {
+                logger.logError("skhd: {}", .{parse_err}) catch {};
+            }
             return err;
         }
         return err;

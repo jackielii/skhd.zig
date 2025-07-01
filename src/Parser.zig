@@ -478,7 +478,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = ParseError.fromToken(token, "Expected filename after '.load'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
-    } else if (std.mem.eql(u8, option, "blacklist")) {
+    } else if (std.mem.eql(u8, option, ".blacklist")) {
         if (self.match(.Token_BeginList)) {
             while (self.match(.Token_String)) {
                 const token = self.previous();
@@ -494,7 +494,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = ParseError.fromToken(token, "Expected '[' after '.blacklist'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
-    } else if (std.mem.eql(u8, option, "shell") or std.mem.eql(u8, option, "SHELL")) {
+    } else if (std.mem.eql(u8, option, ".shell") or std.mem.eql(u8, option, ".SHELL")) {
         if (self.match(.Token_String)) {
             try mappings.set_shell(self.previous().text);
         } else {

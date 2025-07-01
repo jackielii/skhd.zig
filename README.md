@@ -423,6 +423,41 @@ Key differences from the original:
 4. Run tests: `zig build test`
 5. Submit a pull request
 
+## Publishing & Releases
+
+### Release Process
+
+1. **Update Version**: Run `./scripts/bump-version.sh` to update the version number
+2. **Update Changelog**: Edit `CHANGELOG.md` with the changes for the new version
+3. **Commit Changes**: Commit both the version and changelog updates
+4. **Create Tag**: Create an annotated tag: `git tag -a v0.0.X -m "Release v0.0.X"`
+5. **Push**: Push commits and tag: `git push origin main && git push origin v0.0.X`
+6. **Create Release**: GitHub Actions will automatically build binaries for both architectures
+
+### GitHub Actions
+
+The project uses GitHub Actions for:
+- **CI**: Runs tests on every push and pull request
+- **Releases**: Automatically builds and uploads binaries for:
+  - ARM64 (Apple Silicon) on `macos-latest`
+  - x86_64 (Intel) on `macos-13`
+
+### Binary Distribution
+
+Pre-built binaries are available for each release:
+- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs (M1/M2/M3)
+- `skhd-x86_64-macos.tar.gz` - For Intel Macs
+
+These binaries are automatically built and uploaded to GitHub Releases when a new tag is pushed.
+
+### Homebrew
+
+A Homebrew tap is available for easy installation:
+```bash
+brew tap jackielii/tap
+brew install skhd-zig
+```
+
 ## License
 
 This project maintains compatibility with the original skhd license.

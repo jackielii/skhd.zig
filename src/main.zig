@@ -1,6 +1,7 @@
 const std = @import("std");
 const Skhd = @import("skhd.zig");
 const synthesize = @import("synthesize.zig");
+const service = @import("service.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -58,6 +59,24 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--help")) {
             printHelp();
             return;
+        } else if (std.mem.eql(u8, args[i], "--install-service")) {
+            try service.installService(allocator);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--uninstall-service")) {
+            try service.uninstallService(allocator);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--start-service")) {
+            try service.startService(allocator);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--stop-service")) {
+            try service.stopService(allocator);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--restart-service")) {
+            try service.restartService(allocator);
+            return;
+        } else if (std.mem.eql(u8, args[i], "-r") or std.mem.eql(u8, args[i], "--reload")) {
+            try service.reloadConfig(allocator);
+            return;
         }
     }
 
@@ -73,6 +92,23 @@ pub fn main() !void {
     else
         try getConfigFile(allocator, "skhdrc");
     defer allocator.free(resolved_config_file);
+
+    // Check if another instance is already running
+    if (!verbose) { // Only check in service mode
+        if (try service.readPidFile(allocator)) |pid| {
+            if (service.isProcessRunning(pid)) {
+                std.debug.print("skhd is already running (PID {d})\n", .{pid});
+                return;
+            } else {
+                // Clean up stale PID file
+                service.removePidFile(allocator);
+            }
+        }
+    }
+
+    // Write PID file
+    try service.writePidFile(allocator);
+    defer service.removePidFile(allocator);
 
     // Initialize and run skhd
     var skhd = try Skhd.init(allocator, resolved_config_file, verbose);
@@ -130,18 +166,26 @@ fn fileExists(path: []const u8) bool {
 
 fn printHelp() void {
     std.debug.print(
-        \\skhd.zig - Simple Hotkey Daemon for macOS
+        \\skhd - Simple Hotkey Daemon for macOS
         \\
         \\Usage: skhd [options]
         \\
         \\Options:
         \\  -c, --config <file>    Specify config file (default: skhdrc)
-        \\  -V, --verbose          Enable verbose output
+        \\  -V, --verbose          Enable verbose output (interactive mode)
         \\  -o, --observe          Observe mode - print key events
         \\  -k, --key <keyspec>    Synthesize a keypress
         \\  -t, --text <text>      Synthesize text input
+        \\  -r, --reload           Reload config on running instance
         \\  -v, --version          Print version
         \\      --help             Show this help message
+        \\
+        \\Service Management:
+        \\      --install-service   Install launchd service
+        \\      --uninstall-service Remove launchd service
+        \\      --start-service     Start the service
+        \\      --stop-service      Stop the service
+        \\      --restart-service   Restart the service
         \\
     , .{});
 }

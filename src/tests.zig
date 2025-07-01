@@ -350,51 +350,44 @@ test "Config file resolution" {
 test "Logger file paths" {
     const allocator = testing.allocator;
 
-    // Create unique test files
+    // Create unique test file
     const test_id = std.crypto.random.int(u32);
-    const out_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.out.log", .{test_id});
-    defer allocator.free(out_path);
-    const err_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.err.log", .{test_id});
-    defer allocator.free(err_path);
+    const log_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.log", .{test_id});
+    defer allocator.free(log_path);
 
-    // Create logger with unique files
-    var logger = try Logger.initWithPaths(allocator, false, out_path, err_path);
+    // Create logger with unique file in service mode
+    var logger = try Logger.initWithPath(allocator, .service, log_path);
     defer logger.deinit();
 
-    // Clean up test files
-    defer std.fs.deleteFileAbsolute(out_path) catch {};
-    defer std.fs.deleteFileAbsolute(err_path) catch {};
+    // Clean up test file
+    defer std.fs.deleteFileAbsolute(log_path) catch {};
 
     // Verify logger was created
-    try testing.expect(logger.out_file != null);
-    try testing.expect(logger.err_file != null);
+    try testing.expect(logger.log_file != null);
 
     // Test logging functions
     try logger.logInfo("Test info message", .{});
     try logger.logError("Test error message", .{});
     try logger.logDebug("Test debug message", .{});
 
-    // Since verbose is false, debug should not be logged to stdout
-    // but the functions should not fail
+    // In service mode, only errors should be logged
+    // Info and debug calls should not fail but won't log
 }
 
-test "Logger with verbose mode" {
+test "Logger with interactive mode" {
     const allocator = testing.allocator;
 
-    // Create unique test files
+    // Create unique test file
     const test_id = std.crypto.random.int(u32);
-    const out_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.out.log", .{test_id});
-    defer allocator.free(out_path);
-    const err_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.err.log", .{test_id});
-    defer allocator.free(err_path);
+    const log_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.log", .{test_id});
+    defer allocator.free(log_path);
 
-    // Create logger with verbose mode and unique files
-    var logger = try Logger.initWithPaths(allocator, true, out_path, err_path);
+    // Create logger in interactive mode
+    var logger = try Logger.initWithPath(allocator, .interactive, log_path);
     defer logger.deinit();
 
-    // Clean up test files
-    defer std.fs.deleteFileAbsolute(out_path) catch {};
-    defer std.fs.deleteFileAbsolute(err_path) catch {};
+    // Clean up test file
+    defer std.fs.deleteFileAbsolute(log_path) catch {};
 
     // Test various log operations
     try logger.logInfo("Verbose info: {s}", .{"test"});

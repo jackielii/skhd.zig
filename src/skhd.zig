@@ -10,6 +10,9 @@ const c = @import("c.zig");
 
 const Skhd = @This();
 
+// Global reference for signal handler
+var global_skhd: ?*Skhd = null;
+
 allocator: std.mem.Allocator,
 mappings: Mappings,
 current_mode: ?*Mode = null,
@@ -20,7 +23,8 @@ logger: Logger,
 
 pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool) !Skhd {
     // Initialize logger first
-    var logger = try Logger.init(allocator, verbose);
+    const mode: Logger.Mode = if (verbose) .interactive else .service;
+    var logger = try Logger.init(allocator, mode);
     errdefer logger.deinit();
 
     try logger.logInfo("Initializing skhd with config: {s}", .{config_file});
@@ -42,8 +46,8 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
 
     // Initialize with default mode if exists
     var current_mode: ?*Mode = null;
-    if (mappings.mode_map.getPtr("default")) |mode| {
-        current_mode = mode;
+    if (mappings.mode_map.getPtr("default")) |default_mode| {
+        current_mode = default_mode;
     }
 
     // Log loaded modes
@@ -91,6 +95,17 @@ pub fn deinit(self: *Skhd) void {
 }
 
 pub fn run(self: *Skhd) !void {
+    // Set up signal handler for config reload
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigusr1 },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.USR1, &act, null);
+
+    // Store a global reference for the signal handler
+    global_skhd = self;
+
     try self.logger.logInfo("Starting event tap", .{});
     try self.event_tap.run(keyHandler, self);
 }
@@ -521,9 +536,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                             }
                         },
                         .unbound => {
-                            if (self.verbose) {
-                                std.debug.print("skhd: key is unbound for process '{s}'\n", .{process_name});
-                            }
+                            self.logger.logDebug("key is unbound for process '{s}'", .{process_name}) catch {};
                             return false; // Unbound key
                         },
                         .forwarded => |_| {
@@ -572,12 +585,37 @@ fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
     var child = std.process.Child.init(&argv, self.allocator);
     child.stdin_behavior = .Ignore;
 
-    // For now, ignore stdout/stderr since we're already logging the command
-    // TODO: In the future, we could capture output by using pipes
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    // In interactive mode, capture and display output
+    if (self.logger.mode == .interactive) {
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
 
-    try child.spawn();
+        try child.spawn();
+
+        // Create a thread to read and display output
+        const thread = try std.Thread.spawn(.{}, readChildOutput, .{ self, &child });
+        thread.detach();
+    } else {
+        // In service mode, ignore output
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+
+        try child.spawn();
+    }
+
+    // Note: Differences from the original C implementation:
+    // 1. The C version uses fork() + setsid() + execvp() to fully detach the child process
+    //    - setsid() creates a new session, preventing the child from receiving terminal signals
+    //    - Zig's std.process.Child doesn't support setsid() directly
+    // 2. The C version sets signal(SIGCHLD, SIG_IGN) to automatically reap zombie children
+    //    - Without this, child processes remain as zombies until skhd exits
+    //    - We could add SIGCHLD handling in main.zig if zombie processes become an issue
+    // 3. Both implementations run commands asynchronously without waiting for completion
+    //
+    // For most use cases this should work fine, but be aware that:
+    // - Child processes will remain in the same session as skhd
+    // - Zombie processes will accumulate until skhd exits
+
     // Don't wait for the child to finish - let it run in background
 }
 
@@ -619,4 +657,79 @@ fn getCurrentProcessName(allocator: std.mem.Allocator) ![]const u8 {
     }
 
     return result;
+}
+/// Signal handler for SIGUSR1 - reload configuration
+fn handleSigusr1(_: c_int) callconv(.C) void {
+    if (global_skhd) |skhd| {
+        skhd.logger.logInfo("Received SIGUSR1, reloading configuration", .{}) catch {};
+        skhd.reloadConfig() catch |err| {
+            skhd.logger.logError("Failed to reload config: {}", .{err}) catch {};
+        };
+    }
+}
+
+/// Reload configuration from file
+pub fn reloadConfig(self: *Skhd) !void {
+    try self.logger.logInfo("Reloading configuration from: {s}", .{self.config_file});
+
+    // Parse new configuration
+    var new_mappings = try Mappings.init(self.allocator);
+    errdefer new_mappings.deinit();
+
+    var parser = try Parser.init(self.allocator);
+    defer parser.deinit();
+
+    const content = try std.fs.cwd().readFileAlloc(self.allocator, self.config_file, 1 << 20);
+    defer self.allocator.free(content);
+
+    try parser.parseWithPath(&new_mappings, content, self.config_file);
+    try parser.processLoadDirectives(&new_mappings);
+
+    // Swap old mappings with new ones
+    self.mappings.deinit();
+    self.mappings = new_mappings;
+
+    // Reset to default mode
+    if (self.mappings.mode_map.getPtr("default")) |default_mode| {
+        self.current_mode = default_mode;
+    } else {
+        self.current_mode = null;
+    }
+
+    try self.logger.logInfo("Configuration reloaded successfully", .{});
+}
+/// Read child process output in a separate thread
+fn readChildOutput(self: *Skhd, child: *std.process.Child) void {
+    // Read stdout
+    if (child.stdout) |stdout| {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = stdout.read(&buf) catch break;
+            if (n == 0) break;
+
+            // Log the output line by line
+            var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
+            while (lines.next()) |line| {
+                self.logger.logInfo("  stdout: {s}", .{line}) catch {};
+            }
+        }
+    }
+
+    // Read stderr
+    if (child.stderr) |stderr| {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = stderr.read(&buf) catch break;
+            if (n == 0) break;
+
+            // Log the error output line by line
+            var lines = std.mem.tokenizeScalar(u8, buf[0..n], '\n');
+            while (lines.next()) |line| {
+                self.logger.logError("  stderr: {s}", .{line}) catch {};
+            }
+        }
+    }
+
+    // Wait for child to finish
+    _ = child.wait() catch {};
 }

@@ -3,88 +3,81 @@ const builtin = @import("builtin");
 
 const Logger = @This();
 
-allocator: std.mem.Allocator,
-out_file: ?std.fs.File = null,
-err_file: ?std.fs.File = null,
-mutex: std.Thread.Mutex = .{},
-verbose: bool = false,
+pub const Mode = enum {
+    service,
+    interactive,
+};
 
-/// Initialize logger with log files in /tmp
-pub fn init(allocator: std.mem.Allocator, verbose: bool) !Logger {
+allocator: std.mem.Allocator,
+log_file: ?std.fs.File = null,
+mutex: std.Thread.Mutex = .{},
+mode: Mode = .service,
+
+/// Initialize logger with default log file in /tmp
+pub fn init(allocator: std.mem.Allocator, mode: Mode) !Logger {
     // Get username for log file naming
     const username = std.posix.getenv("USER") orelse "unknown";
 
-    // Create default log file paths
-    const out_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_{s}.out.log", .{username});
-    defer allocator.free(out_path);
+    // Create default log file path
+    const log_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_{s}.log", .{username});
+    defer allocator.free(log_path);
 
-    const err_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_{s}.err.log", .{username});
-    defer allocator.free(err_path);
-
-    return initWithPaths(allocator, verbose, out_path, err_path);
+    return initWithPath(allocator, mode, log_path);
 }
 
-/// Initialize logger with custom file paths
-pub fn initWithPaths(allocator: std.mem.Allocator, verbose: bool, out_path: []const u8, err_path: []const u8) !Logger {
+/// Initialize logger with custom file path
+pub fn initWithPath(allocator: std.mem.Allocator, mode: Mode, log_path: []const u8) !Logger {
     var logger = Logger{
         .allocator = allocator,
-        .verbose = verbose,
+        .mode = mode,
     };
 
-    // Open log files (create if they don't exist, append mode)
-    logger.out_file = std.fs.openFileAbsolute(out_path, .{
-        .mode = .write_only,
-        .lock = .none,
-    }) catch |err| switch (err) {
-        error.FileNotFound => try std.fs.createFileAbsolute(out_path, .{
-            .truncate = false,
-        }),
-        else => return err,
-    };
+    // In interactive mode, we primarily log to console
+    // In service mode, we log to file
+    if (mode == .service) {
+        // Open log file (create if it doesn't exist, append mode)
+        logger.log_file = std.fs.openFileAbsolute(log_path, .{
+            .mode = .write_only,
+            .lock = .none,
+        }) catch |err| switch (err) {
+            error.FileNotFound => try std.fs.createFileAbsolute(log_path, .{
+                .truncate = false,
+            }),
+            else => return err,
+        };
 
-    logger.err_file = std.fs.openFileAbsolute(err_path, .{
-        .mode = .write_only,
-        .lock = .none,
-    }) catch |err| switch (err) {
-        error.FileNotFound => try std.fs.createFileAbsolute(err_path, .{
-            .truncate = false,
-        }),
-        else => return err,
-    };
-
-    // Seek to end for appending
-    try logger.out_file.?.seekFromEnd(0);
-    try logger.err_file.?.seekFromEnd(0);
+        // Seek to end for appending
+        try logger.log_file.?.seekFromEnd(0);
+    }
 
     // Log startup
-    try logger.logInfo("skhd.zig started", .{});
+    try logger.logInfo("skhd started", .{});
 
     return logger;
 }
 
 /// Initialize logger without file output (for testing)
-pub fn initNull(allocator: std.mem.Allocator, verbose: bool) Logger {
+pub fn initNull(allocator: std.mem.Allocator, mode: Mode) Logger {
     return Logger{
         .allocator = allocator,
-        .verbose = verbose,
-        .out_file = null,
-        .err_file = null,
+        .mode = mode,
+        .log_file = null,
     };
 }
 
 pub fn deinit(self: *Logger) void {
-    self.logInfo("skhd.zig shutting down", .{}) catch {};
+    self.logInfo("skhd shutting down", .{}) catch {};
 
-    if (self.out_file) |file| {
-        file.close();
-    }
-    if (self.err_file) |file| {
+    if (self.log_file) |file| {
         file.close();
     }
 }
 
-/// Log info message (stdout and log file)
+/// Log info message (only in interactive mode)
 pub fn logInfo(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
+    // In service mode, only log errors
+    if (self.mode == .service) return;
+
     self.mutex.lock();
     defer self.mutex.unlock();
 
@@ -95,19 +88,17 @@ pub fn logInfo(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
     const message = try std.fmt.allocPrint(self.allocator, "[{s}] " ++ fmt ++ "\n", .{timestamp} ++ args);
     defer self.allocator.free(message);
 
-    // Write to stdout if verbose
-    if (self.verbose) {
-        const stdout = std.io.getStdOut().writer();
-        try stdout.writeAll(message);
-    }
+    // In interactive mode, always write to stdout
+    const stdout = std.io.getStdOut().writer();
+    try stdout.writeAll(message);
 
-    // Write to log file
-    if (self.out_file) |file| {
+    // Also write to log file if available
+    if (self.log_file) |file| {
         try file.writeAll(message);
     }
 }
 
-/// Log error message (stderr and error log file)
+/// Log error message (always logged in both modes)
 pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -119,12 +110,14 @@ pub fn logError(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
     const message = try std.fmt.allocPrint(self.allocator, "[{s}] ERROR: " ++ fmt ++ "\n", .{timestamp} ++ args);
     defer self.allocator.free(message);
 
-    // Always write errors to stderr
-    const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll(message);
+    // In interactive mode, write to stderr
+    if (self.mode == .interactive) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.writeAll(message);
+    }
 
-    // Write to error log file
-    if (self.err_file) |file| {
+    // Always write to log file if available
+    if (self.log_file) |file| {
         try file.writeAll(message);
     }
 }
@@ -152,9 +145,9 @@ pub fn logCommand(self: *Logger, command: []const u8, stdout: []const u8, stderr
     }
 }
 
-/// Log verbose debug message (only if verbose mode is enabled)
+/// Log debug message (only in interactive mode)
 pub fn logDebug(self: *Logger, comptime fmt: []const u8, args: anytype) !void {
-    if (self.verbose) {
+    if (self.mode == .interactive) {
         try self.logInfo("DEBUG: " ++ fmt, args);
     }
 }
@@ -189,20 +182,17 @@ fn getTimestamp(self: *Logger) ![]u8 {
 test "logger creation and basic logging" {
     const allocator = std.testing.allocator;
 
-    // Create unique test files
+    // Create unique test file
     const test_id = std.crypto.random.int(u32);
-    const out_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.out.log", .{test_id});
-    defer allocator.free(out_path);
-    const err_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.err.log", .{test_id});
-    defer allocator.free(err_path);
+    const log_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.log", .{test_id});
+    defer allocator.free(log_path);
 
-    // Create a test logger with unique files
-    var logger = try Logger.initWithPaths(allocator, true, out_path, err_path);
+    // Create a test logger with unique file
+    var logger = try Logger.initWithPath(allocator, .interactive, log_path);
     defer logger.deinit();
 
-    // Clean up test files
-    defer std.fs.deleteFileAbsolute(out_path) catch {};
-    defer std.fs.deleteFileAbsolute(err_path) catch {};
+    // Clean up test file
+    defer std.fs.deleteFileAbsolute(log_path) catch {};
 
     // Test various log levels
     try logger.logInfo("Test info message", .{});
@@ -219,7 +209,8 @@ test "logger timestamp format" {
 
     var logger = Logger{
         .allocator = allocator,
-        .verbose = false,
+        .mode = .service,
+        .log_file = null,
     };
 
     const timestamp = try logger.getTimestamp();

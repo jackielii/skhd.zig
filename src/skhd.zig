@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const EventTap = @import("EventTap.zig");
 const Mappings = @import("Mappings.zig");
 const Parser = @import("Parser.zig");
@@ -163,8 +164,8 @@ fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     if (self.current_mode == null) return event;
 
     // Check if current application is blacklisted
-    const process_name = try getCurrentProcessName(self.allocator);
-    defer self.allocator.free(process_name);
+    var process_name_buf: [256]u8 = undefined;
+    const process_name = try getCurrentProcessNameBuf(&process_name_buf);
 
     if (self.mappings.blacklist.contains(process_name)) {
         return event;
@@ -185,9 +186,12 @@ fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return @ptrFromInt(0);
     }
 
-    const key_str = try Keycodes.formatKeyPress(self.allocator, eventkey.flags, eventkey.key);
-    defer self.allocator.free(key_str);
-    self.logger.logDebug("No matching hotkey found for key: {s}", .{key_str}) catch {};
+    // Only log in interactive mode to avoid allocation in hot path
+    if (self.logger.mode == .interactive) {
+        const key_str = try Keycodes.formatKeyPress(self.allocator, eventkey.flags, eventkey.key);
+        defer self.allocator.free(key_str);
+        self.logger.logDebug("No matching hotkey found for key: {s}", .{key_str}) catch {};
+    }
     return event;
 }
 
@@ -195,8 +199,8 @@ fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     if (self.current_mode == null) return event;
 
     // Check if current application is blacklisted
-    const process_name = try getCurrentProcessName(self.allocator);
-    defer self.allocator.free(process_name);
+    var process_name_buf: [256]u8 = undefined;
+    const process_name = try getCurrentProcessNameBuf(&process_name_buf);
 
     if (self.mappings.blacklist.contains(process_name)) {
         return event;
@@ -447,6 +451,34 @@ fn trimInvisibleChars(allocator: std.mem.Allocator, str: []const u8) ![]const u8
     return allocator.dupe(u8, str[start..end]);
 }
 
+/// Compare hotkey flags, handling left/right modifier logic
+fn hotkeyFlagsMatch(a_flags: ModifierFlag, b_flags: ModifierFlag) bool {
+    // Compare left/right modifiers like original skhd
+    const alt_match = ((a_flags.alt or a_flags.lalt or a_flags.ralt) ==
+        (b_flags.alt or b_flags.lalt or b_flags.ralt)) and
+        ((!a_flags.alt and !b_flags.alt) or
+            (a_flags.lalt == b_flags.lalt and a_flags.ralt == b_flags.ralt));
+
+    const cmd_match = ((a_flags.cmd or a_flags.lcmd or a_flags.rcmd) ==
+        (b_flags.cmd or b_flags.lcmd or b_flags.rcmd)) and
+        ((!a_flags.cmd and !b_flags.cmd) or
+            (a_flags.lcmd == b_flags.lcmd and a_flags.rcmd == b_flags.rcmd));
+
+    const ctrl_match = ((a_flags.control or a_flags.lcontrol or a_flags.rcontrol) ==
+        (b_flags.control or b_flags.lcontrol or b_flags.rcontrol)) and
+        ((!a_flags.control and !b_flags.control) or
+            (a_flags.lcontrol == b_flags.lcontrol and a_flags.rcontrol == b_flags.rcontrol));
+
+    const shift_match = ((a_flags.shift or a_flags.lshift or a_flags.rshift) ==
+        (b_flags.shift or b_flags.lshift or b_flags.rshift)) and
+        ((!a_flags.shift and !b_flags.shift) or
+            (a_flags.lshift == b_flags.lshift and a_flags.rshift == b_flags.rshift));
+
+    return alt_match and cmd_match and ctrl_match and shift_match and
+        a_flags.@"fn" == b_flags.@"fn" and
+        a_flags.nx == b_flags.nx;
+}
+
 fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
     var flags: c.CGEventFlags = 0;
 
@@ -503,31 +535,25 @@ fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
 }
 
 fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef) !bool {
-    // Create a temporary hotkey struct for lookup
-    var lookup_hotkey = try Hotkey.create(self.allocator);
-    defer lookup_hotkey.destroy();
-
-    lookup_hotkey.key = eventkey.key;
-    lookup_hotkey.flags = eventkey.flags;
-
     // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
-    // Find matching hotkey in the mode
+    // Find matching hotkey in the mode without allocation
     var found_hotkey: ?*Hotkey = null;
     var it = mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (Hotkey.eql(hotkey, lookup_hotkey)) {
+        // Compare directly without creating a temporary hotkey
+        if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
             found_hotkey = hotkey;
             break;
         }
     }
 
     if (found_hotkey) |hotkey| {
-        // Get current process name
-        const process_name = try getCurrentProcessName(self.allocator);
-        defer self.allocator.free(process_name);
+        // Get current process name using stack buffer
+        var process_name_buf: [256]u8 = undefined;
+        const process_name = try getCurrentProcessNameBuf(&process_name_buf);
 
         // Check for forwarded key in process-specific commands
         for (hotkey.process_names.items, 0..) |proc_name, i| {
@@ -537,9 +563,11 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                 if (i < hotkey.commands.items.len) {
                     switch (hotkey.commands.items[i]) {
                         .forwarded => |target_key| {
-                            const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
-                            defer self.allocator.free(key_str);
-                            self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
+                            if (self.logger.mode == .interactive) {
+                                const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
+                                defer self.allocator.free(key_str);
+                                self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
+                            }
                             return try forwardKey(target_key, event);
                         },
                         .unbound => {
@@ -558,9 +586,11 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         if (hotkey.wildcard_command) |wildcard| {
             switch (wildcard) {
                 .forwarded => |target_key| {
-                    const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
-                    defer self.allocator.free(key_str);
-                    self.logger.logDebug("Forwarding key '{s}' (wildcard), current process {s}", .{ key_str, process_name }) catch {};
+                    if (self.logger.mode == .interactive) {
+                        const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
+                        defer self.allocator.free(key_str);
+                        self.logger.logDebug("Forwarding key '{s}' (wildcard), current process {s}", .{ key_str, process_name }) catch {};
+                    }
                     return try forwardKey(target_key, event);
                 },
                 else => {}, // Not a forwarded key
@@ -572,22 +602,16 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 }
 
 fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
-    // Create a temporary hotkey struct for lookup
-    var lookup_hotkey = try Hotkey.create(self.allocator);
-    defer lookup_hotkey.destroy();
-
-    lookup_hotkey.key = eventkey.key;
-    lookup_hotkey.flags = eventkey.flags;
-
     // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
-    // Find matching hotkey in the mode
+    // Find matching hotkey in the mode without allocation
     var found_hotkey: ?*Hotkey = null;
     var it = mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (Hotkey.eql(hotkey, lookup_hotkey)) {
+        // Compare directly without creating a temporary hotkey
+        if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
             found_hotkey = hotkey;
             break;
         }
@@ -596,9 +620,9 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
     if (found_hotkey) |hotkey| {
         self.logger.logDebug("Found hotkey match - key: {d}, flags: {any} in mode '{s}'", .{ hotkey.key, hotkey.flags, mode.name }) catch {};
 
-        // Get current process name for process-specific commands
-        const process_name = try getCurrentProcessName(self.allocator);
-        defer self.allocator.free(process_name);
+        // Get current process name using stack buffer
+        var process_name_buf: [256]u8 = undefined;
+        const process_name = try getCurrentProcessNameBuf(&process_name_buf);
 
         self.logger.logDebug("Current process name: '{s}'", .{process_name}) catch {};
 
@@ -663,9 +687,11 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                             return false; // Unbound key
                         },
                         .forwarded => |target_key| {
-                            const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
-                            defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
-                            self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
+                            if (self.logger.mode == .interactive) {
+                                const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
+                                defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
+                                self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
+                            }
                             // Note: We should only reach here if findAndForwardHotkey didn't handle it
                             // This shouldn't happen with current logic, but handling for completeness
                             return false;
@@ -683,9 +709,11 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                     .command => |cmd| command_to_exec = cmd,
                     .unbound => return false,
                     .forwarded => |target_key| {
-                        const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
-                        defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
-                        self.logger.logDebug("Forwarding key '{s}' (wildcard)", .{key_str}) catch {};
+                        if (self.logger.mode == .interactive) {
+                            const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
+                            defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
+                            self.logger.logDebug("Forwarding key '{s}' (wildcard)", .{key_str}) catch {};
+                        }
                         // Note: We should only reach here if findAndForwardHotkey didn't handle it
                         return false;
                     },
@@ -743,6 +771,41 @@ fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
     // - Zombie processes will accumulate until skhd exits
 
     // Don't wait for the child to finish - let it run in background
+}
+
+/// Get current process name without allocation, using a provided buffer
+fn getCurrentProcessNameBuf(buffer: []u8) ![]const u8 {
+    var psn: c.ProcessSerialNumber = undefined;
+
+    // Get the frontmost process
+    const status = c.GetFrontProcess(&psn);
+    if (status != c.noErr) {
+        const unknown = "unknown";
+        @memcpy(buffer[0..unknown.len], unknown);
+        return buffer[0..unknown.len];
+    }
+
+    // Get the process name
+    var process_name_ref: c.CFStringRef = undefined;
+    const copy_status = c.CopyProcessName(&psn, &process_name_ref);
+    if (copy_status != c.noErr) {
+        const unknown = "unknown";
+        @memcpy(buffer[0..unknown.len], unknown);
+        return buffer[0..unknown.len];
+    }
+    defer c.CFRelease(process_name_ref);
+
+    // Convert CFString to buffer
+    const success = c.CFStringGetCString(process_name_ref, buffer.ptr, @intCast(buffer.len), c.kCFStringEncodingUTF8);
+    if (success == 0) {
+        const unknown = "unknown";
+        @memcpy(buffer[0..unknown.len], unknown);
+        return buffer[0..unknown.len];
+    }
+
+    // Find the actual length of the string
+    const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
+    return buffer[0..c_string_len];
 }
 
 fn getCurrentProcessName(allocator: std.mem.Allocator) ![]const u8 {

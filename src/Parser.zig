@@ -456,6 +456,9 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         while (self.match(.Token_String)) {
             const process_name = self.previous().text;
             try process_list.append(process_name);
+
+            // Skip optional comma
+            _ = self.match(.Token_Comma);
         }
 
         if (!self.match(.Token_EndList)) {

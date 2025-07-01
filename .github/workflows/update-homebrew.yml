@@ -6,8 +6,10 @@ name: Update Homebrew Tap
 # and add it as HOMEBREW_TAP_TOKEN secret in repository settings.
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -20,6 +22,8 @@ permissions:
 jobs:
   update-tap:
     runs-on: ubuntu-latest
+    # Only run if the Release workflow succeeded
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     steps:
     - name: Checkout homebrew-tap
       uses: actions/checkout@v4
@@ -33,9 +37,10 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        if [ "${{ github.event_name }}" = "release" ]; then
-          VERSION="${{ github.event.release.tag_name }}"
-        else
+        if [ "${{ github.event_name }}" = "workflow_run" ]; then
+          # Get the latest release tag
+          VERSION=$(gh release list --repo jackielii/skhd.zig --limit 1 --json tagName -q '.[0].tagName')
+        elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           VERSION="v${{ github.event.inputs.version }}"
         fi
         echo "version=${VERSION#v}" >> $GITHUB_OUTPUT

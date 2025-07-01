@@ -8,6 +8,7 @@ mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
 blacklist: std.StringHashMapUnmanaged(void) = .empty,
 hotkey_map: Hotkey.HotkeyMap = .empty,
 shell: []const u8,
+loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
 
 const Mappings = @This();
 
@@ -46,6 +47,12 @@ pub fn deinit(self: *Mappings) void {
         self.blacklist.deinit(self.allocator);
     }
     self.allocator.free(self.shell);
+
+    // Free loaded file paths
+    for (self.loaded_files.items) |file_path| {
+        self.allocator.free(file_path);
+    }
+    self.loaded_files.deinit(self.allocator);
 
     self.* = undefined;
 }

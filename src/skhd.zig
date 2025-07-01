@@ -20,7 +20,7 @@ current_mode: ?*Mode = null,
 event_tap: EventTap,
 config_file: []const u8,
 logger: Logger,
-hotloader: ?Hotload = null,
+hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 
 pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.Mode) !Skhd {
@@ -94,8 +94,8 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
 }
 
 pub fn deinit(self: *Skhd) void {
-    if (self.hotloader) |*hotloader| {
-        hotloader.deinit();
+    if (self.hotloader) |hotloader| {
+        hotloader.destroy();
     }
     self.event_tap.deinit();
     self.mappings.deinit();
@@ -697,6 +697,10 @@ pub fn reloadConfig(self: *Skhd) !void {
         self.current_mode = null;
     }
 
+    // Note: We don't re-enable hot reload here because this function
+    // might be called from within the hotload callback. Instead, we'll
+    // update the watched files list when hot reload is already enabled.
+
     try self.logger.logInfo("Configuration reloaded successfully", .{});
 }
 
@@ -708,26 +712,26 @@ pub fn enableHotReload(self: *Skhd) !void {
     // Store self reference for callback
     global_skhd = self;
 
-    // Create hotloader with a callback that can access self
-    var hotloader = Hotload.init(self.allocator, hotloadCallback);
+    // Create hotloader (already heap-allocated by create())
+    const hotloader = try Hotload.create(self.allocator, hotloadCallback);
 
-    // Resolve to absolute path for FSEvents
+    // Resolve main config file to absolute path for FSEvents
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs_path = try std.fs.cwd().realpath(self.config_file, &path_buf);
 
-    try self.logger.logInfo("Watching file: {s} (resolved to: {s})", .{ self.config_file, abs_path });
-    const added = try hotloader.addFile(abs_path);
-    if (!added) {
-        hotloader.deinit();
-        return error.FailedToWatchFile;
+    try self.logger.logInfo("Watching main config: {s} (resolved to: {s})", .{ self.config_file, abs_path });
+    try hotloader.addFile(abs_path);
+
+    // Also watch all loaded files
+    for (self.mappings.loaded_files.items) |loaded_file| {
+        try self.logger.logInfo("Watching loaded file: {s}", .{loaded_file});
+        hotloader.addFile(loaded_file) catch |err| {
+            try self.logger.logInfo("Failed to watch loaded file {s}: {}", .{ loaded_file, err });
+        };
     }
 
     // Start the hotloader
-    const started = try hotloader.start();
-    if (!started) {
-        hotloader.deinit();
-        return error.FailedToStartHotloader;
-    }
+    try hotloader.start();
 
     self.hotloader = hotloader;
     self.hotload_enabled = true;
@@ -738,8 +742,8 @@ pub fn enableHotReload(self: *Skhd) !void {
 pub fn disableHotReload(self: *Skhd) void {
     if (!self.hotload_enabled) return;
 
-    if (self.hotloader) |*hotloader| {
-        hotloader.stop();
+    if (self.hotloader) |hotloader| {
+        hotloader.destroy();
     }
 
     self.hotloader = null;
@@ -749,14 +753,14 @@ pub fn disableHotReload(self: *Skhd) void {
 }
 
 fn hotloadCallback(path: []const u8) void {
-    _ = path;
-
     // Follow the original skhd approach - directly reload the config
     if (global_skhd) |skhd| {
-        skhd.logger.logInfo("Config file has been modified.. reloading config", .{}) catch {};
+        skhd.logger.logInfo("Config file has been modified: {s} .. reloading config", .{path}) catch {};
         skhd.reloadConfig() catch |err| {
             skhd.logger.logError("Failed to reload config: {}", .{err}) catch {};
         };
+    } else {
+        std.debug.print("ERROR: global_skhd is null in hotloadCallback\n", .{});
     }
 }
 /// Read child process output synchronously

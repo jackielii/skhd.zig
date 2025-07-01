@@ -378,11 +378,11 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
     }
 
     if (try mappings.get_mode_or_create_default(mode_name)) |existing_mode| {
-        defer mode.deinit();
         if (std.mem.eql(u8, existing_mode.name, "default")) {
             existing_mode.initialized = false;
             existing_mode.capture = mode.capture;
             if (mode.command) |cmd| try existing_mode.set_command(cmd);
+            mode.deinit(); // Clean up since we're not using this mode
         } else if (std.mem.eql(u8, existing_mode.name, mode_name)) {
             self.error_info = ParseError.fromToken(self.previous(), "Mode already exists", self.current_file_path);
             return error.ParseErrorOccurred;
@@ -452,6 +452,13 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
             return error.ParseErrorOccurred;
         };
         defer self.allocator.free(content);
+
+        // Add the resolved path to the loaded files list
+        // Resolve to absolute path for hotloader
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs_path = try std.fs.cwd().realpath(resolved_path, &path_buf);
+        const duped_path = try self.allocator.dupe(u8, abs_path);
+        try mappings.loaded_files.append(self.allocator, duped_path);
 
         // Create a new parser for the included file
         var included_parser = try Parser.init(self.allocator);

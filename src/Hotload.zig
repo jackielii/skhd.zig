@@ -1,6 +1,11 @@
 const std = @import("std");
 const c = @import("c.zig");
 
+/// File system event monitoring using macOS FSEvents API.
+///
+/// This struct is designed to be heap-allocated because FSEvents
+/// requires a stable pointer for its callbacks. Use create() to
+/// allocate and destroy() to clean up.
 const Hotload = @This();
 
 // Public callback type - simplified to just take the file path
@@ -21,15 +26,26 @@ enabled: bool = false,
 stream: ?c.FSEventStreamRef = null,
 paths: ?c.CFMutableArrayRef = null,
 
-pub fn init(allocator: std.mem.Allocator, callback: Callback) Hotload {
-    return .{
+/// Create a new Hotload instance on the heap
+/// Caller must call destroy() when done
+pub fn create(allocator: std.mem.Allocator, callback: Callback) !*Hotload {
+    const self = try allocator.create(Hotload);
+    errdefer allocator.destroy(self);
+
+    self.* = .{
         .allocator = allocator,
         .callback = callback,
         .watch_list = std.ArrayList(WatchedFile).init(allocator),
+        .enabled = false,
+        .stream = null,
+        .paths = null,
     };
+
+    return self;
 }
 
-pub fn deinit(self: *Hotload) void {
+/// Destroy a Hotload instance, cleaning up all resources
+pub fn destroy(self: *Hotload) void {
     self.stop();
 
     // Free all watched files
@@ -37,10 +53,14 @@ pub fn deinit(self: *Hotload) void {
         self.allocator.free(entry.absolutepath);
     }
     self.watch_list.deinit();
+
+    // Free self
+    const allocator = self.allocator;
+    allocator.destroy(self);
 }
 
-pub fn addFile(self: *Hotload, file_path: []const u8) !bool {
-    if (self.enabled) return false;
+pub fn addFile(self: *Hotload, file_path: []const u8) !void {
+    if (self.enabled) return error.AlreadyEnabled;
 
     // Resolve symlinks and get real path
     const real_path = try resolveSymlink(self.allocator, file_path);
@@ -49,20 +69,18 @@ pub fn addFile(self: *Hotload, file_path: []const u8) !bool {
     // Verify it's a file
     const stat = try std.fs.cwd().statFile(real_path);
     if (stat.kind != .file) {
-        self.allocator.free(real_path);
-        return false;
+        return error.NotAFile;
     }
 
     // Add to watch list
     try self.watch_list.append(.{
         .absolutepath = real_path,
     });
-
-    return true;
 }
 
-pub fn start(self: *Hotload) !bool {
-    if (self.enabled or self.watch_list.items.len == 0) return false;
+pub fn start(self: *Hotload) !void {
+    if (self.enabled) return error.AlreadyEnabled;
+    if (self.watch_list.items.len == 0) return error.NoFilesToWatch;
 
     // Create array of paths to watch
     self.paths = c.CFArrayCreateMutable(c.kCFAllocatorDefault, 0, &c.kCFTypeArrayCallBacks);
@@ -130,7 +148,6 @@ pub fn start(self: *Hotload) !bool {
     if (started == 0) return error.StreamStartFailed;
 
     self.enabled = true;
-    return true;
 }
 
 pub fn stop(self: *Hotload) void {
@@ -235,17 +252,15 @@ test "hotload file watching" {
 
     try std.fs.cwd().writeFile(.{ .sub_path = "test_hotload_file.txt", .data = "Initial content\n" });
 
-    // Initialize hotloader
-    var hotloader = init(allocator, testCallback);
-    defer hotloader.deinit();
+    // Create hotloader
+    const hotloader = try create(allocator, testCallback);
+    defer hotloader.destroy();
 
     // Add the test file
-    const added = try hotloader.addFile(test_file);
-    try testing.expect(added);
+    try hotloader.addFile(test_file);
 
     // Start watching
-    const started = try hotloader.start();
-    try testing.expect(started);
+    try hotloader.start();
 
     // Create a timer to modify the file and stop the run loop
     const TimerContext = struct {

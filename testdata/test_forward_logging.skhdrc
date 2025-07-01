@@ -1,0 +1,11 @@
+# Test key forwarding with logging
+# This should log the forwarded key details
+
+# Forward cmd+h to cmd+m for Terminal
+cmd - h [
+    "Terminal" | cmd - m
+    * : echo "cmd-h pressed"
+]
+
+# Forward a complex key combo
+ctrl + shift - x | ctrl + alt - z

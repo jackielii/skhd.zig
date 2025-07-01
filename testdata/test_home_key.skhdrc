@@ -1,0 +1,14 @@
+# Test home key handling
+# This tests process-specific unbound vs wildcard forwarding
+
+home [
+    "kitty" ~
+    "Terminal" ~
+    * | cmd - left
+]
+
+# Also test without any modifiers
+end [
+    "kitty" : echo "End key in kitty"
+    * | cmd - right
+]

@@ -353,22 +353,11 @@ test "Config file resolution" {
 test "Logger file paths" {
     const allocator = testing.allocator;
 
-    // Create unique test file
-    const test_id = std.crypto.random.int(u32);
-    const log_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.log", .{test_id});
-    defer allocator.free(log_path);
-
-    // Create logger with unique file in service mode
-    var logger = try Logger.initWithPath(allocator, .service, log_path);
+    // Create logger in service mode
+    var logger = try Logger.init(allocator, .service);
     defer logger.deinit();
 
-    // Clean up test file
-    defer std.fs.deleteFileAbsolute(log_path) catch {};
-
-    // Verify logger was created
-    try testing.expect(logger.log_file != null);
-
-    // Test logging functions
+    // Test basic logging operations
     try logger.logInfo("Test info message", .{});
     try logger.logError("Test error message", .{});
     try logger.logDebug("Test debug message", .{});
@@ -380,17 +369,9 @@ test "Logger file paths" {
 test "Logger with interactive mode" {
     const allocator = testing.allocator;
 
-    // Create unique test file
-    const test_id = std.crypto.random.int(u32);
-    const log_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_{d}.log", .{test_id});
-    defer allocator.free(log_path);
-
     // Create logger in interactive mode
-    var logger = try Logger.initWithPath(allocator, .interactive, log_path);
+    var logger = try Logger.init(allocator, .interactive);
     defer logger.deinit();
-
-    // Clean up test file
-    defer std.fs.deleteFileAbsolute(log_path) catch {};
 
     // Test various log operations
     try logger.logInfo("Verbose info: {s}", .{"test"});

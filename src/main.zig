@@ -4,6 +4,8 @@ const Logger = @import("Logger.zig");
 const synthesize = @import("synthesize.zig");
 const service = @import("service.zig");
 
+const version = std.mem.trimRight(u8, @embedFile("VERSION"), "\n\r\t ");
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
@@ -38,7 +40,7 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "-o") or std.mem.eql(u8, args[i], "--observe")) {
             observe_mode = true;
         } else if (std.mem.eql(u8, args[i], "-v") or std.mem.eql(u8, args[i], "--version")) {
-            std.debug.print("skhd.zig v0.1.0\n", .{});
+            std.debug.print("skhd.zig v{s}\n", .{version});
             return;
         } else if (std.mem.eql(u8, args[i], "-k") or std.mem.eql(u8, args[i], "--key")) {
             if (i + 1 < args.len) {

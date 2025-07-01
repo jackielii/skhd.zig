@@ -1,0 +1,76 @@
+# Example configuration demonstrating process group variables
+# This feature is new in skhd.zig and helps reduce configuration duplication
+
+# Define process groups at the top of your config
+.define terminal_apps ["kitty", "wezterm", "terminal", "iterm2", "alacritty"]
+.define browser_apps ["chrome", "safari", "firefox", "edge", "brave"]
+.define code_editors ["code", "sublime text", "atom", "vim", "emacs"]
+.define native_apps ["kitty", "wezterm", "chrome", "whatsapp", "notes"]
+
+# Use process groups to simplify your hotkey definitions
+
+# Terminal apps handle Ctrl+Backspace natively, others get Alt+Backspace
+ctrl - backspace [
+    @terminal_apps ~
+    *              | alt - backspace
+]
+
+# Terminal apps handle Ctrl+Left/Right natively, others get Alt+Left/Right
+ctrl - left [
+    @terminal_apps ~
+    *              | alt - left
+]
+
+ctrl - right [
+    @terminal_apps ~  
+    *              | alt - right
+]
+
+# Home/End key remapping for apps that don't handle them properly
+home [
+    @native_apps ~
+    *            | cmd - left
+]
+
+end [
+    @native_apps ~
+    *            | cmd - right
+]
+
+# Shift+Home/End for text selection
+shift - home [
+    @native_apps ~
+    @browser_apps ~
+    *             | cmd + shift - left
+]
+
+shift - end [
+    @native_apps ~
+    @browser_apps ~
+    *             | cmd + shift - right
+]
+
+# Code editor specific bindings
+cmd - d [
+    @code_editors : echo "Duplicate line in code editor"
+    *             : echo "Default cmd+d behavior"
+]
+
+# You can mix process groups with individual apps
+ctrl - s [
+    @terminal_apps ~              # Terminal apps ignore
+    "preview"      | cmd - s      # Preview gets Cmd+S
+    @browser_apps  | cmd - s      # Browsers get Cmd+S
+    *              : echo "Ctrl+S in other apps"
+]
+
+# Process groups work with all hotkey features including modes
+:: coding
+cmd - c ; coding
+
+coding < h [
+    @code_editors : echo "Show help in editor"
+    *             : echo "No editor active"
+]
+
+coding < escape ; default

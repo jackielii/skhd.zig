@@ -74,6 +74,12 @@ This file tracks features and improvements that are not yet implemented but coul
 - [ ] **Configuration export/import**: Export and import configuration profiles
 
 ### Syntax Extensions
+- [x] **Process group variables**: Define reusable process groups with `.define` directive and `@group_name` references
+- [ ] **Wildcard/regex pattern support**: Support regex or glob patterns in process names (e.g., `"*term*"`, `"^(kitty|wezterm)$"`)
+- [ ] **Negation syntax**: Apply hotkeys to all apps except specified ones (e.g., `! ["kitty", "wezterm"]`)
+- [ ] **Template/macro system**: Define reusable hotkey templates with parameters
+- [ ] **Inheritance/extension**: Allow hotkeys to inherit or extend other definitions
+- [ ] **Multi-key definition**: Define multiple keys sharing the same process map in one declaration
 - [ ] **Regular expressions in process matching**: Use regex patterns for process name matching
 - [ ] **Conditional hotkeys**: Hotkeys that activate based on system state (time, app state, etc.)
 - [ ] **Variable substitution**: Environment variable substitution in commands

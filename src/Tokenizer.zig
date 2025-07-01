@@ -34,6 +34,7 @@ pub const TokenType = enum {
     Token_Wildcard,
     Token_String,
     Token_Option,
+    Token_ProcessGroup,
 
     Token_BeginList,
     Token_EndList,
@@ -94,14 +95,27 @@ pub fn get_token(self: *Tokenizer) ?Token {
         '+' => token.type = .Token_Plus,
         ',' => token.type = .Token_Comma,
         '<' => token.type = .Token_Insert,
-        '@' => token.type = .Token_Capture,
+        '@' => {
+            // Check if this is a process group reference or capture
+            const next = self.peekRune();
+            if (next != null and ascii.isAlphabetic(next.?[0])) {
+                token.type = .Token_ProcessGroup;
+                const start = self.pos - 1; // Include the @
+                _ = self.acceptIdentifier();
+                token.text = self.buffer[start..self.pos];
+            } else {
+                token.type = .Token_Capture;
+            }
+        },
         '~' => token.type = .Token_Unbound,
         '*' => token.type = .Token_Wildcard,
         '[' => token.type = .Token_BeginList,
         ']' => token.type = .Token_EndList,
         '.' => {
             token.type = .Token_Option;
-            token.text = self.acceptUntil(' ');
+            const start = self.pos - 1; // Include the dot
+            _ = self.acceptIdentifier();
+            token.text = self.buffer[start..self.pos];
         },
         '"' => {
             token.type = .Token_String;

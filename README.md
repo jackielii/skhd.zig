@@ -246,6 +246,10 @@ cmd - p -> : echo "This runs but Cmd+P still goes to app"
 
 # Load additional config files
 .load "~/.config/skhd/extra.skhdrc"
+
+# Define process groups for reuse (New in skhd.zig!)
+.define terminal_apps ["kitty", "wezterm", "terminal"]
+.define native_apps ["kitty", "wezterm", "chrome", "whatsapp"]
 ```
 
 ## Usage Examples
@@ -308,6 +312,38 @@ end [
 ]
 ```
 
+### Using Process Groups (New in skhd.zig!)
+
+```bash
+# Define reusable process groups
+.define terminal_apps ["kitty", "wezterm", "terminal", "iterm2"]
+.define browser_apps ["chrome", "safari", "firefox", "edge"]
+.define native_apps ["kitty", "wezterm", "chrome", "whatsapp"]
+
+# Use process groups to reduce duplication
+ctrl - backspace [
+    @terminal_apps ~       # All terminal apps handle natively
+    *              | alt - backspace
+]
+
+ctrl - left [
+    @terminal_apps ~       # All terminal apps handle natively
+    *              | alt - left
+]
+
+# Multiple groups can be used
+home [
+    @native_apps ~         # Native apps handle home key
+    *            | cmd - left
+]
+
+shift - home [
+    @native_apps ~
+    @browser_apps ~        # Both native and browser apps
+    *             | cmd + shift - left
+]
+```
+
 ### Modal Workflow Example
 
 ```bash
@@ -367,8 +403,6 @@ skhd -t "hello world"
 # Reload config of running instance
 skhd -r
 ```
-
-Log files are created at `/tmp/skhd_$USER.{out,err}.log` for debugging.
 
 ## Compatibility
 

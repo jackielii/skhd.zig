@@ -182,7 +182,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     } else if (self.match(.Token_Command)) {
         try hotkey.set_wildcard_command(self.previous().text);
     } else if (self.match(.Token_BeginList)) {
-        try self.parse_proc_list(hotkey);
+        try self.parse_proc_list(mappings, hotkey);
     }
 
     try mappings.add_hotkey(hotkey);
@@ -315,7 +315,7 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
     return Hotkey.KeyPress{ .flags = flags, .key = keycode };
 }
 
-fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
+fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     if (self.match(.Token_String)) {
         const name_token = self.previous();
         try hotkey.add_process_name(name_token.text);
@@ -330,7 +330,45 @@ fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
             self.error_info = ParseError.fromToken(token, "Expected command ':', forward '|' or unbound '~' after process name", self.current_file_path);
             return error.ParseErrorOccurred;
         }
-        try self.parse_proc_list(hotkey);
+        try self.parse_proc_list(mappings, hotkey);
+    } else if (self.match(.Token_ProcessGroup)) {
+        // Handle @group_name reference
+        const group_token = self.previous();
+        const group_name = group_token.text[1..]; // Skip the @ prefix
+
+        // Look up the process group in mappings
+        if (mappings.process_groups.get(group_name)) |processes| {
+            // Add all processes from the group
+            for (processes) |process_name| {
+                try hotkey.add_process_name(process_name);
+            }
+
+            // Now parse the action (command, forward, or unbound)
+            if (self.match(.Token_Command)) {
+                // Apply same command to all processes in the group
+                const command = self.previous().text;
+                for (processes) |_| {
+                    try hotkey.add_proc_command(command);
+                }
+            } else if (self.match(.Token_Forward)) {
+                const forward_key = try self.parse_keypress();
+                for (processes) |_| {
+                    try hotkey.add_proc_forward(forward_key);
+                }
+            } else if (self.match(.Token_Unbound)) {
+                for (processes) |_| {
+                    try hotkey.add_proc_unbound();
+                }
+            } else {
+                const token = self.peek() orelse self.previous();
+                self.error_info = ParseError.fromToken(token, "Expected command ':', forward '|' or unbound '~' after process group", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+        } else {
+            self.error_info = ParseError.fromToken(group_token, "Undefined process group", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        try self.parse_proc_list(mappings, hotkey);
     } else if (self.match(.Token_Wildcard)) {
         if (self.match(.Token_Command)) {
             try hotkey.set_wildcard_command(self.previous().text);
@@ -343,7 +381,7 @@ fn parse_proc_list(self: *Parser, hotkey: *Hotkey) !void {
             self.error_info = ParseError.fromToken(token, "Expected command ':', forward '|' or unbound '~' after wildcard", self.current_file_path);
             return error.ParseErrorOccurred;
         }
-        try self.parse_proc_list(hotkey);
+        try self.parse_proc_list(mappings, hotkey);
     } else if (self.match(.Token_EndList)) {
         if (hotkey.process_names.items.len == 0) {
             const token = self.previous();
@@ -396,7 +434,38 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
     assert(self.match(.Token_Option));
     const option = self.previous().text;
 
-    if (std.mem.eql(u8, option, "load")) {
+    if (std.mem.eql(u8, option, ".define")) {
+        // Parse process group definition: .define name ["app1", "app2"]
+        if (!self.match(.Token_Identifier)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected group name after '.define'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        const group_name = self.previous().text;
+
+        if (!self.match(.Token_BeginList)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected '[' after group name", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        var process_list = std.ArrayList([]const u8).init(self.allocator);
+        defer process_list.deinit();
+
+        while (self.match(.Token_String)) {
+            const process_name = self.previous().text;
+            try process_list.append(process_name);
+        }
+
+        if (!self.match(.Token_EndList)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = ParseError.fromToken(token, "Expected ']' to close process list", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        try mappings.add_process_group(group_name, process_list.items);
+    } else if (std.mem.eql(u8, option, ".load")) {
         if (self.match(.Token_String)) {
             const filename_token = self.previous();
             const filename = try self.allocator.dupe(u8, filename_token.text);

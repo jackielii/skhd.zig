@@ -877,3 +877,109 @@ test "findProcessInList function" {
     try testing.expect(Skhd.findProcessInList(hotkey, "notepad") == null);
     try testing.expect(Skhd.findProcessInList(hotkey, "Chrome") == null); // Case sensitive
 }
+
+test "process group variables" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test .define directive and @group_name usage
+    const content =
+        \\.define native_apps ["kitty", "wezterm", "chrome"]
+        \\home [
+        \\    @native_apps ~
+        \\    *            | cmd - left
+        \\]
+    ;
+
+    try parser.parse(&mappings, content);
+
+    // Check that process group was created
+    try testing.expect(mappings.process_groups.contains("native_apps"));
+    const group = mappings.process_groups.get("native_apps").?;
+    try testing.expectEqual(@as(usize, 3), group.len);
+    try testing.expectEqualStrings("kitty", group[0]);
+    try testing.expectEqualStrings("wezterm", group[1]);
+    try testing.expectEqualStrings("chrome", group[2]);
+
+    // Check that hotkey was created with processes from the group
+    try testing.expectEqual(@as(usize, 1), mappings.hotkey_map.count());
+    var it = mappings.hotkey_map.iterator();
+    const entry = it.next().?;
+    const hotkey = entry.key_ptr.*;
+
+    // Should have 3 process names from the group
+    try testing.expectEqual(@as(usize, 3), hotkey.process_names.items.len);
+    try testing.expectEqualStrings("kitty", hotkey.process_names.items[0]);
+    try testing.expectEqualStrings("wezterm", hotkey.process_names.items[1]);
+    try testing.expectEqualStrings("chrome", hotkey.process_names.items[2]);
+
+    // All should be unbound
+    try testing.expectEqual(@as(usize, 3), hotkey.commands.items.len);
+    for (hotkey.commands.items) |cmd| {
+        try testing.expect(cmd == .unbound);
+    }
+
+    // Wildcard should forward to cmd - left
+    try testing.expect(hotkey.wildcard_command.? == .forwarded);
+    const forward_key = hotkey.wildcard_command.?.forwarded;
+    try testing.expect(forward_key.flags.cmd);
+    try testing.expectEqual(@as(u32, 0x7B), forward_key.key); // left arrow
+}
+
+test "multiple process groups and reuse" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test multiple groups and reusing them
+    const content =
+        \\.define terminal_apps ["kitty", "wezterm", "terminal"]
+        \\.define browser_apps ["chrome", "safari", "firefox"]
+        \\.define native_apps ["kitty", "wezterm", "chrome", "whatsapp"]
+        \\
+        \\# Delete word
+        \\ctrl - backspace [
+        \\    @terminal_apps ~
+        \\    *              | alt - backspace
+        \\]
+        \\
+        \\# Move word
+        \\ctrl - left [
+        \\    @terminal_apps ~
+        \\    *              | alt - left
+        \\]
+        \\
+        \\# Home key
+        \\home [
+        \\    @native_apps ~
+        \\    *            | cmd - left
+        \\]
+    ;
+
+    try parser.parse(&mappings, content);
+
+    // Check that all process groups were created
+    try testing.expect(mappings.process_groups.contains("terminal_apps"));
+    try testing.expect(mappings.process_groups.contains("browser_apps"));
+    try testing.expect(mappings.process_groups.contains("native_apps"));
+
+    // Check group contents
+    const terminal_group = mappings.process_groups.get("terminal_apps").?;
+    try testing.expectEqual(@as(usize, 3), terminal_group.len);
+
+    const browser_group = mappings.process_groups.get("browser_apps").?;
+    try testing.expectEqual(@as(usize, 3), browser_group.len);
+
+    const native_group = mappings.process_groups.get("native_apps").?;
+    try testing.expectEqual(@as(usize, 4), native_group.len);
+
+    // Should have 3 hotkeys
+    try testing.expectEqual(@as(usize, 3), mappings.hotkey_map.count());
+}

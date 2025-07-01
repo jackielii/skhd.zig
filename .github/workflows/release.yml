@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-release:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            optimize: ReleaseFast
+          - arch: aarch64
+            optimize: ReleaseFast
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.14.0
+    
+    - name: Build for ${{ matrix.arch }}
+      run: |
+        zig build -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.arch }}-macos
+        mv zig-out/bin/skhd skhd-${{ matrix.arch }}-macos
+    
+    - name: Create tarball
+      run: |
+        tar -czf skhd-${{ matrix.arch }}-macos.tar.gz skhd-${{ matrix.arch }}-macos
+    
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./skhd-${{ matrix.arch }}-macos.tar.gz
+        asset_name: skhd-${{ matrix.arch }}-macos.tar.gz
+        asset_content_type: application/gzip
+
+  update-version:
+    needs: build-release
+    runs-on: ubuntu-latest
+    if: github.event.release.prerelease == false
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Get release version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+    
+    - name: Update VERSION file
+      run: |
+        echo "${{ steps.get_version.outputs.VERSION }}" > src/VERSION
+    
+    - name: Commit version update
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add src/VERSION
+        git commit -m "Update VERSION to ${{ steps.get_version.outputs.VERSION }}"
+        git push

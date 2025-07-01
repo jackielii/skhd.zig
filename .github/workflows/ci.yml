@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.14.0
+    
+    - name: Run tests
+      run: zig build test
+    
+    - name: Build
+      run: zig build -Doptimize=ReleaseFast
+    
+    - name: Check version
+      run: ./zig-out/bin/skhd --version
+
+  build-all:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.14.0
+    
+    - name: Build ${{ matrix.optimize }}
+      run: zig build -Doptimize=${{ matrix.optimize }}
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: skhd-${{ matrix.optimize }}
+        path: zig-out/bin/skhd

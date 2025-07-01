@@ -9,6 +9,7 @@ blacklist: std.StringHashMapUnmanaged(void) = .empty,
 hotkey_map: Hotkey.HotkeyMap = .empty,
 shell: []const u8,
 loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
+process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
 
 const Mappings = @This();
 
@@ -54,6 +55,19 @@ pub fn deinit(self: *Mappings) void {
     }
     self.loaded_files.deinit(self.allocator);
 
+    // Free process groups
+    {
+        var it = self.process_groups.iterator();
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            for (kv.value_ptr.*) |process_name| {
+                self.allocator.free(process_name);
+            }
+            self.allocator.free(kv.value_ptr.*);
+        }
+        self.process_groups.deinit(self.allocator);
+    }
+
     self.* = undefined;
 }
 
@@ -75,6 +89,15 @@ pub fn set_shell(self: *Mappings, shell: []const u8) !void {
 pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     const owned = try self.allocator.dupe(u8, key);
     try self.blacklist.put(self.allocator, owned, void{});
+}
+
+pub fn add_process_group(self: *Mappings, name: []const u8, processes: [][]const u8) !void {
+    const owned_name = try self.allocator.dupe(u8, name);
+    const owned_processes = try self.allocator.alloc([]const u8, processes.len);
+    for (processes, 0..) |process, i| {
+        owned_processes[i] = try self.allocator.dupe(u8, process);
+    }
+    try self.process_groups.put(self.allocator, owned_name, owned_processes);
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {

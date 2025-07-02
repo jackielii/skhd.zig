@@ -5,7 +5,7 @@ This file tracks features and improvements that are not yet implemented but coul
 ## Performance Optimizations
 
 ### Critical Performance Issues
-- [ ] **High CPU usage investigation**: Current implementation uses ~1.6% CPU vs original's ~0.6% during repeated key presses
+- [x] **High CPU usage investigation**: Current implementation uses ~1.6% CPU vs original's ~0.6% during repeated key presses
   - Profile event handler callback overhead
   - Investigate allocator usage in hot path
   - Check for unnecessary string operations
@@ -120,6 +120,12 @@ This file tracks features and improvements that are not yet implemented but coul
 - [ ] **Multi-language bindings**: Provide bindings for other programming languages
 
 ### Error Handling and Logging
+- [ ] **Research std.log integration**: Investigate using Zig's std.log framework to improve our custom logging implementation
+  - Study std.log's architecture and capabilities
+  - Evaluate performance impact compared to current Logger
+  - Consider scope-based logging levels
+  - Explore integration with existing verbose/interactive modes
+  - Assess benefits for structured logging output
 - [ ] **Structured logging**: JSON/structured log output for better parsing
 - [ ] **Log rotation**: Automatic log file rotation and cleanup
 - [ ] **Remote logging**: Send logs to remote logging services

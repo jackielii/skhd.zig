@@ -778,7 +778,7 @@ pub fn reloadConfig(self: *Skhd) !void {
     // might be called from within the hotload callback. Instead, we'll
     // update the watched files list when hot reload is already enabled.
 
-    try self.logger.logInfo("Configuration reloaded successfully", .{});
+    try self.logger.logAlways("Configuration reloaded successfully", .{});
 }
 
 pub fn enableHotReload(self: *Skhd) !void {

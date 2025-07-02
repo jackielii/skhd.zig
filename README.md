@@ -2,7 +2,7 @@
 
 Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiya/skhd) to Zig.
 
-This implementation is **fully compatible with the original skhd configuration format** - your existing `.skhdrc` files will work without modification. Additionally, it includes new features like process groups (`.define`) for cleaner configs and improved error reporting.
+This implementation is **fully compatible with the original skhd configuration format** - your existing `.skhdrc` files will work without modification. Additionally, it includes new features like process groups (`.define`) for cleaner configs, key forwarding/remapping, and improved error reporting.
 
 ## Installation
 

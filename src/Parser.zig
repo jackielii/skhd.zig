@@ -1,14 +1,14 @@
 const std = @import("std");
-const Tokenizer = @import("./Tokenizer.zig");
+const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
-const Hotkey = @import("./Hotkey.zig");
+const Hotkey = @import("Hotkey.zig");
 const assert = std.debug.assert;
-const Mode = @import("./Mode.zig");
-const Mappings = @import("./Mappings.zig");
-const Keycodes = @import("./Keycodes.zig");
-const utils = @import("./utils.zig");
+const Mode = @import("Mode.zig");
+const Mappings = @import("Mappings.zig");
+const Keycodes = @import("Keycodes.zig");
+const utils = @import("utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
-const ParseError = @import("./ParseError.zig").ParseError;
+const ParseError = @import("ParseError.zig").ParseError;
 
 const Parser = @This();
 
@@ -253,8 +253,8 @@ fn parse_key_hex(self: *Parser) !u32 {
     return code;
 }
 
-const literal_keycode_str = @import("./Keycodes.zig").literal_keycode_str;
-const literal_keycode_value = @import("./Keycodes.zig").literal_keycode_value;
+const literal_keycode_str = @import("Keycodes.zig").literal_keycode_str;
+const literal_keycode_value = @import("Keycodes.zig").literal_keycode_value;
 
 fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
     const token = self.previous();

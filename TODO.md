@@ -13,8 +13,8 @@ This file tracks features and improvements that are not yet implemented but coul
   - Review HashMap lookup performance
 
 ### Memory and CPU Optimizations
-- [ ] **SOA for process map**: Convert process mapping from array-of-structures to structure-of-arrays for better cache locality
-- [ ] **Profiling infrastructure**: Add timing/profiling infrastructure with `-P` flag support
+- [x] **SOA for process map**: Convert process mapping from array-of-structures to structure-of-arrays for better cache locality
+- [x] **Profiling infrastructure**: Add timing/profiling infrastructure with `-P` flag support
 - [ ] **Memory usage optimization**: Reduce memory footprint for hotkey storage and lookup
 - [ ] **Hash table optimization**: Further optimize HashMap implementation for O(1) hotkey lookup in all cases
 

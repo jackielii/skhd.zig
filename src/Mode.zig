@@ -7,8 +7,8 @@
 //     struct table hotkey_map;
 // };
 const std = @import("std");
-const Hotkey = @import("./Hotkey.zig");
-const utils = @import("./utils.zig");
+const Hotkey = @import("Hotkey.zig");
+const utils = @import("utils.zig");
 
 const Mode = @This();
 

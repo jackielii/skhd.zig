@@ -12,8 +12,8 @@
 const std = @import("std");
 const Hotkey = @This();
 const Mode = @import("Mode.zig");
-const utils = @import("./utils.zig");
-const ModifierFlag = @import("./Keycodes.zig").ModifierFlag;
+const utils = @import("utils.zig");
+const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
 pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
     pub fn hash(self: @This(), key: *Hotkey) u32 {

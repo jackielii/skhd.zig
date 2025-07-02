@@ -1,7 +1,7 @@
 const std = @import("std");
-const Mode = @import("./Mode.zig");
-const Hotkey = @import("./Hotkey.zig");
-const utils = @import("./utils.zig");
+const Mode = @import("Mode.zig");
+const Hotkey = @import("Hotkey.zig");
+const utils = @import("utils.zig");
 
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMapUnmanaged(Mode) = .empty,

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Token = @import("./Tokenizer.zig").Token;
+const Token = @import("Tokenizer.zig").Token;
 
 pub const ParseError = struct {
     message: []const u8,

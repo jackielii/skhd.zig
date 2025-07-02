@@ -3,6 +3,7 @@ const zbench = @import("zbench");
 const Skhd = @import("skhd.zig");
 const Hotkey = @import("Hotkey.zig");
 const HotkeySOA = @import("HotkeySOA.zig");
+const HotkeyMultiArray = @import("HotkeyMultiArray.zig");
 const c = @import("c.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
@@ -13,6 +14,7 @@ var g_skhd: ?*Skhd = null;
 var g_esc_key: Hotkey.KeyPress = undefined;
 var g_hotkey_original: ?*Hotkey = null;
 var g_hotkey_soa: ?*HotkeySOA = null;
+var g_hotkey_multiarray: ?*HotkeyMultiArray = null;
 
 // Linear search benchmark
 fn benchLinearSearch(allocator: std.mem.Allocator) void {
@@ -144,12 +146,10 @@ fn cleanInvisibleChars(name: []const u8) []const u8 {
 fn benchProcessMappingOriginal(allocator: std.mem.Allocator) void {
     _ = allocator;
     const hotkey = g_hotkey_original orelse return;
-    
+
     // Simulate process lookups
-    const test_processes = [_][]const u8{
-        "firefox", "CHROME", "Visual Studio Code", "Unknown App"
-    };
-    
+    const test_processes = [_][]const u8{ "firefox", "CHROME", "Visual Studio Code", "Unknown App" };
+
     for (test_processes) |proc_name| {
         // Simulate the actual lookup logic from the real implementation
         var found = false;
@@ -160,7 +160,7 @@ fn benchProcessMappingOriginal(allocator: std.mem.Allocator) void {
                     name_buf[j] = std.ascii.toLower(ch);
                 }
                 const lower_test = name_buf[0..proc_name.len];
-                
+
                 if (std.mem.eql(u8, name, lower_test)) {
                     found = true;
                     _ = hotkey.commands.items[idx];
@@ -168,7 +168,7 @@ fn benchProcessMappingOriginal(allocator: std.mem.Allocator) void {
                 }
             }
         }
-        
+
         if (!found) {
             _ = hotkey.wildcard_command;
         }
@@ -179,12 +179,23 @@ fn benchProcessMappingOriginal(allocator: std.mem.Allocator) void {
 fn benchProcessMappingSOA(allocator: std.mem.Allocator) void {
     _ = allocator;
     const hotkey = g_hotkey_soa orelse return;
-    
+
     // Simulate process lookups
-    const test_processes = [_][]const u8{
-        "firefox", "CHROME", "Visual Studio Code", "Unknown App"
-    };
-    
+    const test_processes = [_][]const u8{ "firefox", "CHROME", "Visual Studio Code", "Unknown App" };
+
+    for (test_processes) |proc_name| {
+        _ = hotkey.find_command_for_process(proc_name);
+    }
+}
+
+// Process mapping benchmarks - MultiArrayList implementation
+fn benchProcessMappingMultiArray(allocator: std.mem.Allocator) void {
+    _ = allocator;
+    const hotkey = g_hotkey_multiarray orelse return;
+
+    // Simulate process lookups
+    const test_processes = [_][]const u8{ "firefox", "CHROME", "Visual Studio Code", "Unknown App" };
+
     for (test_processes) |proc_name| {
         _ = hotkey.find_command_for_process(proc_name);
     }
@@ -216,46 +227,53 @@ pub fn main() !void {
         hotkey_count = mode.hotkey_map.count();
     }
     std.debug.print("Current mode has {} hotkeys\n\n", .{hotkey_count});
-    
+
     // Initialize hotkeys for process mapping benchmarks
     {
         // Original implementation
         var hotkey_original = try Hotkey.create(allocator);
         g_hotkey_original = hotkey_original;
-        
+
         // SOA implementation
         var hotkey_soa = try HotkeySOA.create(allocator);
         g_hotkey_soa = hotkey_soa;
-        
-        // Add common process mappings to both
+
+        // MultiArrayList implementation
+        var hotkey_multiarray = try HotkeyMultiArray.create(allocator);
+        g_hotkey_multiarray = hotkey_multiarray;
+
+        // Add common process mappings to all implementations
         const common_processes = [_][]const u8{
-            "Firefox", "Google Chrome", "Safari", "Terminal", "iTerm2",
-            "Visual Studio Code", "Sublime Text", "Slack", "Discord", "Spotify",
-            "Mail", "Calendar", "Notes", "Preview", "Finder",
-            "System Preferences", "Activity Monitor", "Console", "Xcode", "IntelliJ IDEA",
+            "Firefox",            "Google Chrome",    "Safari",  "Terminal", "iTerm2",
+            "Visual Studio Code", "Sublime Text",     "Slack",   "Discord",  "Spotify",
+            "Mail",               "Calendar",         "Notes",   "Preview",  "Finder",
+            "System Preferences", "Activity Monitor", "Console", "Xcode",    "IntelliJ IDEA",
         };
-        
+
         for (common_processes) |process| {
             // Original
             try hotkey_original.add_process_name(process);
             const cmd = try std.fmt.allocPrint(allocator, "echo '{s}'", .{process});
             defer allocator.free(cmd);
             try hotkey_original.add_proc_command(cmd);
-            
+
             // SOA
-            try hotkey_soa.add_process_mapping(process, HotkeySOA.ProcessCommand{ 
-                .command = cmd 
-            });
+            try hotkey_soa.add_process_mapping(process, HotkeySOA.ProcessCommand{ .command = cmd });
+
+            // MultiArrayList
+            try hotkey_multiarray.add_process_mapping(process, HotkeyMultiArray.ProcessCommand{ .command = cmd });
         }
-        
+
         // Set wildcard commands
         try hotkey_original.set_wildcard_command("echo 'default'");
         try hotkey_soa.set_wildcard_command("echo 'default'");
-        
+        try hotkey_multiarray.set_wildcard_command("echo 'default'");
+
         std.debug.print("Initialized hotkeys with {} process mappings\n\n", .{common_processes.len});
     }
     defer if (g_hotkey_original) |h| h.destroy();
     defer if (g_hotkey_soa) |h| h.destroy();
+    defer if (g_hotkey_multiarray) |h| h.destroy();
 
     // Create benchmark suite
     var bench = zbench.Benchmark.init(allocator, .{});
@@ -268,10 +286,11 @@ pub fn main() !void {
     try bench.add("Single Lookup (optimized)", benchSingleLookup, .{});
     try bench.add("Process Name Lookup (syscall)", benchProcessNameLookup, .{});
     try bench.add("Process Name Lookup (cached)", benchCachedProcessName, .{});
-    
+
     // Add process mapping benchmarks
     try bench.add("Process Mapping (Original)", benchProcessMappingOriginal, .{});
     try bench.add("Process Mapping (SOA)", benchProcessMappingSOA, .{});
+    try bench.add("Process Mapping (MultiArrayList)", benchProcessMappingMultiArray, .{});
 
     // Run benchmarks
     try bench.run(std.io.getStdOut().writer());

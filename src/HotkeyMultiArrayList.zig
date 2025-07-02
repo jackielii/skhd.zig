@@ -72,53 +72,68 @@ pub const ProcessCommand = union(enum) {
     unbound: void,
 };
 
-// SOA optimization: Store process mappings in a cache-friendly way
+// Define the struct that MultiArrayList will manage
+const ProcessMapping = struct {
+    // Store lowercase process names for fast comparison
+    process_name: []const u8,
+    // Pre-computed hash for even faster comparison
+    name_hash: u64,
+    // Command aligned with process name
+    command: ProcessCommand,
+};
+
+// Use MultiArrayList for SOA storage
 const ProcessMappings = struct {
     allocator: std.mem.Allocator,
-    // Store lowercase process names for fast comparison
-    process_names: std.ArrayListUnmanaged([]const u8) = .empty,
-    // Pre-computed hashes for even faster comparison
-    name_hashes: std.ArrayListUnmanaged(u64) = .empty,
-    // Commands aligned with process names
-    commands: std.ArrayListUnmanaged(ProcessCommand) = .empty,
+    list: std.MultiArrayList(ProcessMapping) = .{},
 
     pub fn deinit(self: *ProcessMappings) void {
-        for (self.process_names.items) |name| {
+        // Free all process names
+        const names = self.list.items(.process_name);
+        for (names) |name| {
             self.allocator.free(name);
         }
-        self.process_names.deinit(self.allocator);
-        self.name_hashes.deinit(self.allocator);
 
-        for (self.commands.items) |cmd| {
+        // Free all command strings
+        const commands = self.list.items(.command);
+        for (commands) |cmd| {
             switch (cmd) {
                 .command => |str| self.allocator.free(str),
                 else => {},
             }
         }
-        self.commands.deinit(self.allocator);
+
+        self.list.deinit(self.allocator);
     }
 
     pub fn add(self: *ProcessMappings, process_name: []const u8, command: ProcessCommand) !void {
         const owned_name = try self.allocator.dupe(u8, process_name);
+        errdefer self.allocator.free(owned_name);
+        
         // Convert to lowercase once during insertion
         for (owned_name, 0..) |c, i| owned_name[i] = std.ascii.toLower(c);
 
         // Pre-compute hash
         const hash = std.hash.Wyhash.hash(0, owned_name);
 
-        try self.process_names.append(self.allocator, owned_name);
-        try self.name_hashes.append(self.allocator, hash);
-
         // Clone command if needed
         const owned_cmd = switch (command) {
-            .command => |str| ProcessCommand{ .command = try self.allocator.dupe(u8, str) },
+            .command => |str| blk: {
+                const owned_str = try self.allocator.dupe(u8, str);
+                break :blk ProcessCommand{ .command = owned_str };
+            },
             else => command,
         };
-        try self.commands.append(self.allocator, owned_cmd);
+
+        try self.list.append(self.allocator, .{
+            .process_name = owned_name,
+            .name_hash = hash,
+            .command = owned_cmd,
+        });
     }
 
     pub fn findCommand(self: *const ProcessMappings, process_name: []const u8) ?ProcessCommand {
-        if (self.process_names.items.len == 0) return null;
+        if (self.list.len == 0) return null;
 
         // Create lowercase version for comparison
         var name_buf: [256]u8 = undefined;
@@ -131,22 +146,62 @@ const ProcessMappings = struct {
         const target_hash = std.hash.Wyhash.hash(0, lower_name);
 
         // Fast path: check hashes first
-        for (self.name_hashes.items, 0..) |hash, i| {
+        // This is where MultiArrayList shines - we can access just the hashes
+        const hashes = self.list.items(.name_hash);
+        const names = self.list.items(.process_name);
+        const commands = self.list.items(.command);
+
+        for (hashes, 0..) |hash, i| {
             if (hash == target_hash) {
                 // Verify actual string only on hash match
-                if (std.mem.eql(u8, self.process_names.items[i], lower_name)) {
-                    return self.commands.items[i];
+                if (std.mem.eql(u8, names[i], lower_name)) {
+                    return commands[i];
                 }
             }
         }
         return null;
+    }
+
+    // Utility function to demonstrate field-specific iteration
+    pub fn countCommandTypes(self: *const ProcessMappings) struct { commands: usize, forwarded: usize, unbound: usize } {
+        var result = .{ .commands = 0, .forwarded = 0, .unbound = 0 };
+        
+        // MultiArrayList allows efficient access to just the command field
+        const commands = self.list.items(.command);
+        for (commands) |cmd| {
+            switch (cmd) {
+                .command => result.commands += 1,
+                .forwarded => result.forwarded += 1,
+                .unbound => result.unbound += 1,
+            }
+        }
+        
+        return result;
+    }
+
+    // Demonstrate using slice() for multi-field access
+    pub fn findAllForwardedKeys(self: *const ProcessMappings, allocator: std.mem.Allocator) ![]KeyPress {
+        var forwarded = std.ArrayList(KeyPress).init(allocator);
+        defer forwarded.deinit();
+
+        // Get a slice view that allows coordinated access to multiple fields
+        const slice = self.list.slice();
+        
+        for (0..self.list.len) |i| {
+            switch (slice.items(.command)[i]) {
+                .forwarded => |key_press| try forwarded.append(key_press),
+                else => {},
+            }
+        }
+
+        return try forwarded.toOwnedSlice();
     }
 };
 
 allocator: std.mem.Allocator,
 flags: ModifierFlag = undefined,
 key: u32 = undefined,
-// SOA optimization: use dedicated structure for process mappings
+// SOA optimization using MultiArrayList
 mappings: ProcessMappings,
 wildcard_command: ?ProcessCommand = null,
 mode_list: std.AutoArrayHashMap(*Mode, void),
@@ -210,7 +265,14 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("}}", .{});
     try writer.print("\n  flags: {}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
-    try writer.print("\n  process_mappings: {} entries", .{self.mappings.process_names.items.len});
+    try writer.print("\n  process_mappings: {} entries", .{self.mappings.list.len});
+    
+    // Show command type distribution
+    const stats = self.mappings.countCommandTypes();
+    try writer.print("\n    commands: {}, forwarded: {}, unbound: {}", .{ 
+        stats.commands, stats.forwarded, stats.unbound 
+    });
+    
     if (self.wildcard_command) |wildcard_command| {
         try writer.print("\n  wildcard_command: ", .{});
         switch (wildcard_command) {
@@ -224,6 +286,26 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("\n}}", .{});
 }
 
+// API that's more SOA-friendly
+pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: ProcessCommand) !void {
+    try self.mappings.add(process_name, command);
+}
+
+pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?ProcessCommand {
+    if (self.mappings.findCommand(process_name)) |cmd| {
+        return cmd;
+    }
+    return self.wildcard_command;
+}
+
+pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
+    if (self.mode_list.contains(mode)) {
+        return error.@"Mode already exists in hotkey mode";
+    }
+    try self.mode_list.put(mode, {});
+}
+
+// Compatibility layer for existing code
 pub fn add_process_name(self: *Hotkey, process_name: []const u8) !void {
     // This is called in sequence with add_proc_command/add_proc_unbound/add_proc_forward
     // We'll handle the actual addition when the command is added
@@ -246,39 +328,16 @@ pub fn add_proc_forward(self: *Hotkey, forwarded: KeyPress) !void {
     try self.mappings.add("", ProcessCommand{ .forwarded = forwarded });
 }
 
-// New API that's more SOA-friendly
-pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: ProcessCommand) !void {
-    try self.mappings.add(process_name, command);
+// Additional utility methods that leverage MultiArrayList features
+pub fn getProcessNames(self: *const Hotkey) []const []const u8 {
+    return self.mappings.list.items(.process_name);
 }
 
-pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?ProcessCommand {
-    if (self.mappings.findCommand(process_name)) |cmd| {
-        return cmd;
-    }
-    return self.wildcard_command;
+pub fn getCommands(self: *const Hotkey) []const ProcessCommand {
+    return self.mappings.list.items(.command);
 }
 
-pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
-    if (self.mode_list.contains(mode)) {
-        return error.@"Mode already exists in hotkey mode";
-    }
-    try self.mode_list.put(mode, {});
-}
-
-// Compatibility layer for existing code
-pub const process_names = struct {
-    pub fn items(self: *const Hotkey) []const []const u8 {
-        return self.mappings.process_names.items;
-    }
-};
-
-pub const commands = struct {
-    pub fn items(self: *const Hotkey) []const ProcessCommand {
-        return self.mappings.commands.items;
-    }
-};
-
-test "SOA hotkey implementation" {
+test "MultiArrayList hotkey implementation" {
     const alloc = std.testing.allocator;
     var hotkey = try Hotkey.create(alloc);
     defer hotkey.destroy();
@@ -289,6 +348,7 @@ test "SOA hotkey implementation" {
     // Test the new API
     try hotkey.add_process_mapping("firefox", ProcessCommand{ .command = "echo firefox" });
     try hotkey.add_process_mapping("chrome", ProcessCommand{ .command = "echo chrome" });
+    try hotkey.add_process_mapping("terminal", ProcessCommand{ .forwarded = KeyPress{ .flags = .{}, .key = 0x24 } });
 
     // Test lookup
     const firefox_cmd = hotkey.find_command_for_process("Firefox");
@@ -305,4 +365,45 @@ test "SOA hotkey implementation" {
     const unknown_cmd = hotkey.find_command_for_process("unknown");
     try std.testing.expect(unknown_cmd != null);
     try std.testing.expectEqualStrings("echo default", unknown_cmd.?.command);
+
+    // Test command type counting
+    const stats = hotkey.mappings.countCommandTypes();
+    try std.testing.expectEqual(@as(usize, 2), stats.commands);
+    try std.testing.expectEqual(@as(usize, 1), stats.forwarded);
+    try std.testing.expectEqual(@as(usize, 0), stats.unbound);
+
+    // Test field access
+    const names = hotkey.getProcessNames();
+    try std.testing.expectEqual(@as(usize, 3), names.len);
+}
+
+test "MultiArrayList performance characteristics" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // Add many mappings
+    for (0..100) |i| {
+        const name = try std.fmt.allocPrint(alloc, "process_{}", .{i});
+        defer alloc.free(name);
+        const cmd = try std.fmt.allocPrint(alloc, "echo process_{}", .{i});
+        defer alloc.free(cmd);
+        
+        try hotkey.add_process_mapping(name, ProcessCommand{ .command = cmd });
+    }
+
+    // The benefit of MultiArrayList is that we can iterate over just the fields we need
+    // This improves cache performance when we only need to access specific fields
+    
+    // Example: Count processes starting with "process_1"
+    var count: usize = 0;
+    const names = hotkey.getProcessNames();
+    for (names) |name| {
+        if (std.mem.startsWith(u8, name, "process_1")) {
+            count += 1;
+        }
+    }
+    
+    // Should match process_1, process_10-19 (11 total)
+    try std.testing.expectEqual(@as(usize, 11), count);
 }

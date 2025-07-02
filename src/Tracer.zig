@@ -20,12 +20,8 @@ pub const TracerStats = struct {
     hotkey_not_found: u64 = 0,
     hotkey_comparisons: u64 = 0,
 
-    // Forwarding
-    forward_checks: u64 = 0,
+    // Actions taken
     keys_forwarded: u64 = 0,
-
-    // Execution
-    exec_checks: u64 = 0,
     commands_executed: u64 = 0,
 
     // Early exits
@@ -117,27 +113,12 @@ pub inline fn traceLinearSearchIterations(self: *Tracer, iterations: u64) void {
     }
 }
 
-// Forwarding tracking
-pub inline fn traceForwardCheck(self: *Tracer) void {
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.forward_checks += 1;
-}
-
+// Action tracking
 pub inline fn traceKeyForwarded(self: *Tracer) void {
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
     self.stats.keys_forwarded += 1;
-}
-
-// Execution tracking
-pub inline fn traceExecCheck(self: *Tracer) void {
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.exec_checks += 1;
 }
 
 pub inline fn traceCommandExecuted(self: *Tracer) void {
@@ -216,12 +197,8 @@ pub fn printSummary(self: *Tracer, writer: anytype) !void {
     try writer.print("  Avg linear iterations: {d:.2}\n", .{avg_iterations});
     try writer.print("  Max linear depth:     {d}\n", .{s.max_linear_search_depth});
 
-    try writer.print("\nForwarding:\n", .{});
-    try writer.print("  Forward checks:       {d}\n", .{s.forward_checks});
+    try writer.print("\nActions:\n", .{});
     try writer.print("  Keys forwarded:       {d}\n", .{s.keys_forwarded});
-
-    try writer.print("\nExecution:\n", .{});
-    try writer.print("  Exec checks:          {d}\n", .{s.exec_checks});
     try writer.print("  Commands executed:    {d}\n", .{s.commands_executed});
 
     // Performance insights

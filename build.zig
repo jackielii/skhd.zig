@@ -62,6 +62,26 @@ pub fn build(b: *std.Build) void {
     // or use the test.sh script. This disables the Zig progress server
     // which can cause issues with parallel test execution.
     const test_step = b.step("test", "Run unit tests");
+    
+    // Add benchmark executable
+    const bench_exe = b.addExecutable(.{
+        .name = "benchmark",
+        .root_source_file = b.path("src/benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    linkFrameworks(bench_exe);
+    
+    // Add zbench dependency
+    const zbench = b.dependency("zbench", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_exe.root_module.addImport("zbench", zbench.module("zbench"));
+    
+    const bench_cmd = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&bench_cmd.step);
 
     // Add test for main module and all imported modules
     const exe_unit_tests = b.addTest(.{

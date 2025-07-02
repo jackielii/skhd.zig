@@ -10,6 +10,7 @@ const ModifierFlag = Keycodes.ModifierFlag;
 const Logger = @import("Logger.zig");
 const Hotload = @import("Hotload.zig");
 const Tracer = @import("Tracer.zig");
+const CarbonEvent = @import("CarbonEvent.zig");
 const c = @import("c.zig");
 
 const Skhd = @This();
@@ -26,6 +27,7 @@ logger: Logger,
 hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 tracer: Tracer,
+carbon_event: *CarbonEvent,
 
 pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.Mode, profile: bool) !Skhd {
     // Initialize logger first
@@ -87,6 +89,12 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
         try logger.logInfo("Blacklisted applications: {s}", .{blacklist_buf.items});
     }
 
+    // Initialize Carbon event handler for app switching
+    var carbon_event = try CarbonEvent.init(allocator);
+    errdefer carbon_event.deinit();
+
+    try logger.logInfo("Initial process: {s}", .{carbon_event.process_name});
+
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
 
@@ -98,6 +106,7 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
         .config_file = try allocator.dupe(u8, config_file),
         .logger = logger,
         .tracer = Tracer.init(profile),
+        .carbon_event = carbon_event,
     };
 }
 
@@ -111,6 +120,7 @@ pub fn deinit(self: *Skhd) void {
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
     }
+    self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
@@ -242,10 +252,9 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return event;
     }
 
-    // Check if current application is blacklisted
-    var process_name_buf: [128]u8 = undefined;
+    // Check if current application is blacklisted (using cached name)
     self.tracer.traceProcessNameLookup();
-    const process_name = try getCurrentProcessNameBuf(&process_name_buf);
+    const process_name = self.carbon_event.getProcessName();
 
     if (self.mappings.blacklist.contains(process_name)) {
         self.tracer.traceBlacklistedExit();
@@ -255,16 +264,9 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     // Create hotkey from event
     const eventkey = createEventKey(event);
 
-    // First check for key forwarding
-    if (try self.findAndForwardHotkey(&eventkey, event)) {
-        // Forwarding happened, consume the original event
-        return @ptrFromInt(0);
-    }
-
-    // Then check for regular hotkey execution
-    if (try self.findAndExecHotkey(&eventkey)) {
-        // Hotkey was handled, consume the event by returning null
-        // In Zig, we need to cast this properly for the C callback
+    // Single lookup to handle both forwarding and execution
+    if (try self.processHotkey(&eventkey, event, process_name)) {
+        // Hotkey was handled (forwarded or executed), consume the event
         return @ptrFromInt(0);
     }
 
@@ -285,10 +287,9 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return event;
     }
 
-    // Check if current application is blacklisted
-    var process_name_buf: [128]u8 = undefined;
+    // Check if current application is blacklisted (using cached name)
     self.tracer.traceProcessNameLookup();
-    const process_name = try getCurrentProcessNameBuf(&process_name_buf);
+    const process_name = self.carbon_event.getProcessName();
 
     if (self.mappings.blacklist.contains(process_name)) {
         self.tracer.traceBlacklistedExit();
@@ -297,7 +298,8 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
 
     var eventkey: Hotkey.KeyPress = undefined;
     if (interceptSystemKey(event, &eventkey)) {
-        if (try self.findAndExecHotkey(&eventkey)) {
+        // Single lookup to handle both forwarding and execution
+        if (try self.processHotkey(&eventkey, event, process_name)) {
             return @ptrFromInt(0);
         }
     }
@@ -556,7 +558,7 @@ pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.
 }
 
 /// HashMap-based lookup using adapted context
-inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
     self.tracer.traceHotkeyLookup();
     const ctx = KeyboardLookupContext{};
     const result = mode.hotkey_map.getKeyAdapted(eventkey, ctx);
@@ -565,7 +567,7 @@ inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey.Key
 }
 
 /// Linear search through all hotkeys in the mode
-inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+pub inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
     self.tracer.traceHotkeyLookup();
     var it = mode.hotkey_map.iterator();
     var iterations: u64 = 0;
@@ -584,169 +586,110 @@ inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyP
     return null;
 }
 
-inline fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef) !bool {
-    self.tracer.traceForwardCheck();
+/// Process a hotkey - single lookup that handles both forwarding and execution
+inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !bool {
     // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
-    // Find matching hotkey using our lookup abstraction
-    const found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
-
-    if (found_hotkey) |hotkey| {
-        // Get current process name using stack buffer
-        var process_name_buf: [128]u8 = undefined;
-        const process_name = try getCurrentProcessNameBuf(&process_name_buf);
-
-        // Check for forwarded key in process-specific commands
-        if (findProcessInList(hotkey, process_name)) |proc_index| {
-            if (proc_index < hotkey.commands.items.len) {
-                switch (hotkey.commands.items[proc_index]) {
-                    .forwarded => |target_key| {
-                        try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
-                        self.tracer.traceKeyForwarded();
-                        try forwardKey(target_key, event);
-                        // Return true to indicate forwarding happened (original event will be consumed)
-                        return true;
-                    },
-                    .unbound => {
-                        return false; // Key is unbound, don't forward
-                    },
-                    .command => {
-                        return false; // Key has a command, not a forward
-                    },
-                }
-            }
-        }
-
-        // Check wildcard forwarding
-        if (hotkey.wildcard_command) |wildcard| {
-            switch (wildcard) {
-                .forwarded => |target_key| {
-                    try self.logKeyPress("Forwarding key '{s}' (wildcard), current process {s}", target_key, process_name);
-                    self.tracer.traceKeyForwarded();
-                    _ = try forwardKey(target_key, event);
-                    return true;
-                },
-                else => {}, // Not a forwarded key
-            }
-        }
-    }
-
-    return false;
-}
-
-inline fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
-    self.tracer.traceExecCheck();
-    // Look up hotkey in current mode
-    const mode = self.current_mode orelse return false;
-
-    // Find matching hotkey using our lookup abstraction
+    // Single lookup
+    self.tracer.traceHotkeyLookup();
     const found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
 
     if (found_hotkey == null) {
-        try self.logKeyPress("No matching hotkey found for key (exec): {s}{s}", eventkey.*, "");
+        self.tracer.traceHotkeyFound(false);
+        return false;
     }
 
-    if (found_hotkey) |hotkey| {
-        self.logger.logDebug("Found hotkey match - key: {d}, flags: {any} in mode '{s}'", .{ hotkey.key, hotkey.flags, mode.name }) catch {};
+    self.tracer.traceHotkeyFound(true);
+    const hotkey = found_hotkey.?;
 
-        // Get current process name using stack buffer
-        var process_name_buf: [128]u8 = undefined;
-        const process_name = try getCurrentProcessNameBuf(&process_name_buf);
+    // Check for mode activation first
+    if (hotkey.flags.activate) {
+        self.logger.logDebug("Mode activation hotkey triggered", .{}) catch {};
+        // Get the mode name from the command
+        if (hotkey.wildcard_command) |cmd| {
+            switch (cmd) {
+                .command => |mode_name| {
+                    self.logger.logDebug("Attempting to switch to mode '{s}'", .{mode_name}) catch {};
+                    // Try to find the mode
+                    const new_mode = self.mappings.mode_map.getPtr(mode_name);
 
-        self.logger.logDebug("Current process name: '{s}'", .{process_name}) catch {};
-
-        // Check for mode activation
-        if (hotkey.flags.activate) {
-            self.logger.logDebug("Mode activation hotkey triggered", .{}) catch {};
-            // Get the mode name from the command
-            if (hotkey.wildcard_command) |cmd| {
-                switch (cmd) {
-                    .command => |mode_name| {
-                        self.logger.logDebug("Attempting to switch to mode '{s}'", .{mode_name}) catch {};
-                        // Try to find the mode
-                        const new_mode = self.mappings.mode_map.getPtr(mode_name);
-
-                        if (new_mode) |target_mode| {
-                            self.current_mode = target_mode;
-                            self.logger.logInfo("Switched to mode '{s}'", .{target_mode.name}) catch {};
-                            // Execute mode command if exists
-                            if (target_mode.command) |mode_cmd| {
-                                try self.executeCommand(self.mappings.shell, mode_cmd);
-                            }
-                            return true;
-                        } else if (std.mem.eql(u8, mode_name, "default")) {
-                            // Switching to default mode which should always exist
-                            if (self.mappings.mode_map.getPtr("default")) |default_mode| {
-                                self.current_mode = default_mode;
-                                self.logger.logInfo("Switched to default mode", .{}) catch {};
-                                return true;
-                            }
+                    if (new_mode) |target_mode| {
+                        self.current_mode = target_mode;
+                        self.logger.logInfo("Switched to mode '{s}'", .{target_mode.name}) catch {};
+                        // Execute mode command if exists
+                        if (target_mode.command) |mode_cmd| {
+                            try self.executeCommand(self.mappings.shell, mode_cmd);
                         }
-
-                        // If we get here, mode wasn't found but we should still consume the event
-                        // since this is a mode activation hotkey
                         return true;
-                    },
-                    else => {
-                        self.logger.logDebug("Activate flag set but no command found", .{}) catch {};
-                    },
-                }
-            } else {
-                self.logger.logDebug("Activate flag set but no wildcard_command", .{}) catch {};
+                    } else if (std.mem.eql(u8, mode_name, "default")) {
+                        // Switching to default mode which should always exist
+                        if (self.mappings.mode_map.getPtr("default")) |default_mode| {
+                            self.current_mode = default_mode;
+                            self.logger.logInfo("Switched to default mode", .{}) catch {};
+                            return true;
+                        }
+                    }
+
+                    // If we get here, mode wasn't found but we should still consume the event
+                    // since this is a mode activation hotkey
+                    return true;
+                },
+                else => {
+                    self.logger.logDebug("Activate flag set but no command found", .{}) catch {};
+                },
             }
-            return false;
+        } else {
+            self.logger.logDebug("Activate flag set but no wildcard_command", .{}) catch {};
         }
+        return false;
+    }
 
-        // Find command to execute
-        var command_to_exec: ?[]const u8 = null;
-
-        if (findProcessInList(hotkey, process_name)) |proc_index| {
-            if (proc_index < hotkey.commands.items.len) {
-                switch (hotkey.commands.items[proc_index]) {
-                    .command => |cmd| {
-                        command_to_exec = cmd;
-                        self.logger.logDebug("Using process-specific command: '{s}'", .{cmd}) catch {};
-                    },
-                    .unbound => {
-                        self.logger.logDebug("key is unbound for process '{s}'", .{process_name}) catch {};
-                        return false; // Unbound key
-                    },
-                    .forwarded => |target_key| {
-                        try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
-                        // Note: We should only reach here if findAndForwardHotkey didn't handle it
-                        // This shouldn't happen with current logic, but handling for completeness
-                        return false;
-                    },
-                }
-            }
-        }
-
-        // If no process-specific command found, use wildcard
-        if (command_to_exec == null) {
-            if (hotkey.wildcard_command) |wildcard| {
-                switch (wildcard) {
-                    .command => |cmd| command_to_exec = cmd,
-                    .unbound => return false,
-                    .forwarded => |target_key| {
-                        try self.logKeyPress("Forwarding key '{s}' (wildcard){s}", target_key, "");
-                        // Note: We should only reach here if findAndForwardHotkey didn't handle it
-                        return false;
-                    },
-                }
+    // Check for process-specific command/forward
+    if (findProcessInList(hotkey, process_name)) |proc_index| {
+        if (proc_index < hotkey.commands.items.len) {
+            switch (hotkey.commands.items[proc_index]) {
+                .forwarded => |target_key| {
+                    try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
+                    self.tracer.traceKeyForwarded();
+                    try forwardKey(target_key, event);
+                    return true;
+                },
+                .command => |cmd| {
+                    self.logger.logDebug("Using process-specific command: '{s}'", .{cmd}) catch {};
+                    self.tracer.traceCommandExecuted();
+                    try self.executeCommand(self.mappings.shell, cmd);
+                    return !hotkey.flags.passthrough;
+                },
+                .unbound => {
+                    self.logger.logDebug("key is unbound for process '{s}'", .{process_name}) catch {};
+                    return false;
+                },
             }
         }
+    }
 
-        // Execute the command
-        if (command_to_exec) |cmd| {
-            self.tracer.traceCommandExecuted();
-            try self.executeCommand(self.mappings.shell, cmd);
-            return !hotkey.flags.passthrough;
+    // Check wildcard command/forward
+    if (hotkey.wildcard_command) |wildcard| {
+        switch (wildcard) {
+            .forwarded => |target_key| {
+                try self.logKeyPress("Forwarding key '{s}' (wildcard), current process {s}", target_key, process_name);
+                self.tracer.traceKeyForwarded();
+                try forwardKey(target_key, event);
+                return true;
+            },
+            .command => |cmd| {
+                self.tracer.traceCommandExecuted();
+                try self.executeCommand(self.mappings.shell, cmd);
+                return !hotkey.flags.passthrough;
+            },
+            .unbound => return false,
         }
     }
 
     return false;
 }
+
 
 /// Fork and exec a command, detaching it from the parent process
 inline fn forkAndExec(shell: []const u8, command: []const u8) !void {
@@ -800,84 +743,6 @@ inline fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !v
         // In service mode, use fork and exec to detach the process
         try forkAndExec(shell, command);
     }
-}
-
-/// Get current process name without allocation, using a provided buffer
-/// Matches the original skhd implementation exactly
-inline fn getCurrentProcessNameBuf(buffer: []u8) ![]const u8 {
-    var psn: c.ProcessSerialNumber = undefined;
-
-    // Get the frontmost process
-    const status = c.GetFrontProcess(&psn);
-    if (status != c.noErr) {
-        const unknown = "unknown";
-        @memcpy(buffer[0..unknown.len], unknown);
-        return buffer[0..unknown.len];
-    }
-
-    // Get the process name
-    var process_name_ref: c.CFStringRef = undefined;
-    const copy_status = c.CopyProcessName(&psn, &process_name_ref);
-    if (copy_status != c.noErr) {
-        const unknown = "unknown";
-        @memcpy(buffer[0..unknown.len], unknown);
-        return buffer[0..unknown.len];
-    }
-    defer c.CFRelease(process_name_ref);
-
-    // Convert CFString to buffer
-    const success = c.CFStringGetCString(process_name_ref, buffer.ptr, @intCast(buffer.len), c.kCFStringEncodingUTF8);
-    if (success == 0) {
-        const unknown = "unknown";
-        @memcpy(buffer[0..unknown.len], unknown);
-        return buffer[0..unknown.len];
-    }
-
-    // Find the actual length of the string
-    const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
-    const process_name = buffer[0..c_string_len];
-
-    for (process_name) |*char| {
-        char.* = std.ascii.toLower(char.*);
-    }
-
-    // Clean invisible Unicode characters that some apps (like WhatsApp) have
-    return cleanInvisibleChars(process_name);
-}
-
-/// Remove invisible Unicode characters from the beginning of a string
-/// This handles cases like WhatsApp which has U+200E (LEFT-TO-RIGHT MARK) in its process name
-inline fn cleanInvisibleChars(name: []const u8) []const u8 {
-    // Common invisible Unicode characters as UTF-8 byte sequences
-    const ltr_mark = "\u{200E}"; // LEFT-TO-RIGHT MARK
-    const rtl_mark = "\u{200F}"; // RIGHT-TO-LEFT MARK
-    const zwsp = "\u{200B}"; // ZERO WIDTH SPACE
-    const zwnj = "\u{200C}"; // ZERO WIDTH NON-JOINER
-    const zwj = "\u{200D}"; // ZERO WIDTH JOINER
-    const bom = "\u{FEFF}"; // ZERO WIDTH NO-BREAK SPACE (BOM)
-
-    var result = name;
-
-    // Keep removing invisible chars from the start until we find a visible char
-    while (result.len > 0) {
-        if (std.mem.startsWith(u8, result, ltr_mark)) {
-            result = result[ltr_mark.len..];
-        } else if (std.mem.startsWith(u8, result, rtl_mark)) {
-            result = result[rtl_mark.len..];
-        } else if (std.mem.startsWith(u8, result, zwsp)) {
-            result = result[zwsp.len..];
-        } else if (std.mem.startsWith(u8, result, zwnj)) {
-            result = result[zwnj.len..];
-        } else if (std.mem.startsWith(u8, result, zwj)) {
-            result = result[zwj.len..];
-        } else if (std.mem.startsWith(u8, result, bom)) {
-            result = result[bom.len..];
-        } else {
-            break;
-        }
-    }
-
-    return result;
 }
 
 /// Find a process name in the hotkey's process list

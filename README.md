@@ -469,16 +469,6 @@ Key improvements over the original skhd:
    - Upload artifacts to the release
    - Update the Homebrew tap formula
 
-### GitHub Actions
-
-The project uses GitHub Actions for:
-
-- **CI**: Runs tests on every push and pull request
-- **Releases**: Automatically builds and uploads binaries for:
-  - ARM64 (Apple Silicon) on `macos-latest`
-  - x86_64 (Intel) on `macos-13`
-- **Homebrew Updates**: Automatically updates the tap formula (requires `HOMEBREW_TAP_TOKEN` secret)
-
 ## License
 
 This project maintains compatibility with the original skhd license.

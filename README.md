@@ -460,7 +460,11 @@ Key improvements over the original skhd:
 3. **Commit Changes**: Commit both the version and changelog updates
 4. **Create Tag**: Create an annotated tag: `git tag -a v0.0.X -m "Release v0.0.X"`
 5. **Push**: Push commits and tag: `git push origin main && git push origin v0.0.X`
-6. **Create Release**: GitHub Actions will automatically:
+6. **Create Release**: Use GitHub CLI to create the release:
+   ```bash
+   gh release create v0.0.X --title "Release v0.0.X" --notes "See CHANGELOG.md for details"
+   ```
+   GitHub Actions will then automatically:
    - Build binaries for both architectures
    - Upload artifacts to the release
    - Update the Homebrew tap formula

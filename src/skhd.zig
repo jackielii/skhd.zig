@@ -700,17 +700,47 @@ inline fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool
     return false;
 }
 
+/// Fork and exec a command, detaching it from the parent process
+inline fn forkAndExec(shell: []const u8, command: []const u8) !void {
+    const cpid = c.fork();
+    if (cpid == -1) {
+        return error.ForkFailed;
+    }
+
+    if (cpid == 0) {
+        // Child process
+        // Create new session
+        _ = c.setsid();
+
+        // Prepare arguments for execvp
+        // We need null-terminated strings
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const shell_z = try allocator.dupeZ(u8, shell);
+        const arg_z = try allocator.dupeZ(u8, "-c");
+        const command_z = try allocator.dupeZ(u8, command);
+
+        const argv = [_:null]?[*:0]const u8{ shell_z, arg_z, command_z, null };
+
+        const status_code = c.execvp(shell_z, @ptrCast(&argv));
+        // If execvp returns, it failed
+        std.process.exit(@intCast(status_code));
+    }
+    // Parent process returns immediately
+}
+
 inline fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
     // Log the command execution
     try self.logger.logInfo("Executing command: {s}", .{command});
 
-    const argv = [_][]const u8{ shell, "-c", command };
-
-    var child = std.process.Child.init(&argv, self.allocator);
-    child.stdin_behavior = .Ignore;
-
     // In interactive mode, capture and display output
     if (self.logger.mode == .interactive) {
+        const argv = [_][]const u8{ shell, "-c", command };
+
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
 
@@ -719,11 +749,8 @@ inline fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !v
         // Read output synchronously to avoid race conditions
         self.readChildOutputSync(&child) catch {};
     } else {
-        // In service mode, ignore output
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-
-        try child.spawn();
+        // In service mode, use fork and exec to detach the process
+        try forkAndExec(shell, command);
     }
 }
 

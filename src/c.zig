@@ -4,6 +4,9 @@ pub usingnamespace @cImport({
     @cInclude("CoreServices/CoreServices.h");
     @cInclude("objc/objc.h");
     @cInclude("objc/runtime.h");
+    @cInclude("unistd.h");
+    @cInclude("sys/types.h");
+    @cInclude("IOKit/hidsystem/ev_keymap.h");
 });
 
 // Additional declarations

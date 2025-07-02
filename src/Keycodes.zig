@@ -1,9 +1,5 @@
 const std = @import("std");
-
-const c = @cImport({
-    @cInclude("Carbon/Carbon.h");
-    @cInclude("IOKit/hidsystem/ev_keymap.h");
-});
+const c = @import("c.zig");
 
 const layout_dependent_keycodes = [_]u32{
     c.kVK_ANSI_A,            c.kVK_ANSI_B,           c.kVK_ANSI_C,

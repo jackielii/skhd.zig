@@ -409,7 +409,7 @@ test "Config reload memory leak test" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd with initial config
-    var skhd = try Skhd.init(allocator, config_path, .service);
+    var skhd = try Skhd.init(allocator, config_path, .service, false);
     defer skhd.deinit();
 
     // Verify initial state
@@ -508,7 +508,7 @@ test "Config reload preserves current mode" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd
-    var skhd = try Skhd.init(allocator, config_path, .service);
+    var skhd = try Skhd.init(allocator, config_path, .service, false);
     defer skhd.deinit();
 
     // Switch to special mode
@@ -672,7 +672,7 @@ test "Hot reload enable/disable" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd
-    var skhd = try Skhd.init(allocator, config_path, .service);
+    var skhd = try Skhd.init(allocator, config_path, .service, false);
     defer skhd.deinit();
 
     // Test enabling hot reload
@@ -714,7 +714,7 @@ test "modifier matching - general modifiers match specific ones" {
     }
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
-    var skhd = try Skhd.init(allocator, config_path, .service);
+    var skhd = try Skhd.init(allocator, config_path, .service, false);
     defer skhd.deinit();
 
     // Get default mode
@@ -728,7 +728,7 @@ test "modifier matching - general modifiers match specific ones" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
 
         try testing.expect(found != null);
         try testing.expect(found.?.flags.alt);
@@ -743,7 +743,7 @@ test "modifier matching - general modifiers match specific ones" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
 
         try testing.expect(found == null);
     }
@@ -756,7 +756,7 @@ test "modifier matching - general modifiers match specific ones" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
 
         try testing.expect(found != null);
         try testing.expect(found.?.flags.cmd);
@@ -777,7 +777,7 @@ test "keyboard lalt should match config alt" {
     }
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
-    var skhd = try Skhd.init(allocator, config_path, .service);
+    var skhd = try Skhd.init(allocator, config_path, .service, false);
     defer skhd.deinit();
 
     // Get default mode
@@ -791,7 +791,7 @@ test "keyboard lalt should match config alt" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = Skhd.findHotkeyInMode(&mode, keyboard_key);
+        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
 
         if (found == null) {
             std.debug.print("Test failed: Could not find hotkey for lalt - a\n", .{});

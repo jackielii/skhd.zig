@@ -9,6 +9,7 @@ const Keycodes = @import("Keycodes.zig");
 const ModifierFlag = Keycodes.ModifierFlag;
 const Logger = @import("Logger.zig");
 const Hotload = @import("Hotload.zig");
+const Tracer = @import("Tracer.zig");
 const c = @import("c.zig");
 
 const Skhd = @This();
@@ -24,8 +25,9 @@ config_file: []const u8,
 logger: Logger,
 hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
+tracer: Tracer,
 
-pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.Mode) !Skhd {
+pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.Mode, profile: bool) !Skhd {
     // Initialize logger first
     var logger = try Logger.init(allocator, mode);
     errdefer logger.deinit();
@@ -95,10 +97,17 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
         .event_tap = EventTap{ .mask = mask },
         .config_file = try allocator.dupe(u8, config_file),
         .logger = logger,
+        .tracer = Tracer.init(profile),
     };
 }
 
 pub fn deinit(self: *Skhd) void {
+    // Print tracer summary before cleanup
+    if (self.tracer.enabled) {
+        const stderr = std.io.getStdErr().writer();
+        self.tracer.printSummary(stderr) catch {};
+    }
+
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
     }
@@ -110,12 +119,20 @@ pub fn deinit(self: *Skhd) void {
 
 pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Set up signal handler for config reload
-    const act = std.posix.Sigaction{
+    const usr1_act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigusr1 },
         .mask = std.posix.empty_sigset,
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.USR1, &act, null);
+    std.posix.sigaction(std.posix.SIG.USR1, &usr1_act, null);
+
+    // Set up signal handler for SIGINT (Ctrl+C) to print trace summary
+    const int_act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigint },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &int_act, null);
 
     // Store a global reference for the signal handler
     global_skhd = self;
@@ -186,6 +203,7 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
     _ = proxy;
 
     const self = @as(*Skhd, @ptrCast(@alignCast(user_info)));
+    self.tracer.traceKeyEvent();
 
     switch (typ) {
         c.kCGEventTapDisabledByTimeout, c.kCGEventTapDisabledByUserInput => {
@@ -194,12 +212,14 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
             return event;
         },
         c.kCGEventKeyDown => {
+            self.tracer.traceKeyDown();
             return self.handleKeyDown(event) catch |err| {
                 self.logger.logError("Error handling key down: {}", .{err}) catch {};
                 return event;
             };
         },
         c.NX_SYSDEFINED => {
+            self.tracer.traceSystemKey();
             return self.handleSystemKey(event) catch |err| {
                 self.logger.logError("Error handling system key: {}", .{err}) catch {};
                 return event;
@@ -210,19 +230,25 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
 }
 
 inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
-    if (self.current_mode == null) return event;
+    if (self.current_mode == null) {
+        self.tracer.traceNoModeExit();
+        return event;
+    }
 
     // Skip events that we generated ourselves to avoid loops
     const marker = c.CGEventGetIntegerValueField(event, c.kCGEventSourceUserData);
     if (marker == SKHD_EVENT_MARKER) {
+        self.tracer.traceSelfGeneratedExit();
         return event;
     }
 
     // Check if current application is blacklisted
     var process_name_buf: [128]u8 = undefined;
+    self.tracer.traceProcessNameLookup();
     const process_name = try getCurrentProcessNameBuf(&process_name_buf);
 
     if (self.mappings.blacklist.contains(process_name)) {
+        self.tracer.traceBlacklistedExit();
         return event;
     }
 
@@ -247,19 +273,25 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
 }
 
 inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
-    if (self.current_mode == null) return event;
+    if (self.current_mode == null) {
+        self.tracer.traceNoModeExit();
+        return event;
+    }
 
     // Skip events that we generated ourselves to avoid loops
     const marker = c.CGEventGetIntegerValueField(event, c.kCGEventSourceUserData);
     if (marker == SKHD_EVENT_MARKER) {
+        self.tracer.traceSelfGeneratedExit();
         return event;
     }
 
     // Check if current application is blacklisted
     var process_name_buf: [128]u8 = undefined;
+    self.tracer.traceProcessNameLookup();
     const process_name = try getCurrentProcessNameBuf(&process_name_buf);
 
     if (self.mappings.blacklist.contains(process_name)) {
+        self.tracer.traceBlacklistedExit();
         return event;
     }
 
@@ -515,38 +547,50 @@ pub const KeyboardLookupContext = struct {
 
 /// Find a hotkey in the mode that matches the keyboard event
 /// Returns the hotkey pointer if found, null otherwise
-pub inline fn findHotkeyInMode(mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
     // Method 1: HashMap lookup with adapted context (O(1) average case)
-    // return findHotkeyHashMap(mode, eventkey);
+    return self.findHotkeyHashMap(mode, eventkey);
 
     // Method 2: Linear array search (O(n) but potentially faster for small sets)
-    return findHotkeyLinear(mode, eventkey);
+    // return self.findHotkeyLinear(mode, eventkey);
 }
 
 /// HashMap-based lookup using adapted context
-inline fn findHotkeyHashMap(mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+    self.tracer.traceHotkeyLookup();
     const ctx = KeyboardLookupContext{};
-    return mode.hotkey_map.getKeyAdapted(eventkey, ctx);
+    const result = mode.hotkey_map.getKeyAdapted(eventkey, ctx);
+    self.tracer.traceHotkeyFound(result != null);
+    return result;
 }
 
 /// Linear search through all hotkeys in the mode
-inline fn findHotkeyLinear(mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+    self.tracer.traceHotkeyLookup();
     var it = mode.hotkey_map.iterator();
+    var iterations: u64 = 0;
     while (it.next()) |entry| {
+        iterations += 1;
+        self.tracer.traceHotkeyComparison();
         const hotkey = entry.key_ptr.*;
         if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
+            self.tracer.traceLinearSearchIterations(iterations);
+            self.tracer.traceHotkeyFound(true);
             return hotkey;
         }
     }
+    self.tracer.traceLinearSearchIterations(iterations);
+    self.tracer.traceHotkeyFound(false);
     return null;
 }
 
 inline fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef) !bool {
+    self.tracer.traceForwardCheck();
     // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
     // Find matching hotkey using our lookup abstraction
-    const found_hotkey = findHotkeyInMode(mode, eventkey.*);
+    const found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
 
     if (found_hotkey) |hotkey| {
         // Get current process name using stack buffer
@@ -559,6 +603,7 @@ inline fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, ev
                 switch (hotkey.commands.items[proc_index]) {
                     .forwarded => |target_key| {
                         try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
+                        self.tracer.traceKeyForwarded();
                         try forwardKey(target_key, event);
                         // Return true to indicate forwarding happened (original event will be consumed)
                         return true;
@@ -578,6 +623,7 @@ inline fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, ev
             switch (wildcard) {
                 .forwarded => |target_key| {
                     try self.logKeyPress("Forwarding key '{s}' (wildcard), current process {s}", target_key, process_name);
+                    self.tracer.traceKeyForwarded();
                     _ = try forwardKey(target_key, event);
                     return true;
                 },
@@ -590,11 +636,12 @@ inline fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, ev
 }
 
 inline fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
+    self.tracer.traceExecCheck();
     // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
     // Find matching hotkey using our lookup abstraction
-    const found_hotkey = findHotkeyInMode(mode, eventkey.*);
+    const found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
 
     if (found_hotkey == null) {
         try self.logKeyPress("No matching hotkey found for key (exec): {s}{s}", eventkey.*, "");
@@ -692,6 +739,7 @@ inline fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool
 
         // Execute the command
         if (command_to_exec) |cmd| {
+            self.tracer.traceCommandExecuted();
             try self.executeCommand(self.mappings.shell, cmd);
             return !hotkey.flags.passthrough;
         }
@@ -851,6 +899,17 @@ fn handleSigusr1(_: c_int) callconv(.C) void {
             skhd.logger.logError("Failed to reload config: {}", .{err}) catch {};
         };
     }
+}
+
+/// Signal handler for SIGINT - print trace summary and exit
+fn handleSigint(_: c_int) callconv(.C) void {
+    if (global_skhd) |skhd| {
+        if (skhd.tracer.enabled) {
+            const stderr = std.io.getStdErr().writer();
+            skhd.tracer.printSummary(stderr) catch {};
+        }
+    }
+    std.process.exit(0);
 }
 
 /// Reload configuration from file

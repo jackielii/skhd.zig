@@ -24,6 +24,7 @@ pub fn main() !void {
     var verbose = false;
     var observe_mode = false;
     var no_hotload = false;
+    var profile = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -86,6 +87,8 @@ pub fn main() !void {
             return;
         } else if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--no-hotload")) {
             no_hotload = true;
+        } else if (std.mem.eql(u8, args[i], "-P") or std.mem.eql(u8, args[i], "--profile")) {
+            profile = true;
         }
     }
 
@@ -121,7 +124,7 @@ pub fn main() !void {
 
     // Initialize and run skhd
     const mode: Logger.Mode = if (verbose) .interactive else .service;
-    var skhd = try Skhd.init(allocator, resolved_config_file, mode);
+    var skhd = try Skhd.init(allocator, resolved_config_file, mode, profile);
     defer skhd.deinit();
 
     if (verbose) {
@@ -130,6 +133,9 @@ pub fn main() !void {
             try skhd.logger.logInfo("Hot reload disabled", .{});
         } else {
             try skhd.logger.logInfo("Hot reload enabled", .{});
+        }
+        if (profile) {
+            try skhd.logger.logInfo("Profiling enabled", .{});
         }
     }
 
@@ -189,6 +195,7 @@ fn printHelp() void {
         \\Options:
         \\  -c, --config <file>    Specify config file (default: skhdrc)
         \\  -V, --verbose          Enable verbose output (interactive mode)
+        \\  -P, --profile          Enable profiling/tracing mode
         \\  -o, --observe          Observe mode - print key events
         \\  -h, --no-hotload       Disable system for hotloading config file
         \\  -k, --key <keyspec>    Synthesize a keypress

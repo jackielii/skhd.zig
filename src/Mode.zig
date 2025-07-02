@@ -7,7 +7,7 @@
 //     struct table hotkey_map;
 // };
 const std = @import("std");
-const Hotkey = @import("Hotkey.zig");
+const Hotkey = @import("HotkeyMultiArrayList.zig");
 const utils = @import("utils.zig");
 
 const Mode = @This();
@@ -72,7 +72,7 @@ test "init" {
 
     var key = try Hotkey.create(alloc);
     defer key.destroy();
-    try key.add_process_name("notepad.exe");
+    try key.add_process_mapping("notepad.exe", Hotkey.ProcessCommand{ .command = "echo notepad" });
     try key.add_mode(&mode);
     try mode.add_hotkey(key);
 

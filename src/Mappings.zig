@@ -1,6 +1,6 @@
 const std = @import("std");
 const Mode = @import("Mode.zig");
-const Hotkey = @import("Hotkey.zig");
+const Hotkey = @import("HotkeyMultiArrayList.zig");
 const utils = @import("utils.zig");
 
 allocator: std.mem.Allocator,

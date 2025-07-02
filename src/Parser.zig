@@ -1,7 +1,7 @@
 const std = @import("std");
 const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
-const Hotkey = @import("Hotkey.zig");
+const Hotkey = @import("HotkeyMultiArrayList.zig");
 const assert = std.debug.assert;
 const Mode = @import("Mode.zig");
 const Mappings = @import("Mappings.zig");
@@ -318,13 +318,13 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
 fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     if (self.match(.Token_String)) {
         const name_token = self.previous();
-        try hotkey.add_process_name(name_token.text);
+        const process_name = name_token.text;
         if (self.match(.Token_Command)) {
-            try hotkey.add_proc_command(self.previous().text);
+            try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = self.previous().text });
         } else if (self.match(.Token_Forward)) {
-            try hotkey.add_proc_forward(try self.parse_keypress());
+            try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .forwarded = try self.parse_keypress() });
         } else if (self.match(.Token_Unbound)) {
-            try hotkey.add_proc_unbound();
+            try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .unbound = void{} });
         } else {
             const token = self.peek() orelse self.previous();
             self.error_info = ParseError.fromToken(token, "Expected command ':', forward '|' or unbound '~' after process name", self.current_file_path);
@@ -338,26 +338,21 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
 
         // Look up the process group in mappings
         if (mappings.process_groups.get(group_name)) |processes| {
-            // Add all processes from the group
-            for (processes) |process_name| {
-                try hotkey.add_process_name(process_name);
-            }
-
             // Now parse the action (command, forward, or unbound)
             if (self.match(.Token_Command)) {
                 // Apply same command to all processes in the group
                 const command = self.previous().text;
-                for (processes) |_| {
-                    try hotkey.add_proc_command(command);
+                for (processes) |process_name| {
+                    try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
                 }
             } else if (self.match(.Token_Forward)) {
                 const forward_key = try self.parse_keypress();
-                for (processes) |_| {
-                    try hotkey.add_proc_forward(forward_key);
+                for (processes) |process_name| {
+                    try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .forwarded = forward_key });
                 }
             } else if (self.match(.Token_Unbound)) {
-                for (processes) |_| {
-                    try hotkey.add_proc_unbound();
+                for (processes) |process_name| {
+                    try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .unbound = void{} });
                 }
             } else {
                 const token = self.peek() orelse self.previous();
@@ -383,7 +378,7 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         }
         try self.parse_proc_list(mappings, hotkey);
     } else if (self.match(.Token_EndList)) {
-        if (hotkey.process_names.items.len == 0) {
+        if (hotkey.getProcessNames().len == 0) {
             const token = self.previous();
             self.error_info = ParseError.fromToken(token, "Empty process list", self.current_file_path);
             return error.ParseErrorOccurred;

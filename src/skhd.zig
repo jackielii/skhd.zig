@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const EventTap = @import("EventTap.zig");
 const Mappings = @import("Mappings.zig");
 const Parser = @import("Parser.zig");
-const Hotkey = @import("Hotkey.zig");
+const Hotkey = @import("HotkeyMultiArrayList.zig");
 const Mode = @import("Mode.zig");
 const Keycodes = @import("Keycodes.zig");
 const ModifierFlag = Keycodes.ModifierFlag;
@@ -645,51 +645,42 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         return false;
     }
 
-    // Check for process-specific command/forward
-    if (findProcessInList(hotkey, process_name)) |proc_index| {
-        if (proc_index < hotkey.commands.items.len) {
-            switch (hotkey.commands.items[proc_index]) {
-                .forwarded => |target_key| {
-                    try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
-                    self.tracer.traceKeyForwarded();
-                    try forwardKey(target_key, event);
-                    return true;
-                },
-                .command => |cmd| {
-                    self.logger.logDebug("Using process-specific command: '{s}'", .{cmd}) catch {};
-                    self.tracer.traceCommandExecuted();
-                    try self.executeCommand(self.mappings.shell, cmd);
-                    return !hotkey.flags.passthrough;
-                },
-                .unbound => {
-                    self.logger.logDebug("key is unbound for process '{s}'", .{process_name}) catch {};
-                    return false;
-                },
-            }
-        }
-    }
+    // Check for process-specific command/forward (includes wildcard fallback)
+    if (hotkey.find_command_for_process(process_name)) |process_cmd| {
+        const is_process_specific = findProcessInList(hotkey, process_name) != null;
 
-    // Check wildcard command/forward
-    if (hotkey.wildcard_command) |wildcard| {
-        switch (wildcard) {
+        switch (process_cmd) {
             .forwarded => |target_key| {
-                try self.logKeyPress("Forwarding key '{s}' (wildcard), current process {s}", target_key, process_name);
+                if (is_process_specific) {
+                    try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
+                } else {
+                    try self.logKeyPress("Forwarding key '{s}' (wildcard), current process {s}", target_key, process_name);
+                }
                 self.tracer.traceKeyForwarded();
                 try forwardKey(target_key, event);
                 return true;
             },
             .command => |cmd| {
+                if (is_process_specific) {
+                    self.logger.logDebug("Using process-specific command: '{s}'", .{cmd}) catch {};
+                }
                 self.tracer.traceCommandExecuted();
                 try self.executeCommand(self.mappings.shell, cmd);
                 return !hotkey.flags.passthrough;
             },
-            .unbound => return false,
+            .unbound => {
+                if (is_process_specific) {
+                    self.logger.logDebug("key is unbound for process '{s}'", .{process_name}) catch {};
+                } else {
+                    self.logger.logDebug("key is unbound (wildcard)", .{}) catch {};
+                }
+                return false;
+            },
         }
     }
 
     return false;
 }
-
 
 /// Fork and exec a command, detaching it from the parent process
 inline fn forkAndExec(shell: []const u8, command: []const u8) !void {
@@ -748,7 +739,8 @@ inline fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !v
 /// Find a process name in the hotkey's process list
 /// Returns the index if found, null if not found
 pub inline fn findProcessInList(hotkey: *const Hotkey, process_name: []const u8) ?usize {
-    for (hotkey.process_names.items, 0..) |proc_name, i| {
+    const process_names = hotkey.getProcessNames();
+    for (process_names, 0..) |proc_name, i| {
         if (std.mem.eql(u8, proc_name, process_name)) {
             return i;
         }

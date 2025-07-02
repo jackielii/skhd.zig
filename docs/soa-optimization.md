@@ -2,13 +2,12 @@
 
 ## Overview
 
-We implemented and benchmarked three versions of the Hotkey process mapping system to address the performance gap mentioned in TODO.md (1.6% CPU vs 0.6% for original skhd).
+We implemented and benchmarked an optimized version of the Hotkey process mapping system using Zig's `std.MultiArrayList` to address the performance gap mentioned in TODO.md (1.6% CPU vs 0.6% for original skhd).
 
 ## Performance Results
 
 ```
 Process Mapping (Original):       170ns per lookup
-Process Mapping (Manual SOA):     42ns per lookup (4x speedup)
 Process Mapping (MultiArrayList): 28ns per lookup (6x speedup)
 ```
 
@@ -19,16 +18,12 @@ Process Mapping (MultiArrayList): 28ns per lookup (6x speedup)
 - Linear search with lowercase conversion on every lookup
 - Good structure but inefficient lookup
 
-### 2. Manual SOA (HotkeySOA.zig)
-- Added pre-computed hash array
-- Hash comparison before string comparison
-- Lowercase conversion done once at insertion
-- 4x performance improvement
-
-### 3. MultiArrayList (HotkeyMultiArray.zig)
+### 2. MultiArrayList (HotkeyMultiArrayList.zig)
 - Uses `std.MultiArrayList` for automatic SOA layout
+- Pre-computed hashes for fast comparison
+- Lowercase conversion done once at insertion
 - Best cache locality through standard library optimizations
-- Cleanest implementation with 6x performance improvement
+- Clean, idiomatic implementation with 6x performance improvement
 
 ## Key Optimizations
 
@@ -59,6 +54,7 @@ Use `std.MultiArrayList` (HotkeyMultiArray.zig) because:
 
 ## Integration Steps
 
-1. Replace Hotkey.zig with HotkeyMultiArray.zig
-2. Update Parser to use `add_process_mapping()` API
-3. Run full application benchmarks to verify improvement
+1. ✅ Replaced Hotkey.zig with HotkeyMultiArrayList.zig 
+2. ✅ Updated Parser to use `add_process_mapping()` API
+3. ✅ Updated all references to use the clean MultiArrayList API
+4. Run full application benchmarks to verify real-world improvement

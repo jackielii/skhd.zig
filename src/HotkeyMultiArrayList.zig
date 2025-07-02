@@ -109,7 +109,7 @@ const ProcessMappings = struct {
     pub fn add(self: *ProcessMappings, process_name: []const u8, command: ProcessCommand) !void {
         const owned_name = try self.allocator.dupe(u8, process_name);
         errdefer self.allocator.free(owned_name);
-        
+
         // Convert to lowercase once during insertion
         for (owned_name, 0..) |c, i| owned_name[i] = std.ascii.toLower(c);
 
@@ -163,9 +163,11 @@ const ProcessMappings = struct {
     }
 
     // Utility function to demonstrate field-specific iteration
-    pub fn countCommandTypes(self: *const ProcessMappings) struct { commands: usize, forwarded: usize, unbound: usize } {
-        var result = .{ .commands = 0, .forwarded = 0, .unbound = 0 };
-        
+    pub const CommandStats = struct { commands: usize, forwarded: usize, unbound: usize };
+    
+    pub fn countCommandTypes(self: *const ProcessMappings) CommandStats {
+        var result = CommandStats{ .commands = 0, .forwarded = 0, .unbound = 0 };
+
         // MultiArrayList allows efficient access to just the command field
         const commands = self.list.items(.command);
         for (commands) |cmd| {
@@ -175,7 +177,7 @@ const ProcessMappings = struct {
                 .unbound => result.unbound += 1,
             }
         }
-        
+
         return result;
     }
 
@@ -186,7 +188,7 @@ const ProcessMappings = struct {
 
         // Get a slice view that allows coordinated access to multiple fields
         const slice = self.list.slice();
-        
+
         for (0..self.list.len) |i| {
             switch (slice.items(.command)[i]) {
                 .forwarded => |key_press| try forwarded.append(key_press),
@@ -266,13 +268,11 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("\n  flags: {}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
     try writer.print("\n  process_mappings: {} entries", .{self.mappings.list.len});
-    
+
     // Show command type distribution
     const stats = self.mappings.countCommandTypes();
-    try writer.print("\n    commands: {}, forwarded: {}, unbound: {}", .{ 
-        stats.commands, stats.forwarded, stats.unbound 
-    });
-    
+    try writer.print("\n    commands: {}, forwarded: {}, unbound: {}", .{ stats.commands, stats.forwarded, stats.unbound });
+
     if (self.wildcard_command) |wildcard_command| {
         try writer.print("\n  wildcard_command: ", .{});
         switch (wildcard_command) {
@@ -303,29 +303,6 @@ pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
         return error.@"Mode already exists in hotkey mode";
     }
     try self.mode_list.put(mode, {});
-}
-
-// Compatibility layer for existing code
-pub fn add_process_name(self: *Hotkey, process_name: []const u8) !void {
-    // This is called in sequence with add_proc_command/add_proc_unbound/add_proc_forward
-    // We'll handle the actual addition when the command is added
-    _ = self;
-    _ = process_name;
-}
-
-pub fn add_proc_command(self: *Hotkey, command: []const u8) !void {
-    // This assumes add_process_name was called just before
-    // For now, we'll need to refactor the parser to use a better API
-    // that passes both process name and command together
-    try self.mappings.add("", ProcessCommand{ .command = command });
-}
-
-pub fn add_proc_unbound(self: *Hotkey) !void {
-    try self.mappings.add("", ProcessCommand{ .unbound = void{} });
-}
-
-pub fn add_proc_forward(self: *Hotkey, forwarded: KeyPress) !void {
-    try self.mappings.add("", ProcessCommand{ .forwarded = forwarded });
 }
 
 // Additional utility methods that leverage MultiArrayList features
@@ -388,13 +365,13 @@ test "MultiArrayList performance characteristics" {
         defer alloc.free(name);
         const cmd = try std.fmt.allocPrint(alloc, "echo process_{}", .{i});
         defer alloc.free(cmd);
-        
+
         try hotkey.add_process_mapping(name, ProcessCommand{ .command = cmd });
     }
 
     // The benefit of MultiArrayList is that we can iterate over just the fields we need
     // This improves cache performance when we only need to access specific fields
-    
+
     // Example: Count processes starting with "process_1"
     var count: usize = 0;
     const names = hotkey.getProcessNames();
@@ -403,7 +380,7 @@ test "MultiArrayList performance characteristics" {
             count += 1;
         }
     }
-    
+
     // Should match process_1, process_10-19 (11 total)
     try std.testing.expectEqual(@as(usize, 11), count);
 }

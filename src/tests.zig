@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 // Import our modules
-const Hotkey = @import("Hotkey.zig");
+const Hotkey = @import("HotkeyMultiArrayList.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
@@ -257,7 +257,7 @@ test "Process-specific hotkey parsing" {
     var hotkey_iter = default_mode.?.hotkey_map.iterator();
     if (hotkey_iter.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        try testing.expect(hotkey.process_names.items.len == 2); // terminal and safari
+        try testing.expect(hotkey.getProcessNames().len == 2); // terminal and safari
         try testing.expect(hotkey.wildcard_command != null); // default command
     }
 }
@@ -845,9 +845,9 @@ test "findProcessInList function" {
     var hotkey = try Hotkey.create(allocator);
     defer hotkey.destroy();
 
-    try hotkey.add_process_name("chrome");
-    try hotkey.add_process_name("firefox");
-    try hotkey.add_process_name("whatsapp");
+    try hotkey.add_process_mapping("chrome", Hotkey.ProcessCommand{ .command = "echo chrome" });
+    try hotkey.add_process_mapping("firefox", Hotkey.ProcessCommand{ .command = "echo firefox" });
+    try hotkey.add_process_mapping("whatsapp", Hotkey.ProcessCommand{ .command = "echo whatsapp" });
 
     // Test finding existing processes
     try testing.expect(Skhd.findProcessInList(hotkey, "chrome") == 0);
@@ -893,16 +893,17 @@ test "process group variables" {
     const hotkey = entry.key_ptr.*;
 
     // Should have 3 process names from the group
-    try testing.expectEqual(@as(usize, 3), hotkey.process_names.items.len);
-    try testing.expectEqualStrings("kitty", hotkey.process_names.items[0]);
-    try testing.expectEqualStrings("wezterm", hotkey.process_names.items[1]);
-    try testing.expectEqualStrings("chrome", hotkey.process_names.items[2]);
+    const process_names = hotkey.getProcessNames();
+    try testing.expectEqual(@as(usize, 3), process_names.len);
+    try testing.expectEqualStrings("kitty", process_names[0]);
+    try testing.expectEqualStrings("wezterm", process_names[1]);
+    try testing.expectEqualStrings("chrome", process_names[2]);
 
-    // All should be unbound
-    try testing.expectEqual(@as(usize, 3), hotkey.commands.items.len);
-    for (hotkey.commands.items) |cmd| {
-        try testing.expect(cmd == .unbound);
-    }
+    // All should be unbound  
+    const stats = hotkey.mappings.countCommandTypes();
+    try testing.expectEqual(@as(usize, 0), stats.commands);
+    try testing.expectEqual(@as(usize, 0), stats.forwarded);
+    try testing.expectEqual(@as(usize, 3), stats.unbound);
 
     // Wildcard should forward to cmd - left
     try testing.expect(hotkey.wildcard_command.? == .forwarded);

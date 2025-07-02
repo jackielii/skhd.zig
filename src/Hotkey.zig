@@ -9,6 +9,9 @@
 //     struct hotkey *forwarded_hotkey;
 // };
 
+/// This is the original hotkey implementation adapted from skhd.
+/// Since Zig has multiarraylist which is a better struct for this use case,
+/// Please see ./HotkeyMultiArrayList.zig for more details
 const std = @import("std");
 const Hotkey = @This();
 const Mode = @import("Mode.zig");

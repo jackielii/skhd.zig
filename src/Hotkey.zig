@@ -234,6 +234,30 @@ pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
     try self.mode_list.put(mode, {});
 }
 
+pub const ProcessCommand = processCommand;
+
+pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: ProcessCommand) !void {
+    // Handle wildcard mappings
+    if (std.mem.eql(u8, process_name, "*")) {
+        switch (command) {
+            .command => |cmd| try self.set_wildcard_command(cmd),
+            .forwarded => |fwd| self.set_wildcard_forwarded(fwd),
+            .unbound => self.set_wildcard_unbound(),
+        }
+        return;
+    }
+    
+    // Add process name
+    try self.add_process_name(process_name);
+    
+    // Add corresponding command
+    switch (command) {
+        .command => |cmd| try self.add_proc_command(cmd),
+        .forwarded => |fwd| try self.add_proc_forward(fwd),
+        .unbound => try self.add_proc_unbound(),
+    }
+}
+
 test "format hotkey" {
     const alloc = std.testing.allocator;
     var hotkey = try Hotkey.create(alloc);
@@ -283,4 +307,25 @@ test "hotkey map" {
     try m.put(alloc, key2, {});
     try m.put(alloc, key1d, {});
     try std.testing.expectEqual(2, m.count());
+}
+
+test "add_process_mapping" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // Test regular process mapping
+    try hotkey.add_process_mapping("firefox", ProcessCommand{ .command = "echo firefox" });
+    try std.testing.expectEqual(@as(usize, 1), hotkey.process_names.items.len);
+    try std.testing.expectEqualStrings("firefox", hotkey.process_names.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), hotkey.commands.items.len);
+    try std.testing.expectEqualStrings("echo firefox", hotkey.commands.items[0].command);
+
+    // Test wildcard mapping
+    try hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo wildcard" });
+    try std.testing.expect(hotkey.wildcard_command != null);
+    try std.testing.expectEqualStrings("echo wildcard", hotkey.wildcard_command.?.command);
+    
+    // Process names should still be 1 (wildcard doesn't add to process_names)
+    try std.testing.expectEqual(@as(usize, 1), hotkey.process_names.items.len);
 }

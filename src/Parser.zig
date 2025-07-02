@@ -175,12 +175,12 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         hotkey.flags = hotkey.flags.merge(.{ .activate = true });
         const mode_name = self.previous().text;
         // Don't add the target mode to the hotkey's mode list - that's for activation
-        // Instead, store it as a command (the mode name to switch to)
-        try hotkey.set_wildcard_command(mode_name);
+        // Instead, store it as a command (the mode name to switch to) with ";" as process name
+        try hotkey.add_process_mapping(";", Hotkey.ProcessCommand{ .command = mode_name });
     } else if (self.match(.Token_Forward)) {
-        hotkey.set_wildcard_forwarded(try self.parse_keypress());
+        try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .forwarded = try self.parse_keypress() });
     } else if (self.match(.Token_Command)) {
-        try hotkey.set_wildcard_command(self.previous().text);
+        try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = self.previous().text });
     } else if (self.match(.Token_BeginList)) {
         try self.parse_proc_list(mappings, hotkey);
     }
@@ -366,11 +366,11 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         try self.parse_proc_list(mappings, hotkey);
     } else if (self.match(.Token_Wildcard)) {
         if (self.match(.Token_Command)) {
-            try hotkey.set_wildcard_command(self.previous().text);
+            try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = self.previous().text });
         } else if (self.match(.Token_Forward)) {
-            hotkey.set_wildcard_forwarded(try self.parse_keypress());
+            try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .forwarded = try self.parse_keypress() });
         } else if (self.match(.Token_Unbound)) {
-            hotkey.set_wildcard_unbound();
+            try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .unbound = {} });
         } else {
             const token = self.peek() orelse self.previous();
             self.error_info = ParseError.fromToken(token, "Expected command ':', forward '|' or unbound '~' after wildcard", self.current_file_path);

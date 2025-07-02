@@ -257,8 +257,10 @@ test "Process-specific hotkey parsing" {
     var hotkey_iter = default_mode.?.hotkey_map.iterator();
     if (hotkey_iter.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        try testing.expect(hotkey.getProcessNames().len == 2); // terminal and safari
-        try testing.expect(hotkey.wildcard_command != null); // default command
+        try testing.expect(hotkey.getProcessNames().len == 3); // terminal, safari, and *
+        // Check that wildcard was added
+        const wildcard_cmd = hotkey.find_command_for_process("random_app");
+        try testing.expect(wildcard_cmd != null);
     }
 }
 
@@ -838,7 +840,7 @@ test "keyboard lalt should match config alt" {
     }
 }
 
-test "findProcessInList function" {
+test "find_command_for_process function with process matching" {
     const allocator = std.testing.allocator;
 
     // Create a hotkey with some process names
@@ -848,15 +850,21 @@ test "findProcessInList function" {
     try hotkey.add_process_mapping("chrome", Hotkey.ProcessCommand{ .command = "echo chrome" });
     try hotkey.add_process_mapping("firefox", Hotkey.ProcessCommand{ .command = "echo firefox" });
     try hotkey.add_process_mapping("whatsapp", Hotkey.ProcessCommand{ .command = "echo whatsapp" });
+    try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = "echo wildcard" });
 
-    // Test finding existing processes
-    try testing.expect(Skhd.findProcessInList(hotkey, "chrome") == 0);
-    try testing.expect(Skhd.findProcessInList(hotkey, "firefox") == 1);
-    try testing.expect(Skhd.findProcessInList(hotkey, "whatsapp") == 2);
+    // Test finding existing processes (case insensitive)
+    const chrome_cmd = hotkey.find_command_for_process("Chrome");
+    try testing.expect(chrome_cmd != null);
+    try testing.expectEqualStrings("echo chrome", chrome_cmd.?.command);
 
-    // Test not finding non-existent process
-    try testing.expect(Skhd.findProcessInList(hotkey, "notepad") == null);
-    try testing.expect(Skhd.findProcessInList(hotkey, "Chrome") == null); // Case sensitive
+    const firefox_cmd = hotkey.find_command_for_process("FIREFOX");
+    try testing.expect(firefox_cmd != null);
+    try testing.expectEqualStrings("echo firefox", firefox_cmd.?.command);
+
+    // Test wildcard fallback
+    const notepad_cmd = hotkey.find_command_for_process("notepad");
+    try testing.expect(notepad_cmd != null);
+    try testing.expectEqualStrings("echo wildcard", notepad_cmd.?.command);
 }
 
 test "process group variables" {
@@ -892,22 +900,25 @@ test "process group variables" {
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
 
-    // Should have 3 process names from the group
+    // Should have 3 process names from the group + 1 wildcard
     const process_names = hotkey.getProcessNames();
-    try testing.expectEqual(@as(usize, 3), process_names.len);
+    try testing.expectEqual(@as(usize, 4), process_names.len);
     try testing.expectEqualStrings("kitty", process_names[0]);
     try testing.expectEqualStrings("wezterm", process_names[1]);
     try testing.expectEqualStrings("chrome", process_names[2]);
+    try testing.expectEqualStrings("*", process_names[3]);
 
-    // All should be unbound  
+    // 3 unbound (native_apps) + 1 forwarded (wildcard)
     const stats = hotkey.mappings.countCommandTypes();
     try testing.expectEqual(@as(usize, 0), stats.commands);
-    try testing.expectEqual(@as(usize, 0), stats.forwarded);
+    try testing.expectEqual(@as(usize, 1), stats.forwarded); // wildcard forwards
     try testing.expectEqual(@as(usize, 3), stats.unbound);
 
     // Wildcard should forward to cmd - left
-    try testing.expect(hotkey.wildcard_command.? == .forwarded);
-    const forward_key = hotkey.wildcard_command.?.forwarded;
+    const wildcard_result = hotkey.find_command_for_process("random_app");
+    try testing.expect(wildcard_result != null);
+    try testing.expect(wildcard_result.? == .forwarded);
+    const forward_key = wildcard_result.?.forwarded;
     try testing.expect(forward_key.flags.cmd);
     try testing.expectEqual(@as(u32, 0x7B), forward_key.key); // left arrow
 }

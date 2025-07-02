@@ -243,9 +243,9 @@ pub fn main() !void {
             try hotkey_multiarray.add_process_mapping(process, HotkeyMultiArray.ProcessCommand{ .command = cmd });
         }
 
-        // Set wildcard commands
-        try hotkey_original.set_wildcard_command("echo 'default'");
-        try hotkey_multiarray.set_wildcard_command("echo 'default'");
+        // Set wildcard commands using unified API
+        try hotkey_original.add_process_mapping("*", HotkeyOriginal.ProcessCommand{ .command = "echo 'default'" });
+        try hotkey_multiarray.add_process_mapping("*", HotkeyMultiArray.ProcessCommand{ .command = "echo 'default'" });
 
         std.debug.print("Initialized hotkeys with {} process mappings\n\n", .{common_processes.len});
     }

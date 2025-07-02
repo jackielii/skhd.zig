@@ -4,6 +4,30 @@ const Mode = @import("Mode.zig");
 const utils = @import("utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
+allocator: std.mem.Allocator,
+flags: ModifierFlag = undefined,
+key: u32 = undefined,
+mappings: ProcessMappings,
+mode_list: std.AutoArrayHashMap(*Mode, void),
+
+pub fn destroy(self: *Hotkey) void {
+    self.mappings.deinit();
+    self.mode_list.deinit();
+    self.allocator.destroy(self);
+}
+
+pub fn create(allocator: std.mem.Allocator) !*Hotkey {
+    const hotkey = try allocator.create(Hotkey);
+    hotkey.* = .{
+        .allocator = allocator,
+        .flags = ModifierFlag{},
+        .key = 0,
+        .mappings = .{ .allocator = allocator },
+        .mode_list = .init(allocator),
+    };
+    return hotkey;
+}
+
 pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
     pub fn hash(self: @This(), key: *Hotkey) u32 {
         _ = self;
@@ -164,7 +188,7 @@ const ProcessMappings = struct {
 
     // Utility function to demonstrate field-specific iteration
     pub const CommandStats = struct { commands: usize, forwarded: usize, unbound: usize };
-    
+
     pub fn countCommandTypes(self: *const ProcessMappings) CommandStats {
         var result = CommandStats{ .commands = 0, .forwarded = 0, .unbound = 0 };
 
@@ -200,60 +224,6 @@ const ProcessMappings = struct {
     }
 };
 
-allocator: std.mem.Allocator,
-flags: ModifierFlag = undefined,
-key: u32 = undefined,
-// SOA optimization using MultiArrayList
-mappings: ProcessMappings,
-wildcard_command: ?ProcessCommand = null,
-mode_list: std.AutoArrayHashMap(*Mode, void),
-
-pub fn destroy(self: *Hotkey) void {
-    self.mappings.deinit();
-    self.deinit_wildcard_command();
-    self.mode_list.deinit();
-    self.allocator.destroy(self);
-}
-
-pub fn create(allocator: std.mem.Allocator) !*Hotkey {
-    const hotkey = try allocator.create(Hotkey);
-    hotkey.* = .{
-        .allocator = allocator,
-        .flags = ModifierFlag{},
-        .key = 0,
-        .mappings = .{ .allocator = allocator },
-        .wildcard_command = null,
-        .mode_list = .init(allocator),
-    };
-    return hotkey;
-}
-
-fn deinit_wildcard_command(self: *Hotkey) void {
-    if (self.wildcard_command) |wildcard_command| {
-        switch (wildcard_command) {
-            .command => |str| self.allocator.free(str),
-            else => {},
-        }
-        self.wildcard_command = null;
-    }
-}
-
-pub fn set_wildcard_command(self: *Hotkey, wildcard_command: []const u8) !void {
-    self.deinit_wildcard_command();
-    const cmd = try self.allocator.dupe(u8, wildcard_command);
-    self.wildcard_command = ProcessCommand{ .command = cmd };
-}
-
-pub fn set_wildcard_forwarded(self: *Hotkey, forwarded: KeyPress) void {
-    self.deinit_wildcard_command();
-    self.wildcard_command = ProcessCommand{ .forwarded = forwarded };
-}
-
-pub fn set_wildcard_unbound(self: *Hotkey) void {
-    self.deinit_wildcard_command();
-    self.wildcard_command = ProcessCommand{ .unbound = void{} };
-}
-
 pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
     _ = fmt;
     try writer.print("Hotkey{{", .{});
@@ -272,17 +242,6 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     // Show command type distribution
     const stats = self.mappings.countCommandTypes();
     try writer.print("\n    commands: {}, forwarded: {}, unbound: {}", .{ stats.commands, stats.forwarded, stats.unbound });
-
-    if (self.wildcard_command) |wildcard_command| {
-        try writer.print("\n  wildcard_command: ", .{});
-        switch (wildcard_command) {
-            .command => |str| try writer.print("{s}", .{str}),
-            .forwarded => try writer.print("forwarded", .{}),
-            .unbound => try writer.print("unbound", .{}),
-        }
-    } else {
-        try writer.print("\n  wildcard_command: null", .{});
-    }
     try writer.print("\n}}", .{});
 }
 
@@ -292,10 +251,12 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
 }
 
 pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?ProcessCommand {
+    // First try to find exact match
     if (self.mappings.findCommand(process_name)) |cmd| {
         return cmd;
     }
-    return self.wildcard_command;
+    // If no exact match, look for wildcard "*"
+    return self.mappings.findCommand("*");
 }
 
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
@@ -337,21 +298,21 @@ test "MultiArrayList hotkey implementation" {
     try std.testing.expect(chrome_cmd != null);
     try std.testing.expectEqualStrings("echo chrome", chrome_cmd.?.command);
 
-    // Test wildcard
-    try hotkey.set_wildcard_command("echo default");
+    // Test wildcard using unified API
+    try hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo default" });
     const unknown_cmd = hotkey.find_command_for_process("unknown");
     try std.testing.expect(unknown_cmd != null);
     try std.testing.expectEqualStrings("echo default", unknown_cmd.?.command);
 
     // Test command type counting
     const stats = hotkey.mappings.countCommandTypes();
-    try std.testing.expectEqual(@as(usize, 2), stats.commands);
+    try std.testing.expectEqual(@as(usize, 3), stats.commands); // firefox, chrome, and wildcard
     try std.testing.expectEqual(@as(usize, 1), stats.forwarded);
     try std.testing.expectEqual(@as(usize, 0), stats.unbound);
 
     // Test field access
     const names = hotkey.getProcessNames();
-    try std.testing.expectEqual(@as(usize, 3), names.len);
+    try std.testing.expectEqual(@as(usize, 4), names.len); // firefox, chrome, terminal, *
 }
 
 test "MultiArrayList performance characteristics" {

@@ -238,12 +238,7 @@ fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return @ptrFromInt(0);
     }
 
-    // Only log in interactive mode to avoid allocation in hot path
-    if (self.logger.mode == .interactive) {
-        const key_str = try Keycodes.formatKeyPress(self.allocator, eventkey.flags, eventkey.key);
-        defer self.allocator.free(key_str);
-        self.logger.logDebug("No matching hotkey found for key: {s}", .{key_str}) catch {};
-    }
+    try self.logKeyPress("No matching hotkey found for key: {s}, process name: {s}", eventkey, process_name);
     return event;
 }
 
@@ -559,11 +554,7 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
             if (proc_index < hotkey.commands.items.len) {
                 switch (hotkey.commands.items[proc_index]) {
                     .forwarded => |target_key| {
-                        if (self.logger.mode == .interactive) {
-                            const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
-                            defer self.allocator.free(key_str);
-                            self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
-                        }
+                        try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
                         try forwardKey(target_key, event);
                         // Return true to indicate forwarding happened (original event will be consumed)
                         return true;
@@ -582,11 +573,7 @@ fn findAndForwardHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         if (hotkey.wildcard_command) |wildcard| {
             switch (wildcard) {
                 .forwarded => |target_key| {
-                    if (self.logger.mode == .interactive) {
-                        const key_str = try Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key);
-                        defer self.allocator.free(key_str);
-                        self.logger.logDebug("Forwarding key '{s}' (wildcard), current process {s}", .{ key_str, process_name }) catch {};
-                    }
+                    try self.logKeyPress("Forwarding key '{s}' (wildcard), current process {s}", target_key, process_name);
                     _ = try forwardKey(target_key, event);
                     return true;
                 },
@@ -605,10 +592,8 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
     // Find matching hotkey using our lookup abstraction
     const found_hotkey = findHotkeyInMode(mode, eventkey.*);
 
-    if (self.logger.mode == .interactive and found_hotkey == null) {
-        const key_str = try Keycodes.formatKeyPress(self.allocator, eventkey.flags, eventkey.key);
-        defer self.allocator.free(key_str);
-        self.logger.logDebug("No matching hotkey found for key (exec): {s}", .{key_str}) catch {};
+    if (found_hotkey == null) {
+        try self.logKeyPress("No matching hotkey found for key (exec): {s}{s}", eventkey.*, "");
     }
 
     if (found_hotkey) |hotkey| {
@@ -678,11 +663,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                         return false; // Unbound key
                     },
                     .forwarded => |target_key| {
-                        if (self.logger.mode == .interactive) {
-                            const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
-                            defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
-                            self.logger.logDebug("Forwarding key '{s}' for process '{s}'", .{ key_str, process_name }) catch {};
-                        }
+                        try self.logKeyPress("Forwarding key '{s}' for process '{s}'", target_key, process_name);
                         // Note: We should only reach here if findAndForwardHotkey didn't handle it
                         // This shouldn't happen with current logic, but handling for completeness
                         return false;
@@ -698,11 +679,7 @@ fn findAndExecHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress) !bool {
                     .command => |cmd| command_to_exec = cmd,
                     .unbound => return false,
                     .forwarded => |target_key| {
-                        if (self.logger.mode == .interactive) {
-                            const key_str = Keycodes.formatKeyPress(self.allocator, target_key.flags, target_key.key) catch "unknown";
-                            defer if (!std.mem.eql(u8, key_str, "unknown")) self.allocator.free(key_str);
-                            self.logger.logDebug("Forwarding key '{s}' (wildcard)", .{key_str}) catch {};
-                        }
+                        try self.logKeyPress("Forwarding key '{s}' (wildcard){s}", target_key, "");
                         // Note: We should only reach here if findAndForwardHotkey didn't handle it
                         return false;
                     },
@@ -950,6 +927,17 @@ fn hotloadCallback(path: []const u8) void {
         std.debug.print("ERROR: global_skhd is null in hotloadCallback\n", .{});
     }
 }
+
+/// Log a keypress with formatted key string
+fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPress, process_name: []const u8) !void {
+    // Only log in interactive mode to avoid allocation in hot path
+    if (self.logger.mode != .interactive) return;
+
+    const key_str = try Keycodes.formatKeyPress(self.allocator, key.flags, key.key);
+    defer self.allocator.free(key_str);
+    self.logger.logDebug(fmt, .{ key_str, process_name }) catch {};
+}
+
 /// Read child process output synchronously
 fn readChildOutputSync(self: *Skhd, child: *std.process.Child) !void {
     var stdout_data = std.ArrayListUnmanaged(u8){};

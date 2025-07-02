@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5] - 2025-01-02
+
+### Changed
+- Improved service mode execution to always use fork/exec for better reliability
+- Refactored hotkey storage to use MultiArrayList for better memory layout and performance
+- Updated README to explicitly mention key remapping/forwarding feature
+
+### Added
+- MIT License file
+- Integrated Homebrew tap update directly into release workflow
+
+### Fixed
+- Import statement cleanup for better code organization
+- GitHub Actions workflow now directly triggers Homebrew tap updates
+
 ## [0.0.4] - 2025-01-02
 
 ### Added
@@ -99,5 +114,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/yourusername/skhd.zig/compare/v0.0.1...HEAD
-[0.0.1]: https://github.com/yourusername/skhd.zig/releases/tag/v0.0.1
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/jackielii/skhd.zig/compare/v0.0.4...v0.0.5
+[0.0.4]: https://github.com/jackielii/skhd.zig/compare/v0.0.3...v0.0.4
+[0.0.3]: https://github.com/jackielii/skhd.zig/compare/v0.0.2...v0.0.3
+[0.0.2]: https://github.com/jackielii/skhd.zig/compare/v0.0.1...v0.0.2
+[0.0.1]: https://github.com/jackielii/skhd.zig/releases/tag/v0.0.1

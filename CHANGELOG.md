@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4] - 2025-01-02
+
+### Added
+- Comprehensive execution tracer with `-P/--profile` flag for performance analysis
+- Benchmark suite using zBench for hot path optimization
+- Carbon event handler for efficient app switching notifications
+
+### Changed
+- **Major performance optimization**: Cache process name lookups (25μs → 21ns)
+- **Eliminated double hotkey lookup**: Combined into single `processHotkey` function (169ns → 83ns)
+- CPU usage reduced from ~1.2% to ~0.5% (matching original skhd)
+
+### Fixed
+- High CPU usage compared to original skhd implementation
+- Unnecessary system calls in hot path
+
 ## [0.0.3] - 2025-01-01
 
 ### Added

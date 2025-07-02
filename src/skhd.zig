@@ -683,7 +683,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 }
 
 /// Fork and exec a command, detaching it from the parent process
-inline fn forkAndExec(shell: []const u8, command: []const u8) !void {
+inline fn forkAndExec(shell: []const u8, command: []const u8, verbose: bool) !void {
     const cpid = c.fork();
     if (cpid == -1) {
         return error.ForkFailed;
@@ -693,6 +693,16 @@ inline fn forkAndExec(shell: []const u8, command: []const u8) !void {
         // Child process
         // Create new session
         _ = c.setsid();
+
+        if (!verbose) {
+            // Redirect stdout and stderr to /dev/null
+            const devnull = c.open("/dev/null", c.O_WRONLY);
+            if (devnull != -1) {
+                _ = c.dup2(devnull, 1); // stdout
+                _ = c.dup2(devnull, 2); // stderr
+                _ = c.close(devnull);
+            }
+        }
 
         // Prepare arguments for execvp
         // We need null-terminated strings
@@ -714,26 +724,8 @@ inline fn forkAndExec(shell: []const u8, command: []const u8) !void {
 }
 
 inline fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
-    // Log the command execution
     try self.logger.logInfo("Executing command: {s}", .{command});
-
-    // In interactive mode, capture and display output
-    if (self.logger.mode == .interactive) {
-        const argv = [_][]const u8{ shell, "-c", command };
-
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
-
-        // Read output synchronously to avoid race conditions
-        self.readChildOutputSync(&child) catch {};
-    } else {
-        // In service mode, use fork and exec to detach the process
-        try forkAndExec(shell, command);
-    }
+    try forkAndExec(shell, command, self.logger.mode == .interactive);
 }
 
 /// Find a process name in the hotkey's process list

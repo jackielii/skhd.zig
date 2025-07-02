@@ -6,6 +6,7 @@ pub usingnamespace @cImport({
     @cInclude("objc/runtime.h");
     @cInclude("unistd.h");
     @cInclude("sys/types.h");
+    @cInclude("fcntl.h");
     @cInclude("IOKit/hidsystem/ev_keymap.h");
 });
 

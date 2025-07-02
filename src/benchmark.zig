@@ -2,13 +2,17 @@ const std = @import("std");
 const zbench = @import("zbench");
 const Skhd = @import("skhd.zig");
 const Hotkey = @import("Hotkey.zig");
+const HotkeySOA = @import("HotkeySOA.zig");
 const c = @import("c.zig");
+const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
 // Global context for benchmarks
 var g_skhd: ?*Skhd = null;
 var g_esc_key: Hotkey.KeyPress = undefined;
+var g_hotkey_original: ?*Hotkey = null;
+var g_hotkey_soa: ?*HotkeySOA = null;
 
 // Linear search benchmark
 fn benchLinearSearch(allocator: std.mem.Allocator) void {
@@ -45,10 +49,10 @@ fn benchDoubleLookup(allocator: std.mem.Allocator) void {
     _ = allocator;
     const skhd = g_skhd orelse return;
     const mode = skhd.current_mode orelse return;
-    
+
     // First lookup (forward)
     _ = skhd.findHotkeyInMode(mode, g_esc_key);
-    
+
     // Second lookup (exec)
     _ = skhd.findHotkeyInMode(mode, g_esc_key);
 }
@@ -58,7 +62,7 @@ fn benchSingleLookup(allocator: std.mem.Allocator) void {
     _ = allocator;
     const skhd = g_skhd orelse return;
     const mode = skhd.current_mode orelse return;
-    
+
     // Single lookup
     _ = skhd.findHotkeyInMode(mode, g_esc_key);
 }
@@ -66,14 +70,14 @@ fn benchSingleLookup(allocator: std.mem.Allocator) void {
 // Copy the getCurrentProcessNameBuf function for benchmarking
 fn getCurrentProcessNameBuf(buffer: []u8) ![]const u8 {
     var psn: c.ProcessSerialNumber = undefined;
-    
+
     const status = c.GetFrontProcess(&psn);
     if (status != c.noErr) {
         const unknown = "unknown";
         @memcpy(buffer[0..unknown.len], unknown);
         return buffer[0..unknown.len];
     }
-    
+
     var process_name_ref: c.CFStringRef = undefined;
     const copy_status = c.CopyProcessName(&psn, &process_name_ref);
     if (copy_status != c.noErr) {
@@ -82,21 +86,21 @@ fn getCurrentProcessNameBuf(buffer: []u8) ![]const u8 {
         return buffer[0..unknown.len];
     }
     defer c.CFRelease(process_name_ref);
-    
+
     const success = c.CFStringGetCString(process_name_ref, buffer.ptr, @intCast(buffer.len), c.kCFStringEncodingUTF8);
     if (success == 0) {
         const unknown = "unknown";
         @memcpy(buffer[0..unknown.len], unknown);
         return buffer[0..unknown.len];
     }
-    
+
     const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
     const process_name = buffer[0..c_string_len];
-    
+
     for (process_name) |*char| {
         char.* = std.ascii.toLower(char.*);
     }
-    
+
     // Clean invisible Unicode characters that some apps (like WhatsApp) have
     return cleanInvisibleChars(process_name);
 }
@@ -136,26 +140,76 @@ fn cleanInvisibleChars(name: []const u8) []const u8 {
     return result;
 }
 
+// Process mapping benchmarks - Original implementation
+fn benchProcessMappingOriginal(allocator: std.mem.Allocator) void {
+    _ = allocator;
+    const hotkey = g_hotkey_original orelse return;
+    
+    // Simulate process lookups
+    const test_processes = [_][]const u8{
+        "firefox", "CHROME", "Visual Studio Code", "Unknown App"
+    };
+    
+    for (test_processes) |proc_name| {
+        // Simulate the actual lookup logic from the real implementation
+        var found = false;
+        for (hotkey.process_names.items, 0..) |name, idx| {
+            var name_buf: [256]u8 = undefined;
+            if (proc_name.len <= name_buf.len) {
+                for (proc_name, 0..) |ch, j| {
+                    name_buf[j] = std.ascii.toLower(ch);
+                }
+                const lower_test = name_buf[0..proc_name.len];
+                
+                if (std.mem.eql(u8, name, lower_test)) {
+                    found = true;
+                    _ = hotkey.commands.items[idx];
+                    break;
+                }
+            }
+        }
+        
+        if (!found) {
+            _ = hotkey.wildcard_command;
+        }
+    }
+}
+
+// Process mapping benchmarks - SOA implementation
+fn benchProcessMappingSOA(allocator: std.mem.Allocator) void {
+    _ = allocator;
+    const hotkey = g_hotkey_soa orelse return;
+    
+    // Simulate process lookups
+    const test_processes = [_][]const u8{
+        "firefox", "CHROME", "Visual Studio Code", "Unknown App"
+    };
+    
+    for (test_processes) |proc_name| {
+        _ = hotkey.find_command_for_process(proc_name);
+    }
+}
+
 pub fn main() !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
-    
+
     std.debug.print("\n=== Benchmarking skhd hot path ===\n\n", .{});
-    
+
     // Load the actual user config
     const config_path = "/Users/jackieli/.config/skhd/skhdrc";
-    
+
     // Initialize skhd with profiling disabled
     var skhd = try Skhd.init(allocator, config_path, .service, false);
     defer skhd.deinit();
-    
+
     // Set global context
     g_skhd = &skhd;
     g_esc_key = Hotkey.KeyPress{
         .key = 0x35, // ESC keycode
         .flags = .{},
     };
-    
+
     // Print configuration info
     var hotkey_count: usize = 0;
     if (skhd.current_mode) |mode| {
@@ -163,10 +217,50 @@ pub fn main() !void {
     }
     std.debug.print("Current mode has {} hotkeys\n\n", .{hotkey_count});
     
+    // Initialize hotkeys for process mapping benchmarks
+    {
+        // Original implementation
+        var hotkey_original = try Hotkey.create(allocator);
+        g_hotkey_original = hotkey_original;
+        
+        // SOA implementation
+        var hotkey_soa = try HotkeySOA.create(allocator);
+        g_hotkey_soa = hotkey_soa;
+        
+        // Add common process mappings to both
+        const common_processes = [_][]const u8{
+            "Firefox", "Google Chrome", "Safari", "Terminal", "iTerm2",
+            "Visual Studio Code", "Sublime Text", "Slack", "Discord", "Spotify",
+            "Mail", "Calendar", "Notes", "Preview", "Finder",
+            "System Preferences", "Activity Monitor", "Console", "Xcode", "IntelliJ IDEA",
+        };
+        
+        for (common_processes) |process| {
+            // Original
+            try hotkey_original.add_process_name(process);
+            const cmd = try std.fmt.allocPrint(allocator, "echo '{s}'", .{process});
+            defer allocator.free(cmd);
+            try hotkey_original.add_proc_command(cmd);
+            
+            // SOA
+            try hotkey_soa.add_process_mapping(process, HotkeySOA.ProcessCommand{ 
+                .command = cmd 
+            });
+        }
+        
+        // Set wildcard commands
+        try hotkey_original.set_wildcard_command("echo 'default'");
+        try hotkey_soa.set_wildcard_command("echo 'default'");
+        
+        std.debug.print("Initialized hotkeys with {} process mappings\n\n", .{common_processes.len});
+    }
+    defer if (g_hotkey_original) |h| h.destroy();
+    defer if (g_hotkey_soa) |h| h.destroy();
+
     // Create benchmark suite
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
-    
+
     // Add benchmarks
     try bench.add("Linear Search (ESC key)", benchLinearSearch, .{});
     try bench.add("HashMap Lookup (ESC key)", benchHashMapLookup, .{});
@@ -175,6 +269,10 @@ pub fn main() !void {
     try bench.add("Process Name Lookup (syscall)", benchProcessNameLookup, .{});
     try bench.add("Process Name Lookup (cached)", benchCachedProcessName, .{});
     
+    // Add process mapping benchmarks
+    try bench.add("Process Mapping (Original)", benchProcessMappingOriginal, .{});
+    try bench.add("Process Mapping (SOA)", benchProcessMappingSOA, .{});
+
     // Run benchmarks
     try bench.run(std.io.getStdOut().writer());
 }

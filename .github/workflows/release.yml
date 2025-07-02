@@ -45,3 +45,57 @@ jobs:
         asset_name: skhd-${{ matrix.arch }}-macos.tar.gz
         asset_content_type: application/gzip
 
+  update-homebrew:
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout homebrew-tap
+      uses: actions/checkout@v4
+      with:
+        repository: jackielii/homebrew-tap
+        token: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+        path: homebrew-tap
+
+    - name: Get release info
+      id: release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION="${{ github.event.release.tag_name }}"
+        echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+        
+        # Download release assets to calculate SHA256
+        cd ${{ github.workspace }}
+        gh release download ${VERSION} --repo jackielii/skhd.zig --pattern "*.tar.gz"
+        
+        # Calculate SHA256 for both architectures
+        ARM64_SHA=$(shasum -a 256 skhd-arm64-macos.tar.gz | awk '{print $1}')
+        X86_64_SHA=$(shasum -a 256 skhd-x86_64-macos.tar.gz | awk '{print $1}')
+        
+        echo "arm64_sha=${ARM64_SHA}" >> $GITHUB_OUTPUT
+        echo "x86_64_sha=${X86_64_SHA}" >> $GITHUB_OUTPUT
+
+    - name: Update Formula
+      run: |
+        cd homebrew-tap
+        
+        # Update version
+        sed -i "s/version \".*\"/version \"${{ steps.release.outputs.version }}\"/" Formula/skhd-zig.rb
+        
+        # Update URLs
+        sed -i "s|download/v[0-9.]\+/skhd-x86_64|download/v${{ steps.release.outputs.version }}/skhd-x86_64|" Formula/skhd-zig.rb
+        sed -i "s|download/v[0-9.]\+/skhd-arm64|download/v${{ steps.release.outputs.version }}/skhd-arm64|" Formula/skhd-zig.rb
+        
+        # Update SHA256
+        sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${{ steps.release.outputs.x86_64_sha }}\"/" Formula/skhd-zig.rb
+        sed -i "/arm64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${{ steps.release.outputs.arm64_sha }}\"/" Formula/skhd-zig.rb
+
+    - name: Commit and push
+      run: |
+        cd homebrew-tap
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add Formula/skhd-zig.rb
+        git commit -m "Update skhd-zig to v${{ steps.release.outputs.version }}"
+        git push
+

@@ -207,7 +207,6 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
 
 pub fn add_process_name(self: *Hotkey, process_name: []const u8) !void {
     const owned = try self.allocator.dupe(u8, process_name);
-    // TODO: assuming ascii, need to handle utf8
     for (owned, 0..) |c, i| owned[i] = std.ascii.toLower(c);
     try self.process_names.append(self.allocator, owned);
 }

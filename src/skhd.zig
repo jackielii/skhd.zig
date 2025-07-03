@@ -257,6 +257,15 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return @ptrFromInt(0);
     }
 
+    // Check if current mode has capture enabled
+    if (self.current_mode) |mode| {
+        if (mode.capture) {
+            // Mode has capture enabled, consume all keypresses
+            try self.logKeyPress("Capture mode consuming unmatched key: {s}, process name: {s}", eventkey, .{process_name});
+            return @ptrFromInt(0);
+        }
+    }
+
     try self.logKeyPress("No matching hotkey found for key: {s}, process name: {s}", eventkey, .{process_name});
     return event;
 }
@@ -287,6 +296,14 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     if (interceptSystemKey(event, &eventkey)) {
         if (try self.processHotkey(&eventkey, event, process_name)) {
             return @ptrFromInt(0);
+        }
+        
+        // Check if current mode has capture enabled
+        if (self.current_mode) |mode| {
+            if (mode.capture) {
+                // Mode has capture enabled, consume all system keypresses
+                return @ptrFromInt(0);
+            }
         }
     }
 

@@ -944,3 +944,83 @@ test "multiple process groups and reuse" {
     // Should have 3 hotkeys
     try testing.expectEqual(@as(usize, 3), mappings.hotkey_map.count());
 }
+
+test "Mode capture behavior" {
+    const allocator = testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test mode declaration with capture
+    const capture_config =
+        \\:: resize @ : echo "Entering resize mode"
+        \\resize < h : yabai -m window --resize left:-20:0
+        \\resize < l : yabai -m window --resize right:20:0 
+        \\resize < escape ; default
+    ;
+
+    try parser.parse(&mappings, capture_config);
+
+    // Check that resize mode was created with capture enabled
+    const resize_mode = mappings.mode_map.get("resize").?;
+    try testing.expect(resize_mode.capture);
+    try testing.expectEqualStrings("echo \"Entering resize mode\"", resize_mode.command.?);
+
+    // Test mode declaration without capture
+    const no_capture_config =
+        \\:: normal : echo "Normal mode"
+        \\normal < a : echo "action a"
+    ;
+
+    var parser2 = try Parser.init(allocator);
+    defer parser2.deinit();
+
+    var mappings2 = try Mappings.init(allocator);
+    defer mappings2.deinit();
+
+    try parser2.parse(&mappings2, no_capture_config);
+
+    // Check that normal mode was created without capture
+    const normal_mode = mappings2.mode_map.get("normal").?;
+    try testing.expect(!normal_mode.capture);
+    try testing.expectEqualStrings("echo \"Normal mode\"", normal_mode.command.?);
+}
+
+test "hotkeyFlagsMatch behavior" {
+    // Test general modifier matching: config has general (alt), keyboard can have general, left, or right
+    {
+        const config = ModifierFlag{ .alt = true };
+        const kb_general = ModifierFlag{ .alt = true };
+        const kb_left = ModifierFlag{ .lalt = true };
+        const kb_right = ModifierFlag{ .ralt = true };
+        
+        try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_general));
+        try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_left));
+        try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_right));
+    }
+    
+    // Test specific modifier matching: config has specific (lalt), keyboard must match exactly
+    {
+        const config = ModifierFlag{ .lalt = true };
+        const kb_general = ModifierFlag{ .alt = true };
+        const kb_left = ModifierFlag{ .lalt = true };
+        const kb_right = ModifierFlag{ .ralt = true };
+        
+        try testing.expect(!Skhd.hotkeyFlagsMatch(config, kb_general));
+        try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_left));
+        try testing.expect(!Skhd.hotkeyFlagsMatch(config, kb_right));
+    }
+    
+    // Test multiple modifiers
+    {
+        const config = ModifierFlag{ .cmd = true, .shift = true };
+        const kb_match = ModifierFlag{ .lcmd = true, .shift = true };
+        const kb_no_match = ModifierFlag{ .lcmd = true }; // Missing shift
+        
+        try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_match));
+        try testing.expect(!Skhd.hotkeyFlagsMatch(config, kb_no_match));
+    }
+}

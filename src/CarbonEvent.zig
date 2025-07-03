@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("c.zig");
 
 const CarbonEvent = @This();
+const log = std.log.scoped(.@"carbon_event");
 
 allocator: std.mem.Allocator,
 handler_ref: c.EventHandlerRef,
@@ -138,4 +139,3 @@ fn carbonEventHandler(
 
     return c.noErr;
 }
-

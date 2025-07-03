@@ -17,6 +17,7 @@ const Hotkey = @This();
 const Mode = @import("Mode.zig");
 const utils = @import("utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
+const log = std.log.scoped(.@"hotkey");
 
 pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
     pub fn hash(self: @This(), key: *Hotkey) u32 {
@@ -246,10 +247,10 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
         }
         return;
     }
-    
+
     // Add process name
     try self.add_process_name(process_name);
-    
+
     // Add corresponding command
     switch (command) {
         .command => |cmd| try self.add_proc_command(cmd),
@@ -325,7 +326,7 @@ test "add_process_mapping" {
     try hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo wildcard" });
     try std.testing.expect(hotkey.wildcard_command != null);
     try std.testing.expectEqualStrings("echo wildcard", hotkey.wildcard_command.?.command);
-    
+
     // Process names should still be 1 (wildcard doesn't add to process_names)
     try std.testing.expectEqual(@as(usize, 1), hotkey.process_names.items.len);
 }

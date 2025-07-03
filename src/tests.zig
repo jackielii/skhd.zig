@@ -7,10 +7,10 @@ const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
-const Logger = @import("Logger.zig");
 const Skhd = @import("skhd.zig");
 const ParseError = @import("ParseError.zig").ParseError;
 const print = std.debug.print;
+const log = std.log.scoped(.tests);
 
 test "ModifierFlag basic operations" {
     // Test basic flag creation
@@ -352,38 +352,6 @@ test "Config file resolution" {
     }
 }
 
-test "Logger file paths" {
-    const allocator = testing.allocator;
-
-    // Create logger in service mode
-    var logger = try Logger.init(allocator, .service);
-    defer logger.deinit();
-
-    // Test basic logging operations
-    try logger.logInfo("Test info message", .{});
-    try logger.logError("Test error message", .{});
-    try logger.logDebug("Test debug message", .{});
-
-    // In service mode, only errors should be logged
-    // Info and debug calls should not fail but won't log
-}
-
-test "Logger with interactive mode" {
-    const allocator = testing.allocator;
-
-    // Create logger in interactive mode
-    var logger = try Logger.init(allocator, .interactive);
-    defer logger.deinit();
-
-    // Test various log operations
-    try logger.logInfo("Verbose info: {s}", .{"test"});
-    try logger.logError("Verbose error: {d}", .{42});
-    try logger.logDebug("Verbose debug: {any}", .{true});
-
-    // Test command logging
-    try logger.logCommand("echo 'hello'", "hello\nworld\n", "");
-    try logger.logCommand("false", "", "command failed\n");
-}
 test "Config reload memory leak test" {
     const allocator = testing.allocator;
 
@@ -411,7 +379,7 @@ test "Config reload memory leak test" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd with initial config
-    var skhd = try Skhd.init(allocator, config_path, .service, false);
+    var skhd = try Skhd.init(allocator, config_path, false, false);
     defer skhd.deinit();
 
     // Verify initial state
@@ -510,7 +478,7 @@ test "Config reload preserves current mode" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd
-    var skhd = try Skhd.init(allocator, config_path, .service, false);
+    var skhd = try Skhd.init(allocator, config_path, false, false);
     defer skhd.deinit();
 
     // Switch to special mode
@@ -674,7 +642,7 @@ test "Hot reload enable/disable" {
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
     // Initialize skhd
-    var skhd = try Skhd.init(allocator, config_path, .service, false);
+    var skhd = try Skhd.init(allocator, config_path, false, false);
     defer skhd.deinit();
 
     // Test enabling hot reload
@@ -716,7 +684,7 @@ test "modifier matching - general modifiers match specific ones" {
     }
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
-    var skhd = try Skhd.init(allocator, config_path, .service, false);
+    var skhd = try Skhd.init(allocator, config_path, false, false);
     defer skhd.deinit();
 
     // Get default mode
@@ -779,7 +747,7 @@ test "keyboard lalt should match config alt" {
     }
     defer std.fs.deleteFileAbsolute(config_path) catch {};
 
-    var skhd = try Skhd.init(allocator, config_path, .service, false);
+    var skhd = try Skhd.init(allocator, config_path, false, false);
     defer skhd.deinit();
 
     // Get default mode

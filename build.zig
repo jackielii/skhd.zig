@@ -110,7 +110,6 @@ pub fn build(b: *std.Build) void {
         "src/Keycodes.zig",
         "src/EventTap.zig",
         "src/synthesize.zig",
-        "src/Logger.zig",
         "src/Hotload.zig",
     };
 

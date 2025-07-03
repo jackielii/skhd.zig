@@ -1,17 +1,17 @@
 const std = @import("std");
 const Skhd = @import("skhd.zig");
-const Logger = @import("Logger.zig");
 const synthesize = @import("synthesize.zig");
 const service = @import("service.zig");
 
 const version = std.mem.trimRight(u8, @embedFile("VERSION"), "\n\r\t ");
+const log = std.log.scoped(.@"main");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
         const deinit_status = gpa.deinit();
         if (deinit_status == .leak) {
-            std.log.err("memory leak", .{});
+            log.err("memory leak", .{});
         }
     }
     const allocator = gpa.allocator();
@@ -123,19 +123,18 @@ pub fn main() !void {
     defer service.removePidFile(allocator);
 
     // Initialize and run skhd
-    const mode: Logger.Mode = if (verbose) .interactive else .service;
-    var skhd = try Skhd.init(allocator, resolved_config_file, mode, profile);
+    var skhd = try Skhd.init(allocator, resolved_config_file, verbose, profile);
     defer skhd.deinit();
 
     if (verbose) {
-        try skhd.logger.logInfo("Using config file: {s}", .{resolved_config_file});
+        log.info("Using config file: {s}", .{resolved_config_file});
         if (no_hotload) {
-            try skhd.logger.logInfo("Hot reload disabled", .{});
+            log.info("Hot reload disabled", .{});
         } else {
-            try skhd.logger.logInfo("Hot reload enabled", .{});
+            log.info("Hot reload enabled", .{});
         }
         if (profile) {
-            try skhd.logger.logInfo("Profiling enabled", .{});
+            log.info("Profiling enabled", .{});
         }
     }
 

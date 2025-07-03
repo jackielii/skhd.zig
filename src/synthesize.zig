@@ -5,6 +5,7 @@ const Mappings = @import("Mappings.zig");
 const Hotkey = @import("HotkeyMultiArrayList.zig");
 const Keycodes = @import("Keycodes.zig");
 const ModifierFlag = Keycodes.ModifierFlag;
+const log = std.log.scoped(.@"synthesize");
 
 // Modifier keycodes from original skhd
 const Modifier_Keycode_Alt = 0x3A;

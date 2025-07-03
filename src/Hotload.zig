@@ -7,6 +7,7 @@ const c = @import("c.zig");
 /// requires a stable pointer for its callbacks. Use create() to
 /// allocate and destroy() to clean up.
 const Hotload = @This();
+const log = std.log.scoped(.@"hotload");
 
 // Public callback type - simplified to just take the file path
 pub const Callback = *const fn (path: []const u8) void;

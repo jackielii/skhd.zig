@@ -7,7 +7,8 @@ const Hotkey = @import("HotkeyMultiArrayList.zig");
 const Mode = @import("Mode.zig");
 const Keycodes = @import("Keycodes.zig");
 const ModifierFlag = Keycodes.ModifierFlag;
-const Logger = @import("Logger.zig");
+// Use scoped logging for skhd module
+const log = std.log.scoped(.skhd);
 const Hotload = @import("Hotload.zig");
 const Tracer = @import("Tracer.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
@@ -23,18 +24,14 @@ mappings: Mappings,
 current_mode: ?*Mode = null,
 event_tap: EventTap,
 config_file: []const u8,
-logger: Logger,
+verbose: bool,
 hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
 
-pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.Mode, profile: bool) !Skhd {
-    // Initialize logger first
-    var logger = try Logger.init(allocator, mode);
-    errdefer logger.deinit();
-
-    try logger.logInfo("Initializing skhd with config: {s}", .{config_file});
+pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
+    log.info("Initializing skhd with config: {s}", .{config_file});
 
     var mappings = try Mappings.init(allocator);
     errdefer mappings.deinit();
@@ -50,7 +47,7 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
         if (err == error.ParseErrorOccurred) {
             // Log the parse error with proper formatting
             if (parser.getError()) |parse_err| {
-                logger.logError("skhd: {}", .{parse_err}) catch {};
+                log.err("skhd: {}", .{parse_err});
             }
             return err;
         }
@@ -73,10 +70,10 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
     while (mode_iter.next()) |entry| {
         try modes_list.writer().print("'{s}' ", .{entry.key_ptr.*});
     }
-    try logger.logInfo("Loaded modes: {s}", .{modes_list.items});
+    log.info("Loaded modes: {s}", .{modes_list.items});
 
     // Log shell configuration
-    try logger.logInfo("Using shell: {s}", .{mappings.shell});
+    log.info("Using shell: {s}", .{mappings.shell});
 
     // Log blacklisted applications
     if (mappings.blacklist.count() > 0) {
@@ -86,14 +83,14 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
         while (blacklist_iter.next()) |app| {
             try blacklist_buf.writer().print("{s} ", .{app.*});
         }
-        try logger.logInfo("Blacklisted applications: {s}", .{blacklist_buf.items});
+        log.info("Blacklisted applications: {s}", .{blacklist_buf.items});
     }
 
     // Initialize Carbon event handler for app switching
     var carbon_event = try CarbonEvent.init(allocator);
     errdefer carbon_event.deinit();
 
-    try logger.logInfo("Initial process: {s}", .{carbon_event.process_name});
+    log.info("Initial process: {s}", .{carbon_event.process_name});
 
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
@@ -104,7 +101,7 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, mode: Logger.
         .current_mode = current_mode,
         .event_tap = EventTap{ .mask = mask },
         .config_file = try allocator.dupe(u8, config_file),
-        .logger = logger,
+        .verbose = verbose,
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
     };
@@ -124,7 +121,7 @@ pub fn deinit(self: *Skhd) void {
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
-    self.logger.deinit();
+    // No logger cleanup needed
 }
 
 pub fn run(self: *Skhd, enable_hotload: bool) !void {
@@ -149,12 +146,12 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
 
     // Check if config file is a regular file
     const stat = std.fs.cwd().statFile(self.config_file) catch |err| {
-        try self.logger.logError("Cannot stat config file {s}: {}", .{ self.config_file, err });
+        log.err("Cannot stat config file {s}: {}", .{ self.config_file, err });
         return err;
     };
 
     if (stat.kind != .file) {
-        try self.logger.logError("Config file {s} is not a regular file", .{self.config_file});
+        log.err("Config file {s} is not a regular file", .{self.config_file});
         return error.InvalidConfigFile;
     }
 
@@ -164,14 +161,14 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     }
 
     // Set up event tap (but don't start run loop yet)
-    try self.logger.logInfo("Starting event tap", .{});
+    log.info("Starting event tap", .{});
     self.event_tap.begin(keyHandler, self) catch |err| {
         if (err == error.AccessibilityPermissionDenied) {
             const allocated_path: ?[]u8 = std.fs.selfExePathAlloc(self.allocator) catch null;
             defer if (allocated_path) |path| self.allocator.free(path);
             const exe_path = allocated_path orelse "/opt/homebrew/bin/skhd";
 
-            try self.logger.logError("\n" ++
+            log.err("\n" ++
                 "=====================================================\n" ++
                 "ACCESSIBILITY PERMISSIONS REQUIRED\n" ++
                 "=====================================================\n" ++
@@ -200,13 +197,13 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     c.NSApplicationLoad();
 
     // Always log successful event tap creation
-    try self.logger.logAlways("Event tap created successfully. skhd is now running.", .{});
+    log.info("Event tap created successfully. skhd is now running.", .{});
 
     // Now start the run loop - this will handle both event tap and FSEvents
     c.CFRunLoopRun();
 
     // If we get here, the run loop has exited
-    try self.logger.logInfo("Run loop exited", .{});
+    log.info("Run loop exited", .{});
 }
 
 fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, user_info: ?*anyopaque) callconv(.c) c.CGEventRef {
@@ -217,21 +214,21 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
 
     switch (typ) {
         c.kCGEventTapDisabledByTimeout, c.kCGEventTapDisabledByUserInput => {
-            self.logger.logInfo("Restarting event-tap", .{}) catch {};
+            log.info("Restarting event-tap", .{});
             c.CGEventTapEnable(self.event_tap.handle, true);
             return event;
         },
         c.kCGEventKeyDown => {
             self.tracer.traceKeyDown();
             return self.handleKeyDown(event) catch |err| {
-                self.logger.logError("Error handling key down: {}", .{err}) catch {};
+                log.err("Error handling key down: {}", .{err});
                 return event;
             };
         },
         c.NX_SYSDEFINED => {
             self.tracer.traceSystemKey();
             return self.handleSystemKey(event) catch |err| {
-                self.logger.logError("Error handling system key: {}", .{err}) catch {};
+                log.err("Error handling system key: {}", .{err});
                 return event;
             };
         },
@@ -606,18 +603,18 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 
     // Check for mode activation first
     if (hotkey.flags.activate) {
-        self.logger.logDebug("Mode activation hotkey triggered", .{}) catch {};
+        log.debug("Mode activation hotkey triggered", .{});
         // Get the mode name from the activation mapping (stored with ";" as process name)
         if (hotkey.find_command_for_process(";")) |cmd| {
             switch (cmd) {
                 .command => |mode_name| {
-                    self.logger.logDebug("Attempting to switch to mode '{s}'", .{mode_name}) catch {};
+                    log.debug("Attempting to switch to mode '{s}'", .{mode_name});
                     // Try to find the mode
                     const new_mode = self.mappings.mode_map.getPtr(mode_name);
 
                     if (new_mode) |target_mode| {
                         self.current_mode = target_mode;
-                        self.logger.logInfo("Switched to mode '{s}'", .{target_mode.name}) catch {};
+                        log.info("Switched to mode '{s}'", .{target_mode.name});
                         // Execute mode command if exists
                         if (target_mode.command) |mode_cmd| {
                             try self.executeCommand(self.mappings.shell, mode_cmd);
@@ -627,7 +624,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                         // Switching to default mode which should always exist
                         if (self.mappings.mode_map.getPtr("default")) |default_mode| {
                             self.current_mode = default_mode;
-                            self.logger.logInfo("Switched to default mode", .{}) catch {};
+                            log.info("Switched to default mode", .{});
                             return true;
                         }
                     }
@@ -637,11 +634,11 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                     return true;
                 },
                 else => {
-                    self.logger.logDebug("Activate flag set but no command found", .{}) catch {};
+                    log.debug("Activate flag set but no command found", .{});
                 },
             }
         } else {
-            self.logger.logDebug("Activate flag set but no activation mapping found", .{}) catch {};
+            log.debug("Activate flag set but no activation mapping found", .{});
         }
         return false;
     }
@@ -656,13 +653,13 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                 return true;
             },
             .command => |cmd| {
-                self.logger.logDebug("Executing command '{s}' for process {s}", .{ cmd, process_name }) catch {};
+                log.debug("Executing command '{s}' for process {s}", .{ cmd, process_name });
                 self.tracer.traceCommandExecuted();
                 try self.executeCommand(self.mappings.shell, cmd);
                 return !hotkey.flags.passthrough;
             },
             .unbound => {
-                self.logger.logDebug("Unbound key for process {s}", .{process_name}) catch {};
+                log.debug("Unbound key for process {s}", .{process_name});
                 return false;
             },
         }
@@ -713,15 +710,15 @@ inline fn forkAndExec(shell: []const u8, command: []const u8, verbose: bool) !vo
 }
 
 inline fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
-    try forkAndExec(shell, command, self.logger.mode == .interactive);
+    try forkAndExec(shell, command, self.verbose);
 }
 
 /// Signal handler for SIGUSR1 - reload configuration
 fn handleSigusr1(_: c_int) callconv(.C) void {
     if (global_skhd) |skhd| {
-        skhd.logger.logInfo("Received SIGUSR1, reloading configuration", .{}) catch {};
+        log.info("Received SIGUSR1, reloading configuration", .{});
         skhd.reloadConfig() catch |err| {
-            skhd.logger.logError("Failed to reload config: {}", .{err}) catch {};
+            log.err("Failed to reload config: {}", .{err});
         };
     }
 }
@@ -739,7 +736,7 @@ fn handleSigint(_: c_int) callconv(.C) void {
 
 /// Reload configuration from file
 pub fn reloadConfig(self: *Skhd) !void {
-    try self.logger.logInfo("Reloading configuration from: {s}", .{self.config_file});
+    log.info("Reloading configuration from: {s}", .{self.config_file});
 
     // Parse new configuration
     var new_mappings = try Mappings.init(self.allocator);
@@ -755,7 +752,7 @@ pub fn reloadConfig(self: *Skhd) !void {
         if (err == error.ParseErrorOccurred) {
             // Log the parse error with proper formatting
             if (parser.getError()) |parse_err| {
-                try self.logger.logError("skhd: {}", .{parse_err});
+                log.err("skhd: {}", .{parse_err});
             }
             return err;
         }
@@ -778,13 +775,13 @@ pub fn reloadConfig(self: *Skhd) !void {
     // might be called from within the hotload callback. Instead, we'll
     // update the watched files list when hot reload is already enabled.
 
-    try self.logger.logAlways("Configuration reloaded successfully", .{});
+    log.info("Configuration reloaded successfully", .{});
 }
 
 pub fn enableHotReload(self: *Skhd) !void {
     if (self.hotload_enabled) return;
 
-    try self.logger.logInfo("Enabling hot reload...", .{});
+    log.info("Enabling hot reload...", .{});
 
     // Store self reference for callback
     global_skhd = self;
@@ -796,14 +793,14 @@ pub fn enableHotReload(self: *Skhd) !void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs_path = try std.fs.cwd().realpath(self.config_file, &path_buf);
 
-    try self.logger.logInfo("Watching main config: {s} (resolved to: {s})", .{ self.config_file, abs_path });
+    log.info("Watching main config: {s} (resolved to: {s})", .{ self.config_file, abs_path });
     try hotloader.addFile(abs_path);
 
     // Also watch all loaded files
     for (self.mappings.loaded_files.items) |loaded_file| {
-        try self.logger.logInfo("Watching loaded file: {s}", .{loaded_file});
+        log.info("Watching loaded file: {s}", .{loaded_file});
         hotloader.addFile(loaded_file) catch |err| {
-            try self.logger.logInfo("Failed to watch loaded file {s}: {}", .{ loaded_file, err });
+            log.info("Failed to watch loaded file {s}: {}", .{ loaded_file, err });
         };
     }
 
@@ -813,7 +810,7 @@ pub fn enableHotReload(self: *Skhd) !void {
     self.hotloader = hotloader;
     self.hotload_enabled = true;
 
-    try self.logger.logInfo("Hot reload enabled successfully", .{});
+    log.info("Hot reload enabled successfully", .{});
 }
 
 pub fn disableHotReload(self: *Skhd) void {
@@ -826,15 +823,15 @@ pub fn disableHotReload(self: *Skhd) void {
     self.hotloader = null;
     self.hotload_enabled = false;
 
-    self.logger.logInfo("Hot reload disabled", .{}) catch {};
+    log.info("Hot reload disabled", .{});
 }
 
 fn hotloadCallback(path: []const u8) void {
     // Follow the original skhd approach - directly reload the config
     if (global_skhd) |skhd| {
-        skhd.logger.logInfo("Config file has been modified: {s} .. reloading config", .{path}) catch {};
+        log.info("Config file has been modified: {s} .. reloading config", .{path});
         skhd.reloadConfig() catch |err| {
-            skhd.logger.logError("Failed to reload config: {}", .{err}) catch {};
+            log.err("Failed to reload config: {}", .{err});
         };
     } else {
         std.debug.print("ERROR: global_skhd is null in hotloadCallback\n", .{});
@@ -844,9 +841,9 @@ fn hotloadCallback(path: []const u8) void {
 /// Log a keypress with formatted key string
 inline fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPress, rest: anytype) !void {
     // Only log in interactive mode to avoid allocation in hot path
-    if (self.logger.mode != .interactive) return;
+    if (!self.verbose) return;
 
     const key_str = try Keycodes.formatKeyPress(self.allocator, key.flags, key.key);
     defer self.allocator.free(key_str);
-    self.logger.logDebug(fmt, .{key_str} ++ rest) catch {};
+    log.debug(fmt, .{key_str} ++ rest);
 }

@@ -404,12 +404,34 @@ skhd --uninstall-service
 
 ## Testing and Debugging
 
+### Debug vs Release Builds
+
+**Important**: The logging behavior differs between debug and release builds:
+
+- **Release builds** (installed via Homebrew or built with `-Doptimize=ReleaseFast`): Only show errors and warnings, even with `-V`/`--verbose` flag
+- **Debug builds** (default `zig build`): Show all log levels including info and debug messages with `-V`/`--verbose` flag
+
+However, command output will be shown if verbose flag is specified in release builds.
+
+This is a trade-off between convenience and performance:
+
+- **Performance mode** (default): Command output is discarded for faster execution
+- **Verbose mode** (`-V`): Command output is preserved, which may add slight overhead but helps with debugging
+
+To debug hotkey events and see detailed logging:
+
+```bash
+# Verbose logging for troubleshooting config issues
+# Note: In release builds, verbose mode only shows errors and warnings.
+# To see debug/info logs, use a debug build:
+zig build run -- -V
+```
+
+### Testing Commands
+
 ```bash
 # Test key combinations and hex code (observe mode)
 skhd -o
-
-# Verbose logging for troubleshooting config issues
-skhd -V
 
 # Profile event handling (show after CTRL+C)
 skhd -P
@@ -451,9 +473,11 @@ Key improvements over the original skhd:
 4. **Create Tag**: Create an annotated tag: `git tag -a v0.0.X -m "Release v0.0.X"`
 5. **Push**: Push commits and tag: `git push origin main && git push origin v0.0.X`
 6. **Create Release**: Use GitHub CLI to create the release:
+
    ```bash
    gh release create v0.0.X --title "Release v0.0.X" --notes "See CHANGELOG.md for details"
    ```
+
    GitHub Actions will then automatically:
    - Build binaries for both architectures
    - Upload artifacts to the release

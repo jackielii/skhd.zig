@@ -262,13 +262,13 @@ cmd - p -> : echo "This runs but Cmd+P still goes to app"
 #### Configuration Directives
 
 ```bash
-# Use custom shell
-.shell "/bin/zsh"
+# Use custom shell (skips interactive shell overhead)
+.shell "/bin/dash"
 
-# Blacklist applications (hotkeys won't work in these apps)
+# Blacklist applications (skip hotkey processing)
 .blacklist [
-    "loginwindow"
-    "screensaver"
+    "dota2"
+    "Microsoft Remote Desktop"
     "VMware Fusion"
 ]
 
@@ -322,21 +322,10 @@ ctrl - left [
     *       | alt - left  # In other apps, word left
 ]
 
-ctrl - right [
-    "terminal" ~           # Let terminal handle it
-    "kitty" ~             # Let kitty handle it
-    *       | alt - right # In other apps, word right
-]
-
 # Home/End key fixes
 home [
     "terminal" ~          # Let terminal handle it
     *          | cmd - left # In other apps, go to line start
-]
-
-end [
-    "terminal" ~           # Let terminal handle it
-    *          | cmd - right # In other apps, go to line end
 ]
 ```
 
@@ -416,11 +405,14 @@ skhd --uninstall-service
 ## Testing and Debugging
 
 ```bash
-# Test key combinations (observe mode)
+# Test key combinations and hex code (observe mode)
 skhd -o
 
-# Verbose logging
+# Verbose logging for troubleshooting config issues
 skhd -V
+
+# Profile event handling (show after CTRL+C)
+skhd -P
 
 # Test specific keypress
 skhd -k "cmd + shift - t"
@@ -436,12 +428,10 @@ skhd -r
 
 Key improvements over the original skhd:
 
-- Written in Zig for better memory safety and performance
+- Written in Zig for better memory safety and matching performance
 - **New**: Process groups with `.define` for cleaner configs
 - Improved error reporting with detailed line numbers
 - Enhanced logging system
-- More robust event handling
-- Fixed key repeating issues with event forwarding
 
 ## Contributing
 

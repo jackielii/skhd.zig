@@ -2,6 +2,11 @@
 
 This file tracks features and improvements that are not yet implemented but could be added in future versions.
 
+## Clean up
+
+- [ ] clean up tests by moving the tests tests.zig to their respective zig files and remove tests.zig
+- [ ] clean up pub declarations where possible
+
 ## Advanced Input Handling
 
 ### macOS Integration

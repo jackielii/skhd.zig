@@ -996,30 +996,30 @@ test "hotkeyFlagsMatch behavior" {
         const kb_general = ModifierFlag{ .alt = true };
         const kb_left = ModifierFlag{ .lalt = true };
         const kb_right = ModifierFlag{ .ralt = true };
-        
+
         try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_general));
         try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_left));
         try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_right));
     }
-    
+
     // Test specific modifier matching: config has specific (lalt), keyboard must match exactly
     {
         const config = ModifierFlag{ .lalt = true };
         const kb_general = ModifierFlag{ .alt = true };
         const kb_left = ModifierFlag{ .lalt = true };
         const kb_right = ModifierFlag{ .ralt = true };
-        
+
         try testing.expect(!Skhd.hotkeyFlagsMatch(config, kb_general));
         try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_left));
         try testing.expect(!Skhd.hotkeyFlagsMatch(config, kb_right));
     }
-    
+
     // Test multiple modifiers
     {
         const config = ModifierFlag{ .cmd = true, .shift = true };
         const kb_match = ModifierFlag{ .lcmd = true, .shift = true };
         const kb_no_match = ModifierFlag{ .lcmd = true }; // Missing shift
-        
+
         try testing.expect(Skhd.hotkeyFlagsMatch(config, kb_match));
         try testing.expect(!Skhd.hotkeyFlagsMatch(config, kb_no_match));
     }

@@ -297,7 +297,7 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         if (try self.processHotkey(&eventkey, event, process_name)) {
             return @ptrFromInt(0);
         }
-        
+
         // Check if current mode has capture enabled
         if (self.current_mode) |mode| {
             if (mode.capture) {

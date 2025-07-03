@@ -139,7 +139,7 @@ pub fn main() !void {
     }
 
     // Pass the hotload flag to run
-    try skhd.run(!no_hotload);
+    skhd.run(!no_hotload) catch {};
 }
 
 /// Resolve config file path following XDG spec

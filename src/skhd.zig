@@ -156,27 +156,29 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
             defer if (allocated_path) |path| self.allocator.free(path);
             const exe_path = allocated_path orelse "/opt/homebrew/bin/skhd";
 
-            log.err("\n" ++
-                "=====================================================\n" ++
-                "ACCESSIBILITY PERMISSIONS REQUIRED\n" ++
-                "=====================================================\n" ++
-                "skhd requires accessibility permissions to function.\n" ++
-                "\n" ++
-                "Please grant accessibility permissions:\n" ++
-                "1. Open System Settings → Privacy & Security → Accessibility\n" ++
-                "2. Click the lock to make changes\n" ++
-                "3. Add this binary: {s}\n" ++
-                "4. Make sure it's enabled (checkbox checked)\n" ++
-                "5. Restart skhd\n" ++
-                "\n" ++
-                "Troubleshooting:\n" ++
-                "If skhd is already listed but still not working:\n" ++
-                "- Remove the existing skhd entry\n" ++
-                "- Stop the service: skhd --stop-service\n" ++
-                "- Re-add skhd to the list " ++
-                "- Or just restart the service to see the entry added\n" ++
-                "- Enable the entry and run skhd --restart-service\n" ++
-                "=====================================================\n", .{exe_path});
+            log.err(
+                \\
+                \\=====================================================
+                \\ACCESSIBILITY PERMISSIONS REQUIRED
+                \\=====================================================
+                \\skhd requires accessibility permissions to function.
+                \\
+                \\Please grant accessibility permissions:
+                \\1. Open System Settings → Privacy & Security → Accessibility
+                \\2. Click the lock to make changes
+                \\3. Add this binary: {s}
+                \\4. Make sure it's enabled (checkbox checked)
+                \\5. Restart skhd
+                \\
+                \\Troubleshooting:
+                \\If skhd is already listed but still not working:
+                \\- Remove the existing skhd entry
+                \\- Stop the service: skhd --stop-service
+                \\- Re-add skhd to the list - Or just restart the service to see the entry added
+                \\- Enable the entry and run skhd --restart-service
+                \\=====================================================
+                \\
+            , .{exe_path});
         }
         return err;
     };
@@ -697,9 +699,6 @@ inline fn forkAndExec(shell: []const u8, command: []const u8, verbose: bool) !vo
 
         // Second child continues
         if (!verbose) {
-            // Redirect stdout and stderr to /dev/null
-            // Note: We can use a single fd for both stdout and stderr since they're both write-only
-            // We keep stdin as-is since some programs may expect it to be readable
             const devnull = c.open("/dev/null", c.O_WRONLY);
             if (devnull != -1) {
                 _ = c.dup2(devnull, 1); // stdout

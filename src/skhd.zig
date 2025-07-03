@@ -449,38 +449,6 @@ inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
     c.CGEventPost(c.kCGSessionEventTap, key_up);
 }
 
-/// Compare hotkey flags, handling left/right modifier logic
-/// config = hotkey from config file, keyboard = event from keyboard
-pub inline fn hotkeyFlagsMatch(config: ModifierFlag, keyboard: ModifierFlag) bool {
-    // Match logic from original skhd:
-    // If config has general modifier (alt), keyboard can have general, left, or right
-    // If config has specific modifier (lalt), keyboard must match exactly
-
-    const alt_match = if (config.alt)
-        (keyboard.alt or keyboard.lalt or keyboard.ralt)
-    else
-        (config.lalt == keyboard.lalt and config.ralt == keyboard.ralt and config.alt == keyboard.alt);
-
-    const cmd_match = if (config.cmd)
-        (keyboard.cmd or keyboard.lcmd or keyboard.rcmd)
-    else
-        (config.lcmd == keyboard.lcmd and config.rcmd == keyboard.rcmd and config.cmd == keyboard.cmd);
-
-    const ctrl_match = if (config.control)
-        (keyboard.control or keyboard.lcontrol or keyboard.rcontrol)
-    else
-        (config.lcontrol == keyboard.lcontrol and config.rcontrol == keyboard.rcontrol and config.control == keyboard.control);
-
-    const shift_match = if (config.shift)
-        (keyboard.shift or keyboard.lshift or keyboard.rshift)
-    else
-        (config.lshift == keyboard.lshift and config.rshift == keyboard.rshift and config.shift == keyboard.shift);
-
-    return alt_match and cmd_match and ctrl_match and shift_match and
-        config.@"fn" == keyboard.@"fn" and
-        config.nx == keyboard.nx;
-}
-
 inline fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
     var flags: c.CGEventFlags = 0;
 
@@ -536,20 +504,6 @@ inline fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
     return flags;
 }
 
-// Context for looking up hotkeys from keyboard events
-// This uses our custom modifier matching logic
-pub const KeyboardLookupContext = struct {
-    pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
-        // Must match the hash function used by HotkeyMap for lookup to work
-        return key.key;
-    }
-
-    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
-        // Match keyboard event against config hotkey
-        return config.key == keyboard.key and hotkeyFlagsMatch(config.flags, keyboard.flags);
-    }
-};
-
 /// Find a hotkey in the mode that matches the keyboard event
 /// Returns the hotkey pointer if found, null otherwise
 pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
@@ -563,31 +517,31 @@ pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.
 /// HashMap-based lookup using adapted context
 pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
     self.tracer.traceHotkeyLookup();
-    const ctx = KeyboardLookupContext{};
+    const ctx = Hotkey.KeyboardLookupContext{};
     const result = mode.hotkey_map.getKeyAdapted(eventkey, ctx);
     self.tracer.traceHotkeyFound(result != null);
     return result;
 }
 
-/// Linear search through all hotkeys in the mode
-pub inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-    self.tracer.traceHotkeyLookup();
-    var it = mode.hotkey_map.iterator();
-    var iterations: u64 = 0;
-    while (it.next()) |entry| {
-        iterations += 1;
-        self.tracer.traceHotkeyComparison();
-        const hotkey = entry.key_ptr.*;
-        if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
-            self.tracer.traceLinearSearchIterations(iterations);
-            self.tracer.traceHotkeyFound(true);
-            return hotkey;
-        }
-    }
-    self.tracer.traceLinearSearchIterations(iterations);
-    self.tracer.traceHotkeyFound(false);
-    return null;
-}
+/// /// Linear search through all hotkeys in the mode
+/// pub inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+///     self.tracer.traceHotkeyLookup();
+///     var it = mode.hotkey_map.iterator();
+///     var iterations: u64 = 0;
+///     while (it.next()) |entry| {
+///         iterations += 1;
+///         self.tracer.traceHotkeyComparison();
+///         const hotkey = entry.key_ptr.*;
+///         if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
+///             self.tracer.traceLinearSearchIterations(iterations);
+///             self.tracer.traceHotkeyFound(true);
+///             return hotkey;
+///         }
+///     }
+///     self.tracer.traceLinearSearchIterations(iterations);
+///     self.tracer.traceHotkeyFound(false);
+///     return null;
+/// }
 
 /// Process a hotkey - single lookup that handles both forwarding and execution
 inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !bool {

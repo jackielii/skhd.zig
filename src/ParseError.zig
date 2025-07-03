@@ -2,6 +2,7 @@ const std = @import("std");
 const Token = @import("Tokenizer.zig").Token;
 
 pub const ParseError = struct {
+    allocator: std.mem.Allocator,
     message: []const u8,
     line: usize,
     column: usize,
@@ -18,9 +19,15 @@ pub const ParseError = struct {
         }
     }
 
-    pub fn fromToken(token: Token, message: []const u8, file_path: ?[]const u8) ParseError {
+    pub fn deinit(self: *ParseError) void {
+        self.allocator.free(self.message);
+    }
+
+    pub fn fromToken(allocator: std.mem.Allocator, token: Token, message: []const u8, file_path: ?[]const u8) !ParseError {
+        const msg_copy = try allocator.dupe(u8, message);
         return ParseError{
-            .message = message,
+            .allocator = allocator,
+            .message = msg_copy,
             .line = token.line,
             .column = token.cursor,
             .file_path = file_path,
@@ -28,9 +35,11 @@ pub const ParseError = struct {
         };
     }
 
-    pub fn fromPosition(line: usize, column: usize, message: []const u8, file_path: ?[]const u8) ParseError {
+    pub fn fromPosition(allocator: std.mem.Allocator, line: usize, column: usize, message: []const u8, file_path: ?[]const u8) !ParseError {
+        const msg_copy = try allocator.dupe(u8, message);
         return ParseError{
-            .message = message,
+            .allocator = allocator,
+            .message = msg_copy,
             .line = line,
             .column = column,
             .file_path = file_path,

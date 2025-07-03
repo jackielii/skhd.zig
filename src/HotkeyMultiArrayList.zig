@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 const Hotkey = @This();
 const Mode = @import("Mode.zig");
 const utils = @import("utils.zig");
@@ -90,6 +91,53 @@ fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd,
     // Both hotkeys are from config, so exact comparison is correct
     return a_general == b_general and a_left == b_left and a_right == b_right;
 }
+
+// Context for looking up hotkeys from keyboard events
+// This uses our custom modifier matching logic
+pub const KeyboardLookupContext = struct {
+    pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
+        // Must match the hash function used by HotkeyMap for lookup to work
+        return key.key;
+    }
+
+    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
+        // Match keyboard event against config hotkey
+        return config.key == keyboard.key and hotkeyFlagsMatch(config.flags, keyboard.flags);
+    }
+};
+
+/// Compare hotkey flags, handling left/right modifier logic
+/// config = hotkey from config file, keyboard = event from keyboard
+pub fn hotkeyFlagsMatch(config: ModifierFlag, keyboard: ModifierFlag) bool {
+    // Match logic from original skhd:
+    // If config has general modifier (alt), keyboard can have general, left, or right
+    // If config has specific modifier (lalt), keyboard must match exactly
+
+    const alt_match = if (config.alt)
+        (keyboard.alt or keyboard.lalt or keyboard.ralt)
+    else
+        (config.lalt == keyboard.lalt and config.ralt == keyboard.ralt and config.alt == keyboard.alt);
+
+    const cmd_match = if (config.cmd)
+        (keyboard.cmd or keyboard.lcmd or keyboard.rcmd)
+    else
+        (config.lcmd == keyboard.lcmd and config.rcmd == keyboard.rcmd and config.cmd == keyboard.cmd);
+
+    const ctrl_match = if (config.control)
+        (keyboard.control or keyboard.lcontrol or keyboard.rcontrol)
+    else
+        (config.lcontrol == keyboard.lcontrol and config.rcontrol == keyboard.rcontrol and config.control == keyboard.control);
+
+    const shift_match = if (config.shift)
+        (keyboard.shift or keyboard.lshift or keyboard.rshift)
+    else
+        (config.lshift == keyboard.lshift and config.rshift == keyboard.rshift and config.shift == keyboard.shift);
+
+    return alt_match and cmd_match and ctrl_match and shift_match and
+        config.@"fn" == keyboard.@"fn" and
+        config.nx == keyboard.nx;
+}
+
 
 pub const ProcessCommand = union(enum) {
     command: []const u8,
@@ -345,4 +393,40 @@ test "MultiArrayList performance characteristics" {
 
     // Should match process_1, process_10-19 (11 total)
     try std.testing.expectEqual(@as(usize, 11), count);
+}
+
+test "hotkeyFlagsMatch behavior" {
+    // Test general modifier matching: config has general (alt), keyboard can have general, left, or right
+    {
+        const config = ModifierFlag{ .alt = true };
+        const kb_general = ModifierFlag{ .alt = true };
+        const kb_left = ModifierFlag{ .lalt = true };
+        const kb_right = ModifierFlag{ .ralt = true };
+
+        try testing.expect(hotkeyFlagsMatch(config, kb_general));
+        try testing.expect(hotkeyFlagsMatch(config, kb_left));
+        try testing.expect(hotkeyFlagsMatch(config, kb_right));
+    }
+
+    // Test specific modifier matching: config has specific (lalt), keyboard must match exactly
+    {
+        const config = ModifierFlag{ .lalt = true };
+        const kb_general = ModifierFlag{ .alt = true };
+        const kb_left = ModifierFlag{ .lalt = true };
+        const kb_right = ModifierFlag{ .ralt = true };
+
+        try testing.expect(!hotkeyFlagsMatch(config, kb_general));
+        try testing.expect(hotkeyFlagsMatch(config, kb_left));
+        try testing.expect(!hotkeyFlagsMatch(config, kb_right));
+    }
+
+    // Test multiple modifiers
+    {
+        const config = ModifierFlag{ .cmd = true, .shift = true };
+        const kb_match = ModifierFlag{ .lcmd = true, .shift = true };
+        const kb_no_match = ModifierFlag{ .lcmd = true }; // Missing shift
+
+        try testing.expect(hotkeyFlagsMatch(config, kb_match));
+        try testing.expect(!hotkeyFlagsMatch(config, kb_no_match));
+    }
 }

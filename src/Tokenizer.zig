@@ -120,9 +120,7 @@ pub fn get_token(self: *Tokenizer) ?Token {
         },
         '"' => {
             token.type = .Token_String;
-            // TODO: handle escape characters
-            token.text = self.acceptUntil('"');
-            self.moveOver("\"");
+            token.text = self.acceptString();
         },
         '#' => {
             _ = self.acceptUntil('\n');
@@ -255,6 +253,40 @@ fn acceptCommand(self: *Tokenizer) []const u8 {
     return std.mem.trimRight(u8, self.buffer[start..self.pos], "\n");
 }
 
+fn acceptString(self: *Tokenizer) []const u8 {
+    const start = self.pos;
+
+    while (self.peekRune()) |r| {
+        if (r[0] == '"') {
+            // Check if this quote is escaped by counting preceding backslashes
+            var backslash_count: usize = 0;
+            var check_pos = self.pos;
+
+            // Count consecutive backslashes before the quote
+            while (check_pos > start and self.buffer[check_pos - 1] == '\\') {
+                backslash_count += 1;
+                check_pos -= 1;
+            }
+
+            // If odd number of backslashes, the quote is escaped, continue
+            if (backslash_count % 2 == 1) {
+                self.moveOver(r);
+                continue;
+            }
+
+            // Even number (or zero) backslashes, this is the closing quote
+            const end = self.pos;
+            self.moveOver(r); // Skip closing quote
+            return self.buffer[start..end];
+        }
+
+        self.moveOver(r);
+    }
+
+    // If we reach here, string wasn't closed properly
+    return self.buffer[start..self.pos];
+}
+
 fn skipWhitespace(self: *Tokenizer) void {
     _ = self.acceptRun(" \t\n");
 }
@@ -372,11 +404,102 @@ test "tokenize option" {
     const token1 = tokenizer.get_token();
     try std.testing.expect(token1 != null);
     try std.testing.expectEqual(TokenType.Token_Option, token1.?.type);
-    try std.testing.expectEqualStrings("shell", token1.?.text);
+    try std.testing.expectEqualStrings(".shell", token1.?.text);
 
     // Second token should be the string
     const token2 = tokenizer.get_token();
     try std.testing.expect(token2 != null);
     try std.testing.expectEqual(TokenType.Token_String, token2.?.type);
     try std.testing.expectEqualStrings("/bin/zsh", token2.?.text);
+}
+
+test "tokenize string with escape sequences" {
+    const tests = .{
+        // Simple strings without escapes
+        .{
+            .input =
+            \\"hello world"
+            ,
+            .expected =
+            \\hello world
+            ,
+        },
+        // Escaped quotes - now we just return the raw string
+        .{
+            .input =
+            \\"with \"quotes\""
+            ,
+            .expected =
+            \\with \"quotes\"
+            ,
+        },
+        .{
+            .input =
+            \\"hello \\\"world\\\""
+            ,
+            .expected =
+            \\hello \\\"world\\\"
+            ,
+        },
+        // Backslashes - returned as-is
+        .{
+            .input =
+            \\"back\\slash"
+            ,
+            .expected =
+            \\back\\slash
+            ,
+        },
+        .{
+            .input =
+            \\"path\\\\to\\\\file"
+            ,
+            .expected =
+            \\path\\\\to\\\\file
+            ,
+        },
+        // Mixed escapes - all preserved
+        .{
+            .input =
+            \\"mixed\\\\path with \\\"quotes\\\""
+            ,
+            .expected =
+            \\mixed\\\\path with \\\"quotes\\\"
+            ,
+        },
+        // Other sequences - preserved as-is
+        .{
+            .input =
+            \\"hello \\ world"
+            ,
+            .expected =
+            \\hello \\ world
+            ,
+        },
+        .{
+            .input =
+            \\"new\\nline"
+            ,
+            .expected =
+            \\new\\nline
+            ,
+        },
+        .{
+            .input =
+            \\"tab\\there"
+            ,
+            .expected =
+            \\tab\\there
+            ,
+        },
+    };
+
+    inline for (tests) |test_case| {
+        var tokenizer = try init(test_case.input);
+
+        const token = tokenizer.get_token();
+        try std.testing.expect(token != null);
+        try std.testing.expectEqual(TokenType.Token_String, token.?.type);
+        try std.testing.expectEqualStrings(test_case.expected, token.?.text);
+    }
 }

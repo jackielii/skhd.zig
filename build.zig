@@ -100,7 +100,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     linkFrameworks(tests_unit_tests);
-    test_step.dependOn(&tests_unit_tests.step);
+    const run_tests_unit_tests = b.addRunArtifact(tests_unit_tests);
+    test_step.dependOn(&run_tests_unit_tests.step);
 
     // Add tests for individual modules that may have their own test blocks
     const test_files = [_][]const u8{
@@ -120,6 +121,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         linkFrameworks(module_tests);
-        test_step.dependOn(&module_tests.step);
+        const run_module_tests = b.addRunArtifact(module_tests);
+        test_step.dependOn(&run_module_tests.step);
     }
 }

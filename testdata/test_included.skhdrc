@@ -1,0 +1,2 @@
+# Test included file
+cmd - i : echo 'from included file'

@@ -39,20 +39,6 @@ This file tracks features and improvements that are not yet implemented but coul
 ### Platform Support
 - [ ] **Universal binary**: Build universal binaries for Intel and Apple Silicon
 
-## Architecture Improvements
-
-### Error Handling and Logging
-- [ ] **Research std.log integration**: Investigate using Zig's std.log framework to improve our custom logging implementation
-  - Study std.log's architecture and capabilities
-  - Evaluate performance impact compared to current Logger
-  - Consider scope-based logging levels
-  - Explore integration with existing verbose/interactive modes
-  - Assess benefits for structured logging output
-- [ ] **Structured logging**: JSON/structured log output for better parsing
-- [ ] **Log rotation**: Automatic log file rotation and cleanup
-- [ ] **Remote logging**: Send logs to remote logging services
-- [ ] **Error recovery**: Better error recovery and graceful degradation
-
 ## Testing and Quality Assurance
 
 ### Testing Infrastructure

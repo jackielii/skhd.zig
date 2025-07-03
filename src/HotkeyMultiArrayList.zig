@@ -3,7 +3,7 @@ const Hotkey = @This();
 const Mode = @import("Mode.zig");
 const utils = @import("utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
-const log = std.log.scoped(.@"hotkey_multi_array_list");
+const log = std.log.scoped(.hotkey_multi_array_list);
 
 allocator: std.mem.Allocator,
 flags: ModifierFlag = undefined,

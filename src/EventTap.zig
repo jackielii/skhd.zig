@@ -6,7 +6,7 @@ runloop_source: c.CFRunLoopSourceRef = null,
 mask: c.CGEventMask,
 
 const EventTap = @This();
-const log = std.log.scoped(.@"event_tap");
+const log = std.log.scoped(.event_tap);
 
 pub fn enabled(self: *EventTap) bool {
     return self.handle != null and c.CGEventTapIsEnabled(self.handle);

@@ -4,7 +4,7 @@ const synthesize = @import("synthesize.zig");
 const service = @import("service.zig");
 
 const version = std.mem.trimRight(u8, @embedFile("VERSION"), "\n\r\t ");
-const log = std.log.scoped(.@"main");
+const log = std.log.scoped(.main);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c.zig");
-const log = std.log.scoped(.@"service");
+const log = std.log.scoped(.service);
 
 // Import C function
 extern "c" fn getpid() c_int;

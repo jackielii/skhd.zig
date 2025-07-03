@@ -11,7 +11,7 @@ const Hotkey = @import("HotkeyMultiArrayList.zig");
 const utils = @import("utils.zig");
 
 const Mode = @This();
-const log = std.log.scoped(.@"mode");
+const log = std.log.scoped(.mode);
 
 allocator: std.mem.Allocator,
 name: []const u8,

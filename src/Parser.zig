@@ -11,7 +11,7 @@ const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const ParseError = @import("ParseError.zig").ParseError;
 
 const Parser = @This();
-const log = std.log.scoped(.@"parser");
+const log = std.log.scoped(.parser);
 
 const LoadDirective = struct {
     filename: []const u8,

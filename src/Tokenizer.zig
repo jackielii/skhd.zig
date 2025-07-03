@@ -7,7 +7,7 @@ const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
 // const modifier_flags_str = @import("Keycodes.zig").modifier_flags_str;
 const literal_keycode_str = @import("Keycodes.zig").literal_keycode_str;
-const log = std.log.scoped(.@"tokenizer");
+const log = std.log.scoped(.tokenizer);
 
 const identifier_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
 const number_chars = "0123456789";

@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @import("c.zig");
-const log = std.log.scoped(.@"keycodes");
+const log = std.log.scoped(.keycodes);
 
 const layout_dependent_keycodes = [_]u32{
     c.kVK_ANSI_A,            c.kVK_ANSI_B,           c.kVK_ANSI_C,

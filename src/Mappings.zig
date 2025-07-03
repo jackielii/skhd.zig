@@ -2,7 +2,7 @@ const std = @import("std");
 const Mode = @import("Mode.zig");
 const Hotkey = @import("HotkeyMultiArrayList.zig");
 const utils = @import("utils.zig");
-const log = std.log.scoped(.@"mappings");
+const log = std.log.scoped(.mappings);
 
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMapUnmanaged(Mode) = .empty,

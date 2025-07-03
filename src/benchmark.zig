@@ -197,7 +197,7 @@ pub fn main() !void {
     const config_path = "/Users/jackieli/.config/skhd/skhdrc";
 
     // Initialize skhd with profiling disabled
-    var skhd = try Skhd.init(allocator, config_path, .service, false);
+    var skhd = try Skhd.init(allocator, config_path, false, false);
     defer skhd.deinit();
 
     // Set global context

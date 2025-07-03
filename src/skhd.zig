@@ -75,17 +75,6 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
     // Log shell configuration
     log.info("Using shell: {s}", .{mappings.shell});
 
-    // Log blacklisted applications
-    if (mappings.blacklist.count() > 0) {
-        var blacklist_iter = mappings.blacklist.keyIterator();
-        var blacklist_buf = std.ArrayList(u8).init(allocator);
-        defer blacklist_buf.deinit();
-        while (blacklist_iter.next()) |app| {
-            try blacklist_buf.writer().print("{s} ", .{app.*});
-        }
-        log.info("Blacklisted applications: {s}", .{blacklist_buf.items});
-    }
-
     // Initialize Carbon event handler for app switching
     var carbon_event = try CarbonEvent.init(allocator);
     errdefer carbon_event.deinit();
@@ -121,7 +110,6 @@ pub fn deinit(self: *Skhd) void {
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
-    // No logger cleanup needed
 }
 
 pub fn run(self: *Skhd, enable_hotload: bool) !void {
@@ -295,7 +283,6 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
 
     var eventkey: Hotkey.KeyPress = undefined;
     if (interceptSystemKey(event, &eventkey)) {
-        // Single lookup to handle both forwarding and execution
         if (try self.processHotkey(&eventkey, event, process_name)) {
             return @ptrFromInt(0);
         }
@@ -585,10 +572,8 @@ pub inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.
 
 /// Process a hotkey - single lookup that handles both forwarding and execution
 inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !bool {
-    // Look up hotkey in current mode
     const mode = self.current_mode orelse return false;
 
-    // Single lookup
     self.tracer.traceHotkeyLookup();
     const found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
 
@@ -597,9 +582,9 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         return false;
     }
 
+    try self.logKeyPress("Found hotkey: '{s}' for process: '{s}' in mode '{s}'", eventkey.*, .{ process_name, mode.name });
     self.tracer.traceHotkeyFound(true);
     const hotkey = found_hotkey.?;
-    try self.logKeyPress("Found hotkey: '{s}' for process: '{s}' in mode '{s}'", eventkey.*, .{ process_name, mode.name });
 
     // Check for mode activation first
     if (hotkey.flags.activate) {
@@ -617,7 +602,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                         log.info("Switched to mode '{s}'", .{target_mode.name});
                         // Execute mode command if exists
                         if (target_mode.command) |mode_cmd| {
-                            try self.executeCommand(self.mappings.shell, mode_cmd);
+                            try forkAndExec(self.mappings.shell, mode_cmd, self.verbose);
                         }
                         return true;
                     } else if (std.mem.eql(u8, mode_name, "default")) {
@@ -655,7 +640,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
             .command => |cmd| {
                 log.debug("Executing command '{s}' for process {s}", .{ cmd, process_name });
                 self.tracer.traceCommandExecuted();
-                try self.executeCommand(self.mappings.shell, cmd);
+                try forkAndExec(self.mappings.shell, cmd, self.verbose);
                 return !hotkey.flags.passthrough;
             },
             .unbound => {
@@ -707,10 +692,6 @@ inline fn forkAndExec(shell: []const u8, command: []const u8, verbose: bool) !vo
         std.process.exit(@intCast(status_code));
     }
     // Parent process returns immediately
-}
-
-inline fn executeCommand(self: *Skhd, shell: []const u8, command: []const u8) !void {
-    try forkAndExec(shell, command, self.verbose);
 }
 
 /// Signal handler for SIGUSR1 - reload configuration
@@ -840,6 +821,7 @@ fn hotloadCallback(path: []const u8) void {
 
 /// Log a keypress with formatted key string
 inline fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPress, rest: anytype) !void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     // Only log in interactive mode to avoid allocation in hot path
     if (!self.verbose) return;
 

@@ -1,8 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Tracer = @This();
 
 // Simple execution tracer for profiling hot path
 // Tracks function calls and execution patterns
+// Only active in debug builds, compiled out in release builds
 
 pub const TracerStats = struct {
     // Event handling
@@ -47,21 +49,24 @@ pub fn init(enabled: bool) Tracer {
 }
 
 // Event tracking
-pub inline fn traceKeyEvent(self: *Tracer) void {
+pub fn traceKeyEvent(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
     self.stats.total_key_events += 1;
 }
 
-pub inline fn traceKeyDown(self: *Tracer) void {
+pub fn traceKeyDown(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
     self.stats.key_down_events += 1;
 }
 
-pub inline fn traceSystemKey(self: *Tracer) void {
+pub fn traceSystemKey(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -69,7 +74,8 @@ pub inline fn traceSystemKey(self: *Tracer) void {
 }
 
 // Process name tracking
-pub inline fn traceProcessNameLookup(self: *Tracer) void {
+pub fn traceProcessNameLookup(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -77,14 +83,16 @@ pub inline fn traceProcessNameLookup(self: *Tracer) void {
 }
 
 // Hotkey lookup tracking
-pub inline fn traceHotkeyLookup(self: *Tracer) void {
+pub fn traceHotkeyLookup(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
     self.stats.hotkey_lookups += 1;
 }
 
-pub inline fn traceHotkeyFound(self: *Tracer, found: bool) void {
+pub fn traceHotkeyFound(self: *Tracer, found: bool) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -95,7 +103,8 @@ pub inline fn traceHotkeyFound(self: *Tracer, found: bool) void {
     }
 }
 
-pub inline fn traceHotkeyComparison(self: *Tracer) void {
+pub fn traceHotkeyComparison(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -103,7 +112,8 @@ pub inline fn traceHotkeyComparison(self: *Tracer) void {
 }
 
 // Linear search tracking
-pub inline fn traceLinearSearchIterations(self: *Tracer, iterations: u64) void {
+pub fn traceLinearSearchIterations(self: *Tracer, iterations: u64) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -114,14 +124,16 @@ pub inline fn traceLinearSearchIterations(self: *Tracer, iterations: u64) void {
 }
 
 // Action tracking
-pub inline fn traceKeyForwarded(self: *Tracer) void {
+pub fn traceKeyForwarded(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
     self.stats.keys_forwarded += 1;
 }
 
-pub inline fn traceCommandExecuted(self: *Tracer) void {
+pub fn traceCommandExecuted(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -129,21 +141,24 @@ pub inline fn traceCommandExecuted(self: *Tracer) void {
 }
 
 // Early exit tracking
-pub inline fn traceNoModeExit(self: *Tracer) void {
+pub fn traceNoModeExit(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
     self.stats.no_mode_exits += 1;
 }
 
-pub inline fn traceBlacklistedExit(self: *Tracer) void {
+pub fn traceBlacklistedExit(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
     self.stats.blacklisted_exits += 1;
 }
 
-pub inline fn traceSelfGeneratedExit(self: *Tracer) void {
+pub fn traceSelfGeneratedExit(self: *Tracer) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -152,6 +167,7 @@ pub inline fn traceSelfGeneratedExit(self: *Tracer) void {
 
 // Print summary statistics
 pub fn printSummary(self: *Tracer, writer: anytype) !void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
 
     self.mutex.lock();

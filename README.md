@@ -66,6 +66,7 @@ sudo cp zig-out/bin/skhd /usr/local/bin/
 - `-t` / `--text` - Synthesize text input
 - `-r` / `--reload` - Signal reload to running instance
 - `-h` / `--no-hotload` - Disable hotloading
+- `-P` / `--profile` - Profile event handling (Debug and ReleaseSafe builds only)
 
 ### Service Management
 
@@ -406,10 +407,17 @@ skhd --uninstall-service
 
 ### Debug vs Release Builds
 
-**Important**: The logging behavior differs between debug and release builds:
+**Important**: The logging and profiling behavior differs between build modes:
 
-- **Release builds** (installed via Homebrew or built with `-Doptimize=ReleaseFast`): Only show errors and warnings, even with `-V`/`--verbose` flag
-- **Debug builds** (default `zig build`): Show all log levels including info and debug messages with `-V`/`--verbose` flag
+- **ReleaseFast builds** (installed via Homebrew or built with `-Doptimize=ReleaseFast`): 
+  - Only show errors and warnings, even with `-V`/`--verbose` flag
+  - Profiling (`-P`/`--profile`) is disabled - all tracing code is compiled out for maximum performance
+- **ReleaseSafe builds** (built with `-Doptimize=ReleaseSafe`):
+  - Show errors, warnings, and info messages with `-V`/`--verbose` flag
+  - Profiling (`-P`/`--profile`) is available for production debugging
+- **Debug builds** (default `zig build`): 
+  - Show all log levels including debug messages with `-V`/`--verbose` flag
+  - Profiling (`-P`/`--profile`) is available with full trace details
 
 However, command output will be shown if verbose flag is specified in release builds.
 
@@ -434,7 +442,10 @@ zig build run -- -V
 skhd -o
 
 # Profile event handling (show after CTRL+C)
-skhd -P
+# Note: Profiling works in Debug and ReleaseSafe builds only
+zig build && ./zig-out/bin/skhd -P
+# or for production debugging:
+zig build -Doptimize=ReleaseSafe && ./zig-out/bin/skhd -P
 
 # Test specific keypress
 skhd -k "cmd + shift - t"

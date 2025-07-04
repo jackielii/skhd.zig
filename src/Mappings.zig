@@ -4,19 +4,12 @@ const Hotkey = @import("HotkeyMultiArrayList.zig");
 const utils = @import("utils.zig");
 const log = std.log.scoped(.mappings);
 
-pub const CommandDef = struct {
-    template: []const u8,
-    max_placeholder: u8, // Highest placeholder number seen (0 if none)
-};
-
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
 blacklist: std.StringHashMapUnmanaged(void) = .empty,
 hotkey_map: Hotkey.HotkeyMap = .empty,
 shell: []const u8,
 loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
-process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
-command_defs: std.StringHashMapUnmanaged(CommandDef) = .empty,
 
 const Mappings = @This();
 
@@ -62,29 +55,6 @@ pub fn deinit(self: *Mappings) void {
     }
     self.loaded_files.deinit(self.allocator);
 
-    // Free process groups
-    {
-        var it = self.process_groups.iterator();
-        while (it.next()) |kv| {
-            self.allocator.free(kv.key_ptr.*);
-            for (kv.value_ptr.*) |process_name| {
-                self.allocator.free(process_name);
-            }
-            self.allocator.free(kv.value_ptr.*);
-        }
-        self.process_groups.deinit(self.allocator);
-    }
-
-    // Free command definitions
-    {
-        var it = self.command_defs.iterator();
-        while (it.next()) |kv| {
-            self.allocator.free(kv.key_ptr.*);
-            self.allocator.free(kv.value_ptr.*.template);
-        }
-        self.command_defs.deinit(self.allocator);
-    }
-
     self.* = undefined;
 }
 
@@ -108,24 +78,6 @@ pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     try self.blacklist.put(self.allocator, owned, void{});
 }
 
-pub fn add_process_group(self: *Mappings, name: []const u8, processes: [][]const u8) !void {
-    const owned_name = try self.allocator.dupe(u8, name);
-    const owned_processes = try self.allocator.alloc([]const u8, processes.len);
-    for (processes, 0..) |process, i| {
-        owned_processes[i] = try self.allocator.dupe(u8, process);
-    }
-    try self.process_groups.put(self.allocator, owned_name, owned_processes);
-}
-
-pub fn add_command_def(self: *Mappings, name: []const u8, template: []const u8, max_placeholder: u8) !void {
-    const owned_name = try self.allocator.dupe(u8, name);
-    const owned_template = try self.allocator.dupe(u8, template);
-    const cmd_def = CommandDef{
-        .template = owned_template,
-        .max_placeholder = max_placeholder,
-    };
-    try self.command_defs.put(self.allocator, owned_name, cmd_def);
-}
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
     // if (fmt.len != 0) {

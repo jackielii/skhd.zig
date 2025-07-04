@@ -36,16 +36,23 @@ string       = '"' 'sequence of characters' '"'
 
 group_name   = 'process group name defined with .define directive'
 
-command      = command is executed through '$SHELL -c' and
-               follows valid shell syntax. if the $SHELL environment
-               variable is not set, it will default to '/bin/bash'.
-               when bash is used, the ';' delimiter can be specified
-               to chain commands.
+command      = <shell_command> | <command_reference>
 
-               to allow a command to extend into multiple lines,
-               prepend '\' at the end of the previous line.
+shell_command = command is executed through '$SHELL -c' and
+                follows valid shell syntax. if the $SHELL environment
+                variable is not set, it will default to '/bin/bash'.
+                when bash is used, the ';' delimiter can be specified
+                to chain commands.
 
-               an EOL character signifies the end of the bind.
+                to allow a command to extend into multiple lines,
+                prepend '\' at the end of the previous line.
+
+                an EOL character signifies the end of the bind.
+
+command_reference = '@' <identifier> |
+                    '@' <identifier> '(' <arg_list> ')'
+
+arg_list     = <string> | <string> ',' <arg_list>
 
 ->           = keypress is not consumed by skhd
 
@@ -122,7 +129,8 @@ Configuration directives follow this syntax:
 directive = '.shell' <string> |
             '.blacklist' '[' <string_list> ']' |
             '.load' <string> |
-            '.define' <identifier> '[' <string_list> ']'
+            '.define' <identifier> '[' <string_list> ']' |
+            '.define' <identifier> ':' <command_template>
 
 string_list = <string> | <string> ',' <string_list>
 ```
@@ -156,6 +164,21 @@ ctrl - left [
     @terminal_apps ~
     *              | alt - left
 ]
+```
+
+### Command Definitions (New in skhd.zig!)
+```bash
+# Simple command without placeholders
+.define focus_recent : yabai -m window --focus recent
+
+# Command with placeholders
+.define yabai_focus : yabai -m window --focus {{1}} || yabai -m display --focus {{1}}
+.define window_action : yabai -m window --{{1}} {{2}}
+
+# Use with @ prefix and arguments
+cmd - tab : @focus_recent
+cmd - h : @yabai_focus("west")
+cmd + shift - h : @window_action("swap", "west")
 ```
 
 ## Syntax Examples

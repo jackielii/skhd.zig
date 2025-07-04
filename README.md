@@ -2,7 +2,7 @@
 
 Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiya/skhd) to Zig.
 
-This implementation is **fully compatible with the original skhd configuration format** - your existing `.skhdrc` files will work without modification. Additionally, it includes new features like process groups (`.define`) for cleaner configs, key forwarding/remapping, and improved error reporting.
+This implementation is **fully compatible with the original skhd configuration format** - your existing `.skhdrc` files will work without modification. Additionally, it includes new features like process groups and command definitions (`.define`) for cleaner configs, key forwarding/remapping, and improved error reporting.
 
 ## Installation
 
@@ -54,6 +54,11 @@ sudo cp zig-out/bin/skhd /usr/local/bin/
 - **Modal system**: Multi-level modal hotkey system with capture modes
 - **Configuration file**: Compatible with original skhd configuration format
 - **Hot reloading**: Automatic config reload on file changes
+
+### Additional Features (New in skhd.zig!)
+
+- **Process groups**: Define named groups of applications for cleaner configs
+- **Command definitions**: Define reusable commands with placeholders to reduce repetition
 
 ### Command-Line Interface
 
@@ -279,6 +284,10 @@ cmd - p -> : echo "This runs but Cmd+P still goes to app"
 # Define process groups for reuse (New in skhd.zig!)
 .define terminal_apps ["kitty", "wezterm", "terminal"]
 .define native_apps ["kitty", "wezterm", "chrome", "whatsapp"]
+
+# Define reusable commands with placeholders (New in skhd.zig!)
+.define yabai_focus : yabai -m window --focus {{1}} || yabai -m display --focus {{1}}
+.define toggle_app : open -a "{{1}}" || osascript -e 'tell app "{{1}}" to quit'
 ```
 
 ## Usage Examples
@@ -286,11 +295,18 @@ cmd - p -> : echo "This runs but Cmd+P still goes to app"
 ### Window Management
 
 ```bash
-# Focus windows
+# Focus windows (traditional way)
 cmd - h : yabai -m window --focus west
 cmd - j : yabai -m window --focus south
 cmd - k : yabai -m window --focus north
 cmd - l : yabai -m window --focus east
+
+# Focus windows (using command definitions)
+.define yabai_focus : yabai -m window --focus {{1}} || yabai -m display --focus {{1}}
+cmd - h : @yabai_focus("west")
+cmd - j : @yabai_focus("south")
+cmd - k : @yabai_focus("north")
+cmd - l : @yabai_focus("east")
 
 # Move windows
 cmd + shift - h : yabai -m window --swap west

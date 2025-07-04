@@ -151,14 +151,16 @@ pub fn get_token(self: *Tokenizer) ?Token {
                 token.text = "::";
             } else {
                 self.skipWhitespace();
+                token.line = self.line;
+                token.cursor = self.cursor;
+                token.type = .Token_Command;
+
+                // in case of a command, it can be either empty (followed by reference) or a raw command
                 const next = self.peekRune() orelse return null;
                 if (next[0] != '@') {
-                    token.line = self.line;
-                    token.cursor = self.cursor;
-                    token.type = .Token_Command;
                     token.text = self.acceptCommand();
                 } else {
-                    token = self.get_token() orelse return null;
+                    token.text = "";
                 }
             }
         },
@@ -478,6 +480,7 @@ test "tokenize command with colon and reference" {
         .{
             .input = ": @toggle(\"Firefox\")",
             .expected = &[_]struct { type: TokenType, text: []const u8 }{
+                .{ .type = .Token_Command, .text = "" },
                 .{ .type = .Token_Reference, .text = "toggle" },
                 .{ .type = .Token_BeginTuple, .text = "(" },
                 .{ .type = .Token_String, .text = "Firefox" },
@@ -496,6 +499,7 @@ test "tokenize command with colon and reference" {
                 .{ .type = .Token_Modifier, .text = "cmd" },
                 .{ .type = .Token_Dash, .text = "-" },
                 .{ .type = .Token_Key, .text = "h" },
+                .{ .type = .Token_Command, .text = "" },
                 .{ .type = .Token_Reference, .text = "yabai_focus" },
                 .{ .type = .Token_BeginTuple, .text = "(" },
                 .{ .type = .Token_String, .text = "west" },

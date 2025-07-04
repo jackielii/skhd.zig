@@ -858,8 +858,8 @@ test "process group variables" {
     try parser.parse(&mappings, content);
 
     // Check that process group was created
-    try testing.expect(mappings.process_groups.contains("native_apps"));
-    const group = mappings.process_groups.get("native_apps").?;
+    try testing.expect(parser.process_groups.contains("native_apps"));
+    const group = parser.process_groups.get("native_apps").?;
     try testing.expectEqual(@as(usize, 3), group.len);
     try testing.expectEqualStrings("kitty", group[0]);
     try testing.expectEqualStrings("wezterm", group[1]);
@@ -930,18 +930,18 @@ test "multiple process groups and reuse" {
     try parser.parse(&mappings, content);
 
     // Check that all process groups were created
-    try testing.expect(mappings.process_groups.contains("terminal_apps"));
-    try testing.expect(mappings.process_groups.contains("browser_apps"));
-    try testing.expect(mappings.process_groups.contains("native_apps"));
+    try testing.expect(parser.process_groups.contains("terminal_apps"));
+    try testing.expect(parser.process_groups.contains("browser_apps"));
+    try testing.expect(parser.process_groups.contains("native_apps"));
 
     // Check group contents
-    const terminal_group = mappings.process_groups.get("terminal_apps").?;
+    const terminal_group = parser.process_groups.get("terminal_apps").?;
     try testing.expectEqual(@as(usize, 3), terminal_group.len);
 
-    const browser_group = mappings.process_groups.get("browser_apps").?;
+    const browser_group = parser.process_groups.get("browser_apps").?;
     try testing.expectEqual(@as(usize, 3), browser_group.len);
 
-    const native_group = mappings.process_groups.get("native_apps").?;
+    const native_group = parser.process_groups.get("native_apps").?;
     try testing.expectEqual(@as(usize, 4), native_group.len);
 
     // Should have 3 hotkeys
@@ -1008,9 +1008,12 @@ test "Command definitions - simple command" {
     try parser.parse(&mappings, config);
 
     // Check command definition was stored
-    try testing.expect(mappings.command_defs.contains("focus_west"));
-    const cmd_def = mappings.command_defs.get("focus_west").?;
-    try testing.expectEqualStrings("yabai -m window --focus west", cmd_def.template);
+    try testing.expect(parser.command_defs.contains("focus_west"));
+    const cmd_def = parser.command_defs.get("focus_west").?;
+    // Should have one text part
+    try testing.expectEqual(@as(usize, 1), cmd_def.parts.len);
+    try testing.expect(cmd_def.parts[0] == .text);
+    try testing.expectEqualStrings("yabai -m window --focus west", cmd_def.parts[0].text);
     try testing.expectEqual(@as(u8, 0), cmd_def.max_placeholder);
 
     // Check hotkey has expanded command
@@ -1040,8 +1043,13 @@ test "Command definitions - with single placeholder" {
     try parser.parse(&mappings, config);
 
     // Check command definition
-    const cmd_def = mappings.command_defs.get("yabai_focus").?;
-    try testing.expectEqualStrings("yabai -m window --focus {{1}}", cmd_def.template);
+    const cmd_def = parser.command_defs.get("yabai_focus").?;
+    // Should have two parts: text and placeholder
+    try testing.expectEqual(@as(usize, 2), cmd_def.parts.len);
+    try testing.expect(cmd_def.parts[0] == .text);
+    try testing.expectEqualStrings("yabai -m window --focus ", cmd_def.parts[0].text);
+    try testing.expect(cmd_def.parts[1] == .placeholder);
+    try testing.expectEqual(@as(u8, 1), cmd_def.parts[1].placeholder);
     try testing.expectEqual(@as(u8, 1), cmd_def.max_placeholder);
 
     // Find hotkeys and check their commands
@@ -1078,7 +1086,7 @@ test "Command definitions - multiple placeholders" {
     try parser.parse(&mappings, config);
 
     // Check command definition
-    const cmd_def = mappings.command_defs.get("window_action").?;
+    const cmd_def = parser.command_defs.get("window_action").?;
     try testing.expectEqual(@as(u8, 2), cmd_def.max_placeholder);
 
     // Check expanded command

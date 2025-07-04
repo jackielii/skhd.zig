@@ -28,6 +28,31 @@ keycodes: Keycodes = undefined,
 load_directives: std.ArrayList(LoadDirective) = undefined,
 current_file_path: ?[]const u8 = null,
 error_info: ?ParseError = null,
+process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
+command_defs: std.StringHashMapUnmanaged(CommandDef) = .empty,
+
+pub const CommandDef = struct {
+    pub const Part = union(enum) {
+        text: []const u8,
+        placeholder: u8, // placeholder number (1-based)
+
+        pub fn deinit(self: Part, allocator: std.mem.Allocator) void {
+            switch (self) {
+                .text => |text| allocator.free(text),
+                .placeholder => {},
+            }
+        }
+    };
+
+    parts: []Part,
+    max_placeholder: u8, // Highest placeholder number seen (0 if none)
+
+    pub fn deinit(self: *CommandDef, allocator: std.mem.Allocator) void {
+        for (self.parts) |part| part.deinit(allocator);
+        allocator.free(self.parts);
+        self.* = undefined;
+    }
+};
 
 pub fn deinit(self: *Parser) void {
     // self.allocator.free(self.filename);
@@ -40,6 +65,30 @@ pub fn deinit(self: *Parser) void {
     if (self.error_info) |*error_info| {
         error_info.deinit();
     }
+
+    // Free process groups
+    {
+        var it = self.process_groups.iterator();
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            for (kv.value_ptr.*) |process_name| {
+                self.allocator.free(process_name);
+            }
+            self.allocator.free(kv.value_ptr.*);
+        }
+        self.process_groups.deinit(self.allocator);
+    }
+
+    // Free command definitions
+    {
+        var it = self.command_defs.iterator();
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            kv.value_ptr.*.deinit(self.allocator);
+        }
+        self.command_defs.deinit(self.allocator);
+    }
+
     self.* = undefined;
 }
 
@@ -217,10 +266,14 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     } else if (self.match(.Token_Forward)) {
         try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .forwarded = try self.parse_keypress() });
     } else if (self.match(.Token_Command)) {
-        const token = self.previous();
-        const command = try self.parse_command(mappings, token);
-        defer self.allocator.free(command);
-        try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = command });
+        if (self.peek_check(.Token_Reference)) {
+            // Empty command followed by reference (e.g., : @yabai_focus("west"))
+            const command = try self.parse_command_reference();
+            defer self.allocator.free(command);
+            try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = command });
+        } else {
+            try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = self.previous().text });
+        }
     } else if (self.match(.Token_BeginList)) {
         try self.parse_proc_list(mappings, hotkey);
     }
@@ -370,10 +423,15 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         const process_name = try self.processString(name_token.text);
         defer self.allocator.free(process_name);
         if (self.match(.Token_Command)) {
-            const token = self.previous();
-            const command = try self.parse_command(mappings, token);
-            defer self.allocator.free(command);
-            try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
+            if (self.peek_check(.Token_Reference)) {
+                // Empty command followed by reference
+                const command = try self.parse_command_reference();
+                defer self.allocator.free(command);
+                try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
+            } else {
+                // Regular command
+                try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = self.previous().text });
+            }
         } else if (self.match(.Token_Forward)) {
             try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .forwarded = try self.parse_keypress() });
         } else if (self.match(.Token_Unbound)) {
@@ -385,21 +443,36 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         }
         try self.parse_proc_list(mappings, hotkey);
     } else if (self.peek_check(.Token_Reference)) {
-        // Handle @group_name reference
+        // Handle @group_name reference (command references aren't allowed here)
         _ = self.advance();
-        const group_token = self.previous();
-        const group_name = group_token.text;
+        const ref_token = self.previous();
+        const ref_name = ref_token.text;
 
-        // Look up the process group in mappings
-        if (mappings.process_groups.get(group_name)) |processes| {
-            // Now parse the action (command, forward, or unbound)
+        // Check if it's incorrectly followed by parenthesis (command invocation syntax)
+        if (self.peek_check(.Token_BeginTuple)) {
+            // This is a syntax error - command invocations aren't allowed as process list entries
+            const msg = try std.fmt.allocPrint(self.allocator, "Command invocation '@{s}(...)' not allowed here. Process list entries must be process names, wildcards, or process groups", .{ref_name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, ref_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        if (self.process_groups.get(ref_name)) |processes| {
+            // It's a process group - now parse the action (command, forward, or unbound)
             if (self.match(.Token_Command)) {
                 // Apply same command to all processes in the group
-                const cmd_token = self.previous();
-                const command = try self.parse_command(mappings, cmd_token);
-                defer self.allocator.free(command);
-                for (processes) |process_name| {
-                    try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
+                if (self.peek_check(.Token_Reference)) {
+                    // Empty command followed by reference
+                    const command = try self.parse_command_reference();
+                    defer self.allocator.free(command);
+                    for (processes) |process_name| {
+                        try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
+                    }
+                } else {
+                    // Regular command
+                    for (processes) |process_name| {
+                        try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = self.previous().text });
+                    }
                 }
             } else if (self.match(.Token_Forward)) {
                 const forward_key = try self.parse_keypress();
@@ -416,18 +489,23 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
                 return error.ParseErrorOccurred;
             }
         } else {
-            const msg = try std.fmt.allocPrint(self.allocator, "Undefined process group '@{s}'", .{group_name});
+            const msg = try std.fmt.allocPrint(self.allocator, "Undefined process group '@{s}'", .{ref_name});
             defer self.allocator.free(msg);
-            self.error_info = try ParseError.fromToken(self.allocator, group_token, msg, self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, ref_token, msg, self.current_file_path);
             return error.ParseErrorOccurred;
         }
         try self.parse_proc_list(mappings, hotkey);
     } else if (self.match(.Token_Wildcard)) {
         if (self.match(.Token_Command)) {
-            const token = self.previous();
-            const command = try self.parse_command(mappings, token);
-            defer self.allocator.free(command);
-            try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = command });
+            if (self.peek_check(.Token_Reference)) {
+                // Empty command followed by reference
+                const command = try self.parse_command_reference();
+                defer self.allocator.free(command);
+                try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = command });
+            } else {
+                // Regular command
+                try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = self.previous().text });
+            }
         } else if (self.match(.Token_Forward)) {
             try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .forwarded = try self.parse_keypress() });
         } else if (self.match(.Token_Unbound)) {
@@ -468,10 +546,15 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
     }
 
     if (self.match(.Token_Command)) {
-        const cmd_token = self.previous();
-        const command = try self.parse_command(mappings, cmd_token);
-        defer self.allocator.free(command);
-        try mode.set_command(command);
+        if (self.peek_check(.Token_Reference)) {
+            // Empty command followed by reference
+            const command = try self.parse_command_reference();
+            defer self.allocator.free(command);
+            try mode.set_command(command);
+        } else {
+            // Regular command
+            try mode.set_command(self.previous().text);
+        }
     }
 
     if (try mappings.get_mode_or_create_default(mode_name)) |existing_mode| {
@@ -491,132 +574,188 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
     }
 }
 
-fn parse_command(self: *Parser, mappings: *Mappings, command_token: Token) ![]const u8 {
-    const command_text = command_token.text;
-
-    // Create a tokenizer for the command text
-    var cmd_tokenizer = try Tokenizer.init(command_text);
-
-    // Get first token - should be @command_name or regular command
-    const first_token = cmd_tokenizer.get_token() orelse {
-        return try self.allocator.dupe(u8, command_text);
-    };
-
-    // Check if it's a command invocation
-    if (first_token.type == .Token_Reference) {
-        const command_name = first_token.text;
-
-        // Look up the command definition
-        const cmd_def = mappings.command_defs.get(command_name) orelse {
-            // Command not found - return copy of original text
-            return try self.allocator.dupe(u8, command_text);
-        };
-
-        // Check for opening parenthesis
-        const paren_token = cmd_tokenizer.get_token();
-        if (paren_token != null and paren_token.?.type == .Token_BeginTuple) {
-            // Parse arguments
-            var args = std.ArrayList([]const u8).init(self.allocator);
-            defer args.deinit();
-            defer for (args.items) |arg| {
-                self.allocator.free(arg);
-            };
-
-            while (true) {
-                const arg_token = cmd_tokenizer.get_token() orelse break;
-
-                if (arg_token.type == .Token_EndTuple) {
-                    break;
-                }
-
-                if (arg_token.type == .Token_String) {
-                    const processed_arg = try self.processString(arg_token.text);
-                    try args.append(processed_arg);
-
-                    // Check for comma or closing paren
-                    const next_token = cmd_tokenizer.get_token() orelse {
-                        const msg = try std.fmt.allocPrint(self.allocator, "Unterminated argument list for command '@{s}'", .{command_name});
-                        defer self.allocator.free(msg);
-                        self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
-                        return error.ParseErrorOccurred;
-                    };
-
-                    if (next_token.type == .Token_EndTuple) {
-                        break;
-                    } else if (next_token.type != .Token_Comma) {
-                        const msg = try std.fmt.allocPrint(self.allocator, "Expected ',' or ')' after argument in command '@{s}', found '{s}'", .{ command_name, @tagName(next_token.type) });
-                        defer self.allocator.free(msg);
-                        self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
-                        return error.ParseErrorOccurred;
-                    }
-                } else {
-                    const msg = try std.fmt.allocPrint(self.allocator, "Command arguments must be enclosed in double quotes in '@{s}'", .{command_name});
-                    defer self.allocator.free(msg);
-                    self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
-                    return error.ParseErrorOccurred;
-                }
-            }
-
-            // Validate argument count
-            if (args.items.len != cmd_def.max_placeholder) {
-                const msg = if (cmd_def.max_placeholder == 0)
-                    try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects no arguments but {d} provided", .{ command_name, args.items.len })
-                else if (args.items.len < cmd_def.max_placeholder)
-                    try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but only {d} provided", .{ command_name, cmd_def.max_placeholder, args.items.len })
-                else
-                    try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but {d} provided", .{ command_name, cmd_def.max_placeholder, args.items.len });
-                defer self.allocator.free(msg);
-
-                self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
-                return error.ParseErrorOccurred;
-            }
-
-            // Expand the template
-            var result = std.ArrayList(u8).init(self.allocator);
-            errdefer result.deinit();
-
-            var i: usize = 0;
-            while (i < cmd_def.template.len) {
-                if (i + 3 < cmd_def.template.len and
-                    cmd_def.template[i] == '{' and cmd_def.template[i + 1] == '{')
-                {
-                    // Found placeholder start
-                    var j = i + 2;
-                    var num: u8 = 0;
-                    while (j < cmd_def.template.len and cmd_def.template[j] >= '0' and cmd_def.template[j] <= '9') : (j += 1) {
-                        num = num * 10 + (cmd_def.template[j] - '0');
-                    }
-                    if (j + 1 < cmd_def.template.len and
-                        cmd_def.template[j] == '}' and cmd_def.template[j + 1] == '}')
-                    {
-                        // Valid placeholder
-                        if (num > 0 and num <= args.items.len) {
-                            try result.appendSlice(args.items[num - 1]);
-                        }
-                        i = j + 2;
-                        continue;
-                    }
-                }
-                try result.append(cmd_def.template[i]);
-                i += 1;
-            }
-
-            return try result.toOwnedSlice();
-        } else if (cmd_def.max_placeholder > 0) {
-            // Error: command expects arguments but none provided
-            const msg = try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but none provided", .{ command_name, cmd_def.max_placeholder });
-            defer self.allocator.free(msg);
-
-            self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
-            return error.ParseErrorOccurred;
-        } else {
-            // No arguments needed, return a copy of the template
-            return try self.allocator.dupe(u8, cmd_def.template);
-        }
+fn parse_command_reference(self: *Parser) ![]const u8 {
+    // We expect a Token_Reference
+    if (!self.match(.Token_Reference)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected command reference", self.current_file_path);
+        return error.ParseErrorOccurred;
     }
 
-    // Not a command reference, return a copy
-    return try self.allocator.dupe(u8, command_text);
+    const ref_token = self.previous();
+    const command_name = ref_token.text;
+
+    // Look up the command definition
+    const cmd_def = self.command_defs.get(command_name) orelse {
+        // Command not found - report error
+        const msg = try std.fmt.allocPrint(self.allocator, "Command '@{s}' not found. Did you forget to define it with '.define {s} : ...'?", .{ command_name, command_name });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, ref_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+
+    // Check for opening parenthesis
+    if (self.match(.Token_BeginTuple)) {
+        // Parse arguments
+        var args = std.ArrayList([]const u8).init(self.allocator);
+        defer args.deinit();
+        defer for (args.items) |arg| {
+            self.allocator.free(arg);
+        };
+
+        while (true) {
+            if (self.match(.Token_EndTuple)) {
+                break;
+            }
+
+            if (self.match(.Token_String)) {
+                const arg_token = self.previous();
+                const processed_arg = try self.processString(arg_token.text);
+                try args.append(processed_arg);
+
+                // Check for comma or closing paren
+                if (self.peek_check(.Token_EndTuple)) {
+                    continue;
+                } else if (!self.match(.Token_Comma)) {
+                    const token = self.peek() orelse self.previous();
+                    const msg = try std.fmt.allocPrint(self.allocator, "Expected ',' or ')' after argument in command '@{s}'", .{command_name});
+                    defer self.allocator.free(msg);
+                    self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+                    return error.ParseErrorOccurred;
+                }
+            } else {
+                const token = self.peek() orelse self.previous();
+                const msg = try std.fmt.allocPrint(self.allocator, "Command arguments must be enclosed in double quotes in '@{s}'", .{command_name});
+                defer self.allocator.free(msg);
+                self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+        }
+
+        // Validate argument count
+        if (args.items.len != cmd_def.max_placeholder) {
+            const msg = if (cmd_def.max_placeholder == 0)
+                try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects no arguments but {d} provided", .{ command_name, args.items.len })
+            else if (args.items.len < cmd_def.max_placeholder)
+                try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but only {d} provided", .{ command_name, cmd_def.max_placeholder, args.items.len })
+            else
+                try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but {d} provided", .{ command_name, cmd_def.max_placeholder, args.items.len });
+            defer self.allocator.free(msg);
+
+            self.error_info = try ParseError.fromToken(self.allocator, ref_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        // Expand the template using pre-parsed parts
+        var result = std.ArrayList(u8).init(self.allocator);
+        errdefer result.deinit();
+
+        for (cmd_def.parts) |part| {
+            switch (part) {
+                .text => |text| try result.appendSlice(text),
+                .placeholder => |num| {
+                    if (num <= args.items.len) {
+                        try result.appendSlice(args.items[num - 1]);
+                    }
+                    // Note: placeholders > args.len are silently ignored
+                },
+            }
+        }
+
+        return try result.toOwnedSlice();
+    } else if (cmd_def.max_placeholder > 0) {
+        // Error: command expects arguments but none provided
+        const msg = try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but none provided", .{ command_name, cmd_def.max_placeholder });
+        defer self.allocator.free(msg);
+
+        self.error_info = try ParseError.fromToken(self.allocator, ref_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    } else {
+        // No arguments needed, build from parts
+        var result = std.ArrayList(u8).init(self.allocator);
+        errdefer result.deinit();
+
+        for (cmd_def.parts) |part| {
+            switch (part) {
+                .text => |text| try result.appendSlice(text),
+                .placeholder => {}, // Should not have placeholders if max_placeholder is 0
+            }
+        }
+
+        return try result.toOwnedSlice();
+    }
+}
+
+fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !CommandDef {
+    var parts = std.ArrayList(CommandDef.Part).init(self.allocator);
+    errdefer {
+        for (parts.items) |part| {
+            part.deinit(self.allocator);
+        }
+        parts.deinit();
+    }
+
+    var max_placeholder: u8 = 0;
+    var pos: usize = 0;
+
+    while (pos < template.len) {
+        // Look for placeholder start
+        if (pos + 3 < template.len and template[pos] == '{' and template[pos + 1] == '{') {
+            // Find the end
+            var j = pos + 2;
+            while (j < template.len and template[j] != '}') : (j += 1) {}
+
+            if (j + 1 < template.len and template[j] == '}' and template[j + 1] == '}') {
+                // Found a placeholder
+                const num_str = template[pos + 2 .. j];
+                if (num_str.len == 0) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Invalid placeholder '{{{{}}}}' in command template. Placeholders must be numbers like {{{{1}}}}, {{{{2}}}}, etc.", .{});
+                    defer self.allocator.free(msg);
+                    self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+                    return error.ParseErrorOccurred;
+                }
+
+                const num = std.fmt.parseInt(u8, num_str, 10) catch {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Invalid placeholder '{{{{{s}}}}}' in command template. Placeholders must be numbers like {{{{1}}}}, {{{{2}}}}, etc.", .{num_str});
+                    defer self.allocator.free(msg);
+                    self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+                    return error.ParseErrorOccurred;
+                };
+
+                if (num == 0) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Invalid placeholder '{{{{0}}}}' in command template. Placeholders must start from 1.", .{});
+                    defer self.allocator.free(msg);
+                    self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+                    return error.ParseErrorOccurred;
+                }
+
+                try parts.append(.{ .placeholder = num });
+                if (num > max_placeholder) {
+                    max_placeholder = num;
+                }
+                pos = j + 2;
+                continue;
+            }
+        }
+
+        // Not a placeholder, find next placeholder or end
+        var end = pos + 1;
+        while (end < template.len) : (end += 1) {
+            if (end + 1 < template.len and template[end] == '{' and template[end + 1] == '{') {
+                break;
+            }
+        }
+
+        // Add text part
+        const text = try self.allocator.dupe(u8, template[pos..end]);
+        try parts.append(.{ .text = text });
+        pos = end;
+    }
+
+    return CommandDef{
+        .parts = try parts.toOwnedSlice(),
+        .max_placeholder = max_placeholder,
+    };
 }
 
 fn parse_option(self: *Parser, mappings: *Mappings) !void {
@@ -636,35 +775,21 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         // Check if this is a command definition or process group
         if (self.match(.Token_Command)) {
             // Command definition: define name : command
-            const command_template = self.previous().text;
+            const command_token = self.previous();
+            const command_template = command_token.text;
 
-            // Scan template for placeholders and find max placeholder number
-            var max_placeholder: u8 = 0;
-            var i: usize = 0;
-            while (i < command_template.len - 3) : (i += 1) {
-                if (command_template[i] == '{' and command_template[i + 1] == '{') {
-                    // Found start of placeholder
-                    var j = i + 2;
-                    var num: u8 = 0;
-                    while (j < command_template.len and command_template[j] >= '0' and command_template[j] <= '9') : (j += 1) {
-                        num = num * 10 + (command_template[j] - '0');
-                    }
-                    if (j + 1 < command_template.len and command_template[j] == '}' and command_template[j + 1] == '}') {
-                        // Valid placeholder found
-                        if (num > max_placeholder) {
-                            max_placeholder = num;
-                        }
-                        i = j + 1; // Skip past the placeholder
-                    }
-                }
-            }
+            // Parse template into parts
+            var parsed = try self.parseCommandTemplate(command_template, command_token);
+            errdefer parsed.deinit(self.allocator);
 
-            try mappings.add_command_def(name, command_template, max_placeholder);
+            const owned_name = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(owned_name);
+
+            try self.command_defs.put(self.allocator, owned_name, parsed);
         } else if (self.match(.Token_BeginList)) {
             // Process group definition: define name ["app1", "app2"]
             var process_list = std.ArrayList([]const u8).init(self.allocator);
-            defer process_list.deinit();
-            defer for (process_list.items) |process| {
+            errdefer for (process_list.items) |process| {
                 self.allocator.free(process);
             };
 
@@ -682,7 +807,12 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
                 return error.ParseErrorOccurred;
             }
 
-            try mappings.add_process_group(name, process_list.items);
+            const owned_name = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(owned_name);
+
+            // Just take ownership of the array we built
+            const owned_processes = try process_list.toOwnedSlice();
+            try self.process_groups.put(self.allocator, owned_name, owned_processes);
         } else {
             const token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ':' for command definition or '[' for process group after name", self.current_file_path);
@@ -1013,7 +1143,7 @@ test "command definition without placeholders" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined
-    try std.testing.expect(mappings.command_defs.contains("focus_recent"));
+    try std.testing.expect(parser.command_defs.contains("focus_recent"));
 
     // Verify hotkey was created with expanded command
     try std.testing.expect(mappings.hotkey_map.count() == 1);
@@ -1043,8 +1173,8 @@ test "command definition with single placeholder" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined with correct max_placeholder
-    try std.testing.expect(mappings.command_defs.contains("yabai_focus"));
-    const cmd_def = mappings.command_defs.get("yabai_focus").?;
+    try std.testing.expect(parser.command_defs.contains("yabai_focus"));
+    const cmd_def = parser.command_defs.get("yabai_focus").?;
     try std.testing.expectEqual(@as(u8, 1), cmd_def.max_placeholder);
 
     // Verify hotkeys were created
@@ -1079,8 +1209,8 @@ test "command definition with multiple placeholders" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined with correct max_placeholder
-    try std.testing.expect(mappings.command_defs.contains("window_action"));
-    const cmd_def = mappings.command_defs.get("window_action").?;
+    try std.testing.expect(parser.command_defs.contains("window_action"));
+    const cmd_def = parser.command_defs.get("window_action").?;
     try std.testing.expectEqual(@as(u8, 2), cmd_def.max_placeholder);
 
     // Verify hotkeys were created
@@ -1115,7 +1245,7 @@ test "command definition with repeated placeholders" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined
-    try std.testing.expect(mappings.command_defs.contains("notify"));
+    try std.testing.expect(parser.command_defs.contains("notify"));
 
     // Verify hotkey was created
     try std.testing.expect(mappings.hotkey_map.count() == 1);
@@ -1204,17 +1334,14 @@ test "command definition error: undefined command" {
     const content =
         \\cmd - h : @undefined_command("arg")
     ;
-    try parser.parse(&mappings, content);
 
-    // Should create hotkey with unexpanded command text
-    try std.testing.expect(mappings.hotkey_map.count() == 1);
+    // Should fail with ParseError
+    try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
-    // Verify command not expanded (returned as-is)
-    const ctx = Hotkey.KeyboardLookupContext{};
-    const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_H };
-    const hotkey = mappings.hotkey_map.getKeyAdapted(keypress, ctx).?;
-    const cmd = hotkey.find_command_for_process("").?;
-    try std.testing.expectEqualSlices(u8, "@undefined_command(\"arg\")", cmd.command);
+    // Verify error message
+    const error_info = parser.getError().?;
+    try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Command '@undefined_command' not found"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, ".define undefined_command"));
 }
 
 test "command definition error: unquoted arguments" {
@@ -1255,7 +1382,7 @@ test "command definition with escape sequences" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined and hotkey created
-    try std.testing.expect(mappings.command_defs.contains("notify"));
+    try std.testing.expect(parser.command_defs.contains("notify"));
     try std.testing.expect(mappings.hotkey_map.count() == 1);
 
     // Verify escape sequences are processed correctly
@@ -1283,7 +1410,7 @@ test "command definition with comma-separated arguments" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined and hotkeys created
-    try std.testing.expect(mappings.command_defs.contains("resize_win"));
+    try std.testing.expect(parser.command_defs.contains("resize_win"));
     try std.testing.expect(mappings.hotkey_map.count() == 2);
 
     // Verify commands expanded correctly
@@ -1316,7 +1443,7 @@ test "command definition with whitespace handling" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined and hotkeys created
-    try std.testing.expect(mappings.command_defs.contains("toggle_app"));
+    try std.testing.expect(parser.command_defs.contains("toggle_app"));
     try std.testing.expect(mappings.hotkey_map.count() == 2);
 
     // Verify whitespace is trimmed from arguments
@@ -1343,7 +1470,7 @@ test "command definition complex placeholders" {
     try parser.parse(&mappings, content);
 
     // Verify max_placeholder is correctly detected as 3
-    const cmd_def = mappings.command_defs.get("complex").?;
+    const cmd_def = parser.command_defs.get("complex").?;
     try std.testing.expectEqual(@as(u8, 3), cmd_def.max_placeholder);
 
     // Verify placeholders expanded in correct order
@@ -1373,7 +1500,7 @@ test "process group in hotkey with command expansion" {
     try parser.parse(&mappings, content);
 
     // Verify command was defined and hotkey created
-    try std.testing.expect(mappings.command_defs.contains("toggle"));
+    try std.testing.expect(parser.command_defs.contains("toggle"));
     try std.testing.expect(mappings.hotkey_map.count() == 1);
 
     // Verify commands expanded for different processes
@@ -1386,4 +1513,124 @@ test "process group in hotkey with command expansion" {
 
     const chrome_cmd = hotkey.find_command_for_process("chrome").?;
     try std.testing.expectEqualSlices(u8, "open -a \"Google Chrome\"", chrome_cmd.command);
+}
+
+test "error on command invocation in process list" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Try to use command invocation as process list entry - should fail
+    const content =
+        \\.define toggle : open -a "{{1}}"
+        \\cmd - a [
+        \\    @toggle("Firefox") : echo "This should fail"
+        \\]
+    ;
+
+    // Should fail with ParseError
+    try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
+
+    // Verify error message
+    const error_info = parser.getError().?;
+    try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Command invocation"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "not allowed here"));
+}
+
+test "error on undefined process group in process list" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Try to use undefined process group - should fail
+    const content =
+        \\.define toggle : open -a "{{1}}"
+        \\cmd - a [
+        \\    @toggle : echo "This should fail"
+        \\]
+    ;
+
+    // Should fail with ParseError
+    try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
+
+    // Verify error message
+    const error_info = parser.getError().?;
+    try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Undefined process group"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "@toggle"));
+}
+
+test "valid process group in process list" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Define process group and use it correctly
+    const content =
+        \\.define browsers ["Firefox", "Chrome", "Safari"]
+        \\cmd - b [
+        \\    @browsers : echo "Browser hotkey"
+        \\    * : echo "Default"
+        \\]
+    ;
+
+    try parser.parse(&mappings, content);
+
+    // Should parse successfully
+    try std.testing.expect(mappings.hotkey_map.count() == 1);
+
+    // Verify commands are set for all browsers
+    const ctx = Hotkey.KeyboardLookupContext{};
+    const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_B };
+    const hotkey = mappings.hotkey_map.getKeyAdapted(keypress, ctx).?;
+
+    const firefox_cmd = hotkey.find_command_for_process("Firefox").?;
+    try std.testing.expectEqualSlices(u8, "echo \"Browser hotkey\"", firefox_cmd.command);
+
+    const chrome_cmd = hotkey.find_command_for_process("Chrome").?;
+    try std.testing.expectEqualSlices(u8, "echo \"Browser hotkey\"", chrome_cmd.command);
+
+    const safari_cmd = hotkey.find_command_for_process("Safari").?;
+    try std.testing.expectEqualSlices(u8, "echo \"Browser hotkey\"", safari_cmd.command);
+
+    const default_cmd = hotkey.find_command_for_process("other_app").?;
+    try std.testing.expectEqualSlices(u8, "echo \"Default\"", default_cmd.command);
+}
+
+test "invalid placeholder in command definition" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test various invalid placeholders
+    const test_cases = .{
+        .{ .content = ".define bad : echo {{a}}", .expected_error = "Invalid placeholder '{{a}}'" },
+        .{ .content = ".define bad : echo {{}}", .expected_error = "Invalid placeholder '{{}}'" },
+        .{ .content = ".define bad : echo {{0}}", .expected_error = "Invalid placeholder '{{0}}'" },
+        .{ .content = ".define bad : echo {{1a}}", .expected_error = "Invalid placeholder '{{1a}}'" },
+        .{ .content = ".define bad : echo {{-1}}", .expected_error = "Invalid placeholder '{{-1}}'" },
+    };
+
+    inline for (test_cases) |test_case| {
+        parser.clearError();
+
+        // Should fail with ParseError
+        const result = parser.parse(&mappings, test_case.content);
+        try std.testing.expectError(error.ParseErrorOccurred, result);
+
+        // Verify error message contains expected text
+        const error_info = parser.getError().?;
+        try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, test_case.expected_error));
+    }
 }

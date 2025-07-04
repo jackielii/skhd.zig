@@ -151,10 +151,15 @@ pub fn get_token(self: *Tokenizer) ?Token {
                 token.text = "::";
             } else {
                 self.skipWhitespace();
-                token.line = self.line;
-                token.cursor = self.cursor;
-                token.type = .Token_Command;
-                token.text = self.acceptCommand();
+                const next = self.peekRune() orelse return null;
+                if (next[0] != '@') {
+                    token.line = self.line;
+                    token.cursor = self.cursor;
+                    token.type = .Token_Command;
+                    token.text = self.acceptCommand();
+                } else {
+                    token = self.get_token() orelse return null;
+                }
             }
         },
         '|' => {
@@ -446,6 +451,54 @@ test "tokenize command invocations" {
                 .{ .type = .Token_String, .text = "arg1" },
                 .{ .type = .Token_Comma, .text = "," },
                 .{ .type = .Token_String, .text = "arg2" },
+                .{ .type = .Token_EndTuple, .text = ")" },
+            },
+        },
+    };
+
+    inline for (test_cases) |test_case| {
+        var tokenizer = try init(test_case.input);
+
+        inline for (test_case.expected) |expected| {
+            const token = tokenizer.get_token();
+            try std.testing.expect(token != null);
+            try std.testing.expectEqual(expected.type, token.?.type);
+            try std.testing.expectEqualStrings(expected.text, token.?.text);
+        }
+
+        // Ensure no more tokens
+        const final_token = tokenizer.get_token();
+        try std.testing.expect(final_token == null);
+    }
+}
+
+test "tokenize command with colon and reference" {
+    // Test tokenizing : @command_name(args)
+    const test_cases = .{
+        .{
+            .input = ": @toggle(\"Firefox\")",
+            .expected = &[_]struct { type: TokenType, text: []const u8 }{
+                .{ .type = .Token_Reference, .text = "toggle" },
+                .{ .type = .Token_BeginTuple, .text = "(" },
+                .{ .type = .Token_String, .text = "Firefox" },
+                .{ .type = .Token_EndTuple, .text = ")" },
+            },
+        },
+        .{
+            .input = ": echo hello",
+            .expected = &[_]struct { type: TokenType, text: []const u8 }{
+                .{ .type = .Token_Command, .text = "echo hello" },
+            },
+        },
+        .{
+            .input = "cmd - h : @yabai_focus(\"west\")",
+            .expected = &[_]struct { type: TokenType, text: []const u8 }{
+                .{ .type = .Token_Modifier, .text = "cmd" },
+                .{ .type = .Token_Dash, .text = "-" },
+                .{ .type = .Token_Key, .text = "h" },
+                .{ .type = .Token_Reference, .text = "yabai_focus" },
+                .{ .type = .Token_BeginTuple, .text = "(" },
+                .{ .type = .Token_String, .text = "west" },
                 .{ .type = .Token_EndTuple, .text = ")" },
             },
         },

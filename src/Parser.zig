@@ -85,8 +85,6 @@ pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, fi
 
     _ = self.advance();
     while (self.peek()) |token| {
-        // Debug: print token info
-        // std.debug.print("Parser main loop: token {s}: '{s}' at line {d}\n", .{ @tagName(token.type), token.text, token.line });
         switch (token.type) {
             .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key, .Token_Activate => {
                 try self.parse_hotkey(mappings);
@@ -125,12 +123,6 @@ fn advance(self: *Parser) void {
 fn peek_check(self: *Parser, typ: Tokenizer.TokenType) bool {
     const token = self.peek() orelse return false;
     return token.type == typ;
-}
-
-/// Check if next token is a process group reference (@name)
-fn peekProcessGroup(self: *Parser) bool {
-    const token = self.peek() orelse return false;
-    return token.type == .Token_Reference;
 }
 
 /// match next token and move over it
@@ -226,7 +218,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .forwarded = try self.parse_keypress() });
     } else if (self.match(.Token_Command)) {
         const token = self.previous();
-        const command = try self.expandCommand(mappings, token);
+        const command = try self.parse_command(mappings, token);
         defer self.allocator.free(command);
         try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = command });
     } else if (self.match(.Token_BeginList)) {
@@ -379,7 +371,7 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         defer self.allocator.free(process_name);
         if (self.match(.Token_Command)) {
             const token = self.previous();
-            const command = try self.expandCommand(mappings, token);
+            const command = try self.parse_command(mappings, token);
             defer self.allocator.free(command);
             try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
         } else if (self.match(.Token_Forward)) {
@@ -392,7 +384,7 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
             return error.ParseErrorOccurred;
         }
         try self.parse_proc_list(mappings, hotkey);
-    } else if (self.peekProcessGroup()) {
+    } else if (self.peek_check(.Token_Reference)) {
         // Handle @group_name reference
         _ = self.advance();
         const group_token = self.previous();
@@ -404,7 +396,7 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
             if (self.match(.Token_Command)) {
                 // Apply same command to all processes in the group
                 const cmd_token = self.previous();
-                const command = try self.expandCommand(mappings, cmd_token);
+                const command = try self.parse_command(mappings, cmd_token);
                 defer self.allocator.free(command);
                 for (processes) |process_name| {
                     try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
@@ -433,7 +425,7 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     } else if (self.match(.Token_Wildcard)) {
         if (self.match(.Token_Command)) {
             const token = self.previous();
-            const command = try self.expandCommand(mappings, token);
+            const command = try self.parse_command(mappings, token);
             defer self.allocator.free(command);
             try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = command });
         } else if (self.match(.Token_Forward)) {
@@ -477,7 +469,7 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
 
     if (self.match(.Token_Command)) {
         const cmd_token = self.previous();
-        const command = try self.expandCommand(mappings, cmd_token);
+        const command = try self.parse_command(mappings, cmd_token);
         defer self.allocator.free(command);
         try mode.set_command(command);
     }
@@ -499,7 +491,7 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
     }
 }
 
-fn expandCommand(self: *Parser, mappings: *Mappings, command_token: Token) ![]const u8 {
+fn parse_command(self: *Parser, mappings: *Mappings, command_token: Token) ![]const u8 {
     const command_text = command_token.text;
 
     // Create a tokenizer for the command text

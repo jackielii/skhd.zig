@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6] - 2025-01-04
+
+### Added
+- **Command definitions feature** with `.define` directive for reusable command templates
+  - Support for placeholders (`{{1}}`, `{{2}}`, etc.) in command templates
+  - Reference commands with `@command_name("arg1", "arg2")` syntax
+  - Reduces configuration duplication and improves maintainability
+- Enhanced error handling for command definition parsing with clear error messages
+
+### Changed
+- Refactored tokenizer to clean up token text representation
+- Optimized command definition storage by moving it directly to Parser
+- Updated documentation to include command definition examples
+
+### Fixed
+- Command definition parsing now properly handles escaped characters in templates
+- Improved error reporting for invalid placeholder syntax
+
 ## [0.0.5] - 2025-01-02
 
 ### Changed
@@ -114,7 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.5...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.6...HEAD
+[0.0.6]: https://github.com/jackielii/skhd.zig/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/jackielii/skhd.zig/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/jackielii/skhd.zig/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/jackielii/skhd.zig/compare/v0.0.2...v0.0.3

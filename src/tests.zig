@@ -568,7 +568,7 @@ test "Parser error messages" {
     try testing.expectError(error.ParseErrorOccurred, err7);
     try testing.expect(parser.getError() != null);
     const parse_err7 = parser.getError().?;
-    try testing.expect(std.mem.containsAtLeast(u8, parse_err7.message, 1, "Unknown option '.unknown_option'"));
+    try testing.expect(std.mem.containsAtLeast(u8, parse_err7.message, 1, "Unknown option 'unknown_option'"));
 }
 
 test "Parser error message formatting" {

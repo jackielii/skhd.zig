@@ -35,10 +35,12 @@ pub const TokenType = enum {
     Token_Wildcard,
     Token_String,
     Token_Option,
-    Token_ProcessGroup,
+    Token_Reference,
 
     Token_BeginList,
     Token_EndList,
+    Token_BeginTuple,
+    Token_EndTuple,
 
     Token_Unknown,
 };
@@ -97,14 +99,15 @@ pub fn get_token(self: *Tokenizer) ?Token {
         ',' => token.type = .Token_Comma,
         '<' => token.type = .Token_Insert,
         '@' => {
-            // Check if this is a process group reference or capture
+            // Check if this is followed by an identifier
             const next = self.peekRune();
             if (next != null and ascii.isAlphabetic(next.?[0])) {
-                token.type = .Token_ProcessGroup;
-                const start = self.pos - 1; // Include the @
-                _ = self.acceptIdentifier();
-                token.text = self.buffer[start..self.pos];
+                // It's a reference like @command_name or @group_name
+                token.type = .Token_Reference;
+                // Don't include the @ in the token text
+                token.text = self.acceptIdentifier();
             } else {
+                // It's just @ (used for capture in mode declarations)
                 token.type = .Token_Capture;
             }
         },
@@ -112,11 +115,12 @@ pub fn get_token(self: *Tokenizer) ?Token {
         '*' => token.type = .Token_Wildcard,
         '[' => token.type = .Token_BeginList,
         ']' => token.type = .Token_EndList,
+        '(' => token.type = .Token_BeginTuple,
+        ')' => token.type = .Token_EndTuple,
         '.' => {
             token.type = .Token_Option;
-            const start = self.pos - 1; // Include the dot
-            _ = self.acceptIdentifier();
-            token.text = self.buffer[start..self.pos];
+            // Don't include the . in the token text
+            token.text = self.acceptIdentifier();
         },
         '"' => {
             token.type = .Token_String;
@@ -404,13 +408,63 @@ test "tokenize option" {
     const token1 = tokenizer.get_token();
     try std.testing.expect(token1 != null);
     try std.testing.expectEqual(TokenType.Token_Option, token1.?.type);
-    try std.testing.expectEqualStrings(".shell", token1.?.text);
+    try std.testing.expectEqualStrings("shell", token1.?.text);
 
     // Second token should be the string
     const token2 = tokenizer.get_token();
     try std.testing.expect(token2 != null);
     try std.testing.expectEqual(TokenType.Token_String, token2.?.type);
     try std.testing.expectEqualStrings("/bin/zsh", token2.?.text);
+}
+
+test "tokenize command invocations" {
+    // Test tokenizing command invocations with the new approach
+    const test_cases = .{
+        .{
+            .input = "@toggle(\"Firefox\")",
+            .expected = &[_]struct { type: TokenType, text: []const u8 }{
+                .{ .type = .Token_Reference, .text = "toggle" },
+                .{ .type = .Token_BeginTuple, .text = "(" },
+                .{ .type = .Token_String, .text = "Firefox" },
+                .{ .type = .Token_EndTuple, .text = ")" },
+            },
+        },
+        .{
+            .input = "@yabai_focus(\"west\")",
+            .expected = &[_]struct { type: TokenType, text: []const u8 }{
+                .{ .type = .Token_Reference, .text = "yabai_focus" },
+                .{ .type = .Token_BeginTuple, .text = "(" },
+                .{ .type = .Token_String, .text = "west" },
+                .{ .type = .Token_EndTuple, .text = ")" },
+            },
+        },
+        .{
+            .input = "@complex(\"arg1\", \"arg2\")",
+            .expected = &[_]struct { type: TokenType, text: []const u8 }{
+                .{ .type = .Token_Reference, .text = "complex" },
+                .{ .type = .Token_BeginTuple, .text = "(" },
+                .{ .type = .Token_String, .text = "arg1" },
+                .{ .type = .Token_Comma, .text = "," },
+                .{ .type = .Token_String, .text = "arg2" },
+                .{ .type = .Token_EndTuple, .text = ")" },
+            },
+        },
+    };
+
+    inline for (test_cases) |test_case| {
+        var tokenizer = try init(test_case.input);
+
+        inline for (test_case.expected) |expected| {
+            const token = tokenizer.get_token();
+            try std.testing.expect(token != null);
+            try std.testing.expectEqual(expected.type, token.?.type);
+            try std.testing.expectEqualStrings(expected.text, token.?.text);
+        }
+
+        // Ensure no more tokens
+        const final_token = tokenizer.get_token();
+        try std.testing.expect(final_token == null);
+    }
 }
 
 test "tokenize string with escape sequences" {

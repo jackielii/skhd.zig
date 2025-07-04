@@ -85,6 +85,8 @@ pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, fi
 
     _ = self.advance();
     while (self.peek()) |token| {
+        // Debug: print token info
+        // std.debug.print("Parser main loop: token {s}: '{s}' at line {d}\n", .{ @tagName(token.type), token.text, token.line });
         switch (token.type) {
             .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key, .Token_Activate => {
                 try self.parse_hotkey(mappings);
@@ -96,7 +98,9 @@ pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, fi
                 try self.parse_option(mappings);
             },
             else => {
-                self.error_info = try ParseError.fromToken(self.allocator, token, "Unexpected token", self.current_file_path);
+                const msg = try std.fmt.allocPrint(self.allocator, "Unexpected token type: {s}, text: '{s}'", .{ @tagName(token.type), token.text });
+                defer self.allocator.free(msg);
+                self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
                 return error.ParseErrorOccurred;
             },
         }
@@ -121,6 +125,12 @@ fn advance(self: *Parser) void {
 fn peek_check(self: *Parser, typ: Tokenizer.TokenType) bool {
     const token = self.peek() orelse return false;
     return token.type == typ;
+}
+
+/// Check if next token is a process group reference (@name)
+fn peekProcessGroup(self: *Parser) bool {
+    const token = self.peek() orelse return false;
+    return token.type == .Token_Reference;
 }
 
 /// match next token and move over it
@@ -362,6 +372,7 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
 }
 
 fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
+    // std.debug.print("parse_proc_list: entering\n", .{});
     if (self.match(.Token_String)) {
         const name_token = self.previous();
         const process_name = try self.processString(name_token.text);
@@ -381,18 +392,19 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
             return error.ParseErrorOccurred;
         }
         try self.parse_proc_list(mappings, hotkey);
-    } else if (self.match(.Token_ProcessGroup)) {
+    } else if (self.peekProcessGroup()) {
         // Handle @group_name reference
+        _ = self.advance();
         const group_token = self.previous();
-        const group_name = group_token.text[1..]; // Skip the @ prefix
+        const group_name = group_token.text;
 
         // Look up the process group in mappings
         if (mappings.process_groups.get(group_name)) |processes| {
             // Now parse the action (command, forward, or unbound)
             if (self.match(.Token_Command)) {
                 // Apply same command to all processes in the group
-                const token = self.previous();
-                const command = try self.expandCommand(mappings, token);
+                const cmd_token = self.previous();
+                const command = try self.expandCommand(mappings, cmd_token);
                 defer self.allocator.free(command);
                 for (processes) |process_name| {
                     try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .command = command });
@@ -407,8 +419,8 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
                     try hotkey.add_process_mapping(process_name, Hotkey.ProcessCommand{ .unbound = void{} });
                 }
             } else {
-                const token = self.peek() orelse self.previous();
-                self.error_info = try ParseError.fromToken(self.allocator, token, "Expected command ':', forward '|' or unbound '~' after process group", self.current_file_path);
+                const err_token = self.peek() orelse self.previous();
+                self.error_info = try ParseError.fromToken(self.allocator, err_token, "Expected command ':', forward '|' or unbound '~' after process group", self.current_file_path);
                 return error.ParseErrorOccurred;
             }
         } else {
@@ -489,13 +501,18 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
 
 fn expandCommand(self: *Parser, mappings: *Mappings, command_token: Token) ![]const u8 {
     const command_text = command_token.text;
-    // Check if the command starts with @
-    if (command_text.len > 0 and command_text[0] == '@') {
-        // Find the end of the command name
-        var name_end: usize = 1;
-        while (name_end < command_text.len and command_text[name_end] != '(') : (name_end += 1) {}
 
-        const command_name = command_text[1..name_end];
+    // Create a tokenizer for the command text
+    var cmd_tokenizer = try Tokenizer.init(command_text);
+
+    // Get first token - should be @command_name or regular command
+    const first_token = cmd_tokenizer.get_token() orelse {
+        return try self.allocator.dupe(u8, command_text);
+    };
+
+    // Check if it's a command invocation
+    if (first_token.type == .Token_Reference) {
+        const command_name = first_token.text;
 
         // Look up the command definition
         const cmd_def = mappings.command_defs.get(command_name) orelse {
@@ -503,8 +520,9 @@ fn expandCommand(self: *Parser, mappings: *Mappings, command_token: Token) ![]co
             return try self.allocator.dupe(u8, command_text);
         };
 
-        // Check if arguments are provided
-        if (name_end < command_text.len and command_text[name_end] == '(') {
+        // Check for opening parenthesis
+        const paren_token = cmd_tokenizer.get_token();
+        if (paren_token != null and paren_token.?.type == .Token_BeginTuple) {
             // Parse arguments
             var args = std.ArrayList([]const u8).init(self.allocator);
             defer args.deinit();
@@ -512,58 +530,43 @@ fn expandCommand(self: *Parser, mappings: *Mappings, command_token: Token) ![]co
                 self.allocator.free(arg);
             };
 
-            var i = name_end + 1;
-            while (i < command_text.len and command_text[i] != ')') {
-                // Skip whitespace
-                while (i < command_text.len and (command_text[i] == ' ' or command_text[i] == '\t')) : (i += 1) {}
+            while (true) {
+                const arg_token = cmd_tokenizer.get_token() orelse break;
 
-                if (i >= command_text.len or command_text[i] == ')') break;
-
-                // Expect opening quote
-                if (command_text[i] != '"') {
-                    const msg = try std.fmt.allocPrint(self.allocator, 
-                        "Command arguments must be enclosed in double quotes. Found '{c}' at position {d} in '{s}'", 
-                        .{ command_text[i], i + 1, command_text });
-                    defer self.allocator.free(msg);
-                    self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
-                    return error.ParseErrorOccurred;
+                if (arg_token.type == .Token_EndTuple) {
+                    break;
                 }
-                i += 1;
 
-                // Find closing quote
-                const arg_start = i;
-                while (i < command_text.len and command_text[i] != '"') : (i += 1) {
-                    // Skip escaped quotes
-                    if (command_text[i] == '\\' and i + 1 < command_text.len and command_text[i + 1] == '"') {
-                        i += 1;
+                if (arg_token.type == .Token_String) {
+                    const processed_arg = try self.processString(arg_token.text);
+                    try args.append(processed_arg);
+
+                    // Check for comma or closing paren
+                    const next_token = cmd_tokenizer.get_token() orelse {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Unterminated argument list for command '@{s}'", .{command_name});
+                        defer self.allocator.free(msg);
+                        self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
+                        return error.ParseErrorOccurred;
+                    };
+
+                    if (next_token.type == .Token_EndTuple) {
+                        break;
+                    } else if (next_token.type != .Token_Comma) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Expected ',' or ')' after argument in command '@{s}', found '{s}'", .{ command_name, @tagName(next_token.type) });
+                        defer self.allocator.free(msg);
+                        self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
+                        return error.ParseErrorOccurred;
                     }
-                }
-
-                if (i >= command_text.len) {
-                    const msg = try std.fmt.allocPrint(self.allocator, 
-                        "Unterminated string in command arguments. Missing closing quote for argument starting at position {d} in '{s}'", 
-                        .{ arg_start, command_text });
+                } else {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Command arguments must be enclosed in double quotes in '@{s}'", .{command_name});
                     defer self.allocator.free(msg);
                     self.error_info = try ParseError.fromToken(self.allocator, command_token, msg, self.current_file_path);
                     return error.ParseErrorOccurred;
-                }
-
-                const raw_arg = command_text[arg_start..i];
-                const processed_arg = try self.processString(raw_arg);
-                try args.append(processed_arg);
-                i += 1; // Skip closing quote
-
-                // Skip whitespace and optional comma
-                while (i < command_text.len and (command_text[i] == ' ' or command_text[i] == '\t')) : (i += 1) {}
-                if (i < command_text.len and command_text[i] == ',') {
-                    i += 1;
-                    while (i < command_text.len and (command_text[i] == ' ' or command_text[i] == '\t')) : (i += 1) {}
                 }
             }
 
             // Validate argument count
             if (args.items.len != cmd_def.max_placeholder) {
-                // Create error message
                 const msg = if (cmd_def.max_placeholder == 0)
                     try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects no arguments but {d} provided", .{ command_name, args.items.len })
                 else if (args.items.len < cmd_def.max_placeholder)
@@ -580,7 +583,7 @@ fn expandCommand(self: *Parser, mappings: *Mappings, command_token: Token) ![]co
             var result = std.ArrayList(u8).init(self.allocator);
             errdefer result.deinit();
 
-            i = 0;
+            var i: usize = 0;
             while (i < cmd_def.template.len) {
                 if (i + 3 < cmd_def.template.len and
                     cmd_def.template[i] == '{' and cmd_def.template[i + 1] == '{')
@@ -606,7 +609,6 @@ fn expandCommand(self: *Parser, mappings: *Mappings, command_token: Token) ![]co
                 i += 1;
             }
 
-            // Transfer ownership using toOwnedSlice
             return try result.toOwnedSlice();
         } else if (cmd_def.max_placeholder > 0) {
             // Error: command expects arguments but none provided
@@ -629,11 +631,11 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
     assert(self.match(.Token_Option));
     const option = self.previous().text;
 
-    if (std.mem.eql(u8, option, ".define")) {
-        // Parse name after .define
+    if (std.mem.eql(u8, option, "define")) {
+        // Parse name after define
         if (!self.match(.Token_Identifier)) {
             const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected name after '.define'", self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected name after 'define'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
 
@@ -641,7 +643,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
 
         // Check if this is a command definition or process group
         if (self.match(.Token_Command)) {
-            // Command definition: .define name : command
+            // Command definition: define name : command
             const command_template = self.previous().text;
 
             // Scan template for placeholders and find max placeholder number
@@ -667,7 +669,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
 
             try mappings.add_command_def(name, command_template, max_placeholder);
         } else if (self.match(.Token_BeginList)) {
-            // Process group definition: .define name ["app1", "app2"]
+            // Process group definition: define name ["app1", "app2"]
             var process_list = std.ArrayList([]const u8).init(self.allocator);
             defer process_list.deinit();
             defer for (process_list.items) |process| {
@@ -694,7 +696,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ':' for command definition or '[' for process group after name", self.current_file_path);
             return error.ParseErrorOccurred;
         }
-    } else if (std.mem.eql(u8, option, ".load")) {
+    } else if (std.mem.eql(u8, option, "load")) {
         if (self.match(.Token_String)) {
             const filename_token = self.previous();
             const filename = try self.processString(filename_token.text);
@@ -704,10 +706,10 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             });
         } else {
             const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected filename after '.load'", self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected filename after 'load'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
-    } else if (std.mem.eql(u8, option, ".blacklist")) {
+    } else if (std.mem.eql(u8, option, "blacklist")) {
         if (self.match(.Token_BeginList)) {
             while (self.match(.Token_String)) {
                 const token = self.previous();
@@ -722,21 +724,21 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             }
         } else {
             const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '[' after '.blacklist'", self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '[' after 'blacklist'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
-    } else if (std.mem.eql(u8, option, ".shell") or std.mem.eql(u8, option, ".SHELL")) {
+    } else if (std.mem.eql(u8, option, "shell") or std.mem.eql(u8, option, "SHELL")) {
         if (self.match(.Token_String)) {
             const shell_path = try self.processString(self.previous().text);
             defer self.allocator.free(shell_path);
             try mappings.set_shell(shell_path);
         } else {
             const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected shell path after '.shell'", self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected shell path after 'shell'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: .define, .load, .blacklist, .shell", .{option});
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell", .{option});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
         return error.ParseErrorOccurred;
@@ -808,32 +810,17 @@ test "Parse" {
     var mappings = try Mappings.init(alloc);
     defer mappings.deinit();
 
-    // try std.testing.expectError(error.@"Mode already exists in hotkey mode", parser.parse(&mappings, "default, default"));
-    //
-    // try std.testing.expectError(error.@"Mode not found", parser.parse(&mappings, "default, xxx"));
-    //
-    // const string = try std.fmt.allocPrint(alloc, "{}", .{mappings});
-    // defer alloc.free(string);
-    //
-    // // print("{s}\n", .{string});
-    // try std.testing.expectEqual(1, mappings.mode_map.count());
-
-    // var tokenizer = try Tokenizer.init("ctrl + shift - h :");
-    // while (tokenizer.get_token()) |token| {
-    //     print("token: {?}\n", .{token});
-    // }
-    // try parser.parse(&mappings, "default < ctrl + shift - b: echo");
-    // print("{s}\n", .{mappings});
-
     try parser.parse(&mappings,
-        \\ cmd + shift - h [
-        \\     "notepad.exe": echo
-        \\     "chrome.exe": foo
-        \\     "firefox.exe" | cmd + shift - h
-        \\     *: ~
-        \\ ]
+        \\cmd + shift - h [
+        \\    "notepad.exe": echo "notepad"
+        \\    "chrome.exe": echo "chrome"
+        \\    "firefox.exe" | cmd + shift - h
+        \\    *: ~
+        \\]
     );
-    // print("{s}\n", .{mappings});
+
+    // Verify the hotkey was created
+    try std.testing.expect(mappings.hotkey_map.count() == 1);
 }
 
 test "Parse mode decl" {

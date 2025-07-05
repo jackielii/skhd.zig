@@ -4,6 +4,8 @@ Simple Hotkey Daemon for macOS, ported from [skhd](https://github.com/koekeishiy
 
 This implementation is **fully compatible with the original skhd configuration format** - your existing `.skhdrc` files will work without modification. Additionally, it includes new features like process groups and command definitions (`.define`) for cleaner configs, key forwarding/remapping, and improved error reporting.
 
+📋 [View Changelog](CHANGELOG.md)
+
 ## Installation
 
 ### Homebrew

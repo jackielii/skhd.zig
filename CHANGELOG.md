@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7] - 2025-07-05
+
+### Fixed
+- **Accessibility permission check reliability** - Replaced unreliable event tap creation with `AXIsProcessTrusted()` API
+- `--status` command now correctly reports accessibility permission state
+- Fixed issue where permissions showed as "not granted" even when properly configured
+
+### Changed
+- Permission checking now uses the official macOS API for more accurate results
+
 ## [0.0.6] - 2025-07-04
 
 ### Added
@@ -132,7 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.6...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.7...HEAD
+[0.0.7]: https://github.com/jackielii/skhd.zig/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/jackielii/skhd.zig/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/jackielii/skhd.zig/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/jackielii/skhd.zig/compare/v0.0.3...v0.0.4

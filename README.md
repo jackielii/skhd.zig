@@ -11,7 +11,7 @@ This implementation is **fully compatible with the original skhd configuration f
 The easiest way to install skhd.zig:
 
 ```bash
-brew tap jackielii/homebrew-tap
+brew tap jackielii/tap
 brew install skhd-zig
 ```
 
@@ -19,7 +19,7 @@ brew install skhd-zig
 
 Download the latest release for your architecture:
 
-- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs (M1/M2/M3)
+- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs
 - `skhd-x86_64-macos.tar.gz` - For Intel Macs
 
 Extract and install:
@@ -28,6 +28,20 @@ Extract and install:
 tar -xzf skhd-*.tar.gz
 sudo cp skhd /usr/local/bin/
 ```
+
+### Development Builds from GitHub Actions
+
+If you need builds with different optimization levels (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall), you can download them directly from GitHub Actions:
+
+1. Go to the [Actions tab](https://github.com/jackielii/skhd.zig/actions) on GitHub
+2. Click on `CI` workflow in the left sidebar
+3. Click on the latest successful run
+4. Scroll down to the "Artifacts" section
+5. Download the build artifact for your desired optimization level:
+   - `skhd-Debug` - Debug build with full debugging symbols
+   - `skhd-ReleaseSafe` - Release build with safety checks and runtime safety
+   - `skhd-ReleaseFast` - Optimized for performance (recommended for daily use)
+   - `skhd-ReleaseSmall` - Optimized for binary size
 
 ### Build from Source
 
@@ -42,6 +56,34 @@ zig build -Doptimize=ReleaseFast
 # Install (copy to /usr/local/bin)
 sudo cp zig-out/bin/skhd /usr/local/bin/
 ```
+
+## Running as Service
+
+After installation, run skhd as a service for automatic startup:
+
+```bash
+# Install and start the service
+skhd --install-service
+skhd --start-service
+
+# Check if skhd is running properly
+skhd --status
+
+# Restart service (useful for restarting after giving accessibility permissions)
+skhd --restart-service
+
+# Stop service
+skhd --stop-service
+
+# Uninstall service
+skhd --uninstall-service
+```
+
+The service will:
+- Start automatically on login
+- Create logs at `/tmp/skhd_$USER.log`
+- Use your config from `~/.config/skhd/skhdrc` or `~/.skhdrc`
+- Automatically reload on config changes
 
 ## Features
 
@@ -112,7 +154,7 @@ zig build run -- -V -c ~/.config/skhd/skhdrc
 zig build test
 ```
 
-## Configuration
+## Configuration & Usage
 
 ### Default Configuration Locations
 
@@ -122,11 +164,38 @@ skhd.zig looks for configuration files in the following order:
 2. `~/.config/skhd/skhdrc`
 3. `~/.skhdrc`
 
-### Configuration Syntax
+The configuration syntax is fully compatible with the original skhd. See [SYNTAX.md](SYNTAX.md) for the complete syntax reference and grammar.
 
-The configuration syntax is fully compatible with the original skhd. See [SYNTAX.md](SYNTAX.md) for the complete syntax reference and grammar. Here's a quick overview:
+### Configuration Directives
 
-#### Basic Hotkey Syntax
+```bash
+# Use custom shell (skips interactive shell overhead)
+.shell "/bin/dash"
+
+# Blacklist applications (skip hotkey processing)
+.blacklist [
+    "dota2"
+    "Microsoft Remote Desktop"
+    "VMware Fusion"
+]
+
+# Load additional config files
+.load "~/.config/skhd/extra.skhdrc"
+
+# Define process groups for reuse (New in skhd.zig!)
+.define terminal_apps ["kitty", "wezterm", "terminal"]
+.define native_apps ["kitty", "wezterm", "chrome", "whatsapp"]
+.define browser_apps ["chrome", "safari", "firefox", "edge"]
+
+# Define reusable commands with placeholders (New in skhd.zig!)
+.define yabai_focus : yabai -m window --focus {{1}} || yabai -m display --focus {{1}}
+.define yabai_swap : yabai -m window --swap {{1}} || (yabai -m window --display {{1}} && yabai -m display --focus {{1}})
+.define toggle_app : open -a "{{1}}" || osascript -e 'tell app "{{1}}" to quit'
+.define resize_window : yabai -m window --resize {{1}}:{{2}}:{{3}}
+.define toggle_scratchpad : yabai -m window --toggle {{1}} || open -a "{{2}}"
+```
+
+### Basic Hotkey Syntax
 
 ```bash
 # Basic format: modifier - key : command
@@ -141,7 +210,7 @@ alt - space : echo "Alt+Space"
 shift - f1 : echo "Shift+F1"
 ```
 
-#### Supported Modifiers
+### Supported Modifiers
 
 ```bash
 # Basic modifiers
@@ -162,7 +231,7 @@ hyper   # cmd + shift + alt + ctrl
 meh     # shift + alt + ctrl
 ```
 
-#### Special Keys
+### Special Keys
 
 ```bash
 # Navigation keys
@@ -194,7 +263,7 @@ brightness_up : echo "Brightness Up"
 brightness_down : echo "Brightness Down"
 ```
 
-#### Process-Specific Bindings
+### Process-Specific Bindings
 
 ```bash
 # Different commands for different applications
@@ -210,214 +279,198 @@ cmd - q [
     "terminal" ~  # Unbind Cmd+Q in Terminal (key is ignored)
     *          : echo "Quit other applications"
 ]
+
+# Using process groups (New in skhd.zig!)
+ctrl - backspace [
+    @terminal_apps ~       # All terminal apps handle natively
+    *              | alt - backspace  # Other apps: delete word
+]
+
+ctrl - left [
+    @terminal_apps ~       # All terminal apps handle natively
+    *              | alt - left       # Other apps: move word left
+]
+
+home [
+    @native_apps ~         # Native apps handle home key
+    *            | cmd - left       # Other apps: line start
+]
 ```
 
-#### Key Forwarding/Remapping
+### Key Forwarding/Remapping
 
 ```bash
-# Simple key remapping
+# Simple key remapping (vim-style navigation)
 ctrl - h | left        # Remap Ctrl+H to Left Arrow
 ctrl - j | down        # Remap Ctrl+J to Down Arrow
+ctrl - k | up          # Remap Ctrl+K to Up Arrow
+ctrl - l | right       # Remap Ctrl+L to Right Arrow
 
-# Process-specific forwarding
-home [
-    "kitty"    ~           # Let kitty handle Home key natively
-    "terminal" ~           # Let terminal handle Home key natively
-    *          | cmd - left # In other apps, send Cmd+Left instead
-]
+# Keyboard layout fixes
+0xa | 0x32             # UK keyboard § to `
+shift - 0xa | shift - 0x32  # shift - § to ~
 
-# Complex forwarding with modifiers
-ctrl - backspace [
-    "kitty"   ~                # Let kitty handle it
-    *         | alt - backspace # In other apps, send Alt+Backspace
-]
+# Function key navigation (for laptop keyboards)
+fn - j | down
+fn - k | up
+fn - h | left
+fn - l | right
+
+# Common number key remapping (bypass app shortcuts)
+# When you have cmd - number for yabai spaces,
+# and you still want the cmd - number to work in applications
+ctrl - 1 | cmd - 1
+ctrl - 2 | cmd - 2
+ctrl - 3 | cmd - 3
 ```
 
-#### Modal System
-
-```bash
-# Declare a mode
-:: window : echo "Entering window mode"
-
-# Switch to mode
-cmd - w ; window
-
-# Commands in mode (no modifiers needed)
-window < h : echo "Focus left window"
-window < j : echo "Focus down window"
-window < k : echo "Focus up window"
-window < l : echo "Focus right window"
-window < escape ; default  # Return to default mode
-
-# Mode with capture (@) - captures ALL keypresses
-:: vim @ : echo "Vim mode activated"
-cmd - v ; vim
-
-# In capture mode, even unbound keys are captured
-vim < i : echo "Insert mode"
-vim < escape ; default
-```
-
-#### Passthrough Mode
+### Passthrough Mode
 
 ```bash
 # Execute command but still send keypress to application
 cmd - p -> : echo "This runs but Cmd+P still goes to app"
 ```
 
-#### Configuration Directives
+### Modal Workflow with Visual Indicators
 
 ```bash
-# Use custom shell (skips interactive shell overhead)
-.shell "/bin/dash"
+# Window management mode with anybar visual indicator
+# Install anybar: brew install --cask anybar
+# Then run: open -n /Applications/AnyBar.app --args 1738
 
-# Blacklist applications (skip hotkey processing)
-.blacklist [
-    "dota2"
-    "Microsoft Remote Desktop"
-    "VMware Fusion"
-]
+# Define window management mode for warp/stack operations
+# Use anybar to indicate the mode: https://github.com/tonsky/AnyBar
+:: winmode @ : echo -n "red" | nc -4u -w0 localhost 1738
+:: default : echo -n "hollow" | nc -4u -w0 localhost 1738
 
-# Load additional config files
-.load "~/.config/skhd/extra.skhdrc"
+# Enter window mode with meh + m (shift + alt + ctrl + m)
+meh - m ; winmode
+winmode < escape ; default
+winmode < meh - m ; default
 
-# Define process groups for reuse (New in skhd.zig!)
-.define terminal_apps ["kitty", "wezterm", "terminal"]
-.define native_apps ["kitty", "wezterm", "chrome", "whatsapp"]
+# Focus operations - basic hjkl for focus
+winmode < h : yabai -m window --focus west || yabai -m display --focus west
+winmode < j : yabai -m window --focus south || yabai -m display --focus south
+winmode < k : yabai -m window --focus north || yabai -m display --focus north
+winmode < l : yabai -m window --focus east || yabai -m display --focus east
 
-# Define reusable commands with placeholders (New in skhd.zig!)
-.define yabai_focus : yabai -m window --focus {{1}} || yabai -m display --focus {{1}}
-.define toggle_app : open -a "{{1}}" || osascript -e 'tell app "{{1}}" to quit'
+# Move operations - shift + hjkl for moving
+winmode < shift - h : yabai -m window --move rel:-80:0
+winmode < shift - j : yabai -m window --move rel:0:80
+winmode < shift - k : yabai -m window --move rel:0:-80
+winmode < shift - l : yabai -m window --move rel:80:0
+
+# Warp operations - alt + shift + hjkl for warping
+winmode < alt + shift - h : yabai -m window --warp west
+winmode < alt + shift - j : yabai -m window --warp south
+winmode < alt + shift - k : yabai -m window --warp north
+winmode < alt + shift - l : yabai -m window --warp east
+
+# Stack operations - ctrl + shift + hjkl for stacking
+winmode < ctrl + shift - h : yabai -m window --stack west
+winmode < ctrl + shift - j : yabai -m window --stack south
+winmode < ctrl + shift - k : yabai -m window --stack north
+winmode < ctrl + shift - l : yabai -m window --stack east
+
+# Stack management shortcuts
+winmode < s : yabai -m window --insert stack  # Toggle stack mode
+winmode < u : yabai -m window --toggle float; yabai -m window --toggle float  # Unstack window
+winmode < n : yabai -m window --focus stack.next  # Navigate stack next
+winmode < p : yabai -m window --focus stack.prev  # Navigate stack prev
+
+# Resize submode
+winmode < r ; resize
+:: resize @ : echo -n "orange" | nc -4u -w0 localhost 1738
+resize < h : yabai -m window --resize left:-20:0
+resize < j : yabai -m window --resize bottom:0:20
+resize < k : yabai -m window --resize top:0:-20
+resize < l : yabai -m window --resize right:20:0
+resize < escape ; winmode
 ```
 
-## Usage Examples
-
-### Window Management
+### Window Management Example
 
 ```bash
-# Focus windows (traditional way)
-cmd - h : yabai -m window --focus west
-cmd - j : yabai -m window --focus south
-cmd - k : yabai -m window --focus north
-cmd - l : yabai -m window --focus east
-
-# Focus windows (using command definitions)
-.define yabai_focus : yabai -m window --focus {{1}} || yabai -m display --focus {{1}}
+# Focus windows using command definitions (New in skhd.zig!)
 cmd - h : @yabai_focus("west")
 cmd - j : @yabai_focus("south")
 cmd - k : @yabai_focus("north")
 cmd - l : @yabai_focus("east")
 
-# Move windows
-cmd + shift - h : yabai -m window --swap west
-cmd + shift - j : yabai -m window --swap south
-cmd + shift - k : yabai -m window --swap north
-cmd + shift - l : yabai -m window --swap east
+# Move/swap windows using command definitions
+cmd + shift - h : @yabai_swap("west")
+cmd + shift - j : @yabai_swap("south")
+cmd + shift - k : @yabai_swap("north")
+cmd + shift - l : @yabai_swap("east")
+
+# Resize windows using command definitions
+cmd + ctrl - h : @resize_window("left", "-20", "0")
+cmd + ctrl - l : @resize_window("right", "20", "0")
 
 # Switch spaces
 cmd - 1 : yabai -m space --focus 1
 cmd - 2 : yabai -m space --focus 2
 ```
 
-### Application Launching
+### Application Launching Example
 
 ```bash
-# Quick app launching
+# Quick app launching (traditional way)
 alt - return : open -a Terminal
 alt - b : open -a Safari
-alt - f : open -a Finder
-alt - c : open -a "Visual Studio Code"
+
+# Toggle apps using command definitions (New in skhd.zig!)
+alt - f : @toggle_app("Finder")
+alt - c : @toggle_app("Visual Studio Code")
+
+# Scratchpad apps with yabai (New in skhd.zig!)
+# In yabairc: yabai -m rule --add app="^YouTube Music$" scratchpad=music grid=11:11:1:1:9:9
+alt - m : @toggle_scratchpad("music", "YouTube Music")
+alt - n : @toggle_scratchpad("notes", "Notes")
 ```
 
-### Text Editing Enhancements
+### Text Editing Enhancements Example
 
 ```bash
-# Linux-style editing in macOS
-ctrl - left [
-    "terminal" ~           # Let terminal handle it
-    "kitty" ~             # Let kitty handle it
-    *       | alt - left  # In other apps, word left
-]
-
-# Home/End key fixes
-home [
-    "terminal" ~          # Let terminal handle it
-    *          | cmd - left # In other apps, go to line start
-]
-```
-
-### Using Process Groups (New in skhd.zig!)
-
-```bash
-# Define reusable process groups
-.define terminal_apps ["kitty", "wezterm", "terminal", "iterm2"]
-.define browser_apps ["chrome", "safari", "firefox", "edge"]
-.define native_apps ["kitty", "wezterm", "chrome", "whatsapp"]
-
-# Use process groups to reduce duplication
+# Linux-style word navigation and deletion
 ctrl - backspace [
-    @terminal_apps ~       # All terminal apps handle natively
-    *              | alt - backspace
+    @native_apps ~         # Terminal apps handle natively
+    *            | alt - backspace  # Other apps: delete word
 ]
 
 ctrl - left [
-    @terminal_apps ~       # All terminal apps handle natively
-    *              | alt - left
+    @native_apps ~         # Terminal apps handle natively
+    *            | alt - left       # Other apps: move word left
 ]
 
-# Multiple groups can be used
+ctrl - right [
+    @native_apps ~         # Terminal apps handle natively
+    *            | alt - right      # Other apps: move word right
+]
+
+# Home/End key behavior (with shift for selection)
 home [
-    @native_apps ~         # Native apps handle home key
-    *            | cmd - left
+    @native_apps ~         # Terminal apps handle natively
+    *            | cmd - left       # Other apps: line start
 ]
 
 shift - home [
-    @native_apps ~
-    @browser_apps ~        # Both native and browser apps
-    *             | cmd + shift - left
+    @native_apps ~         # Terminal apps handle natively
+    *            | cmd + shift - left  # Other apps: select to line start
+]
+
+# Ctrl+Home/End for document navigation
+ctrl - home [
+    @native_apps ~         # Terminal apps handle natively
+    *            | cmd - up         # Other apps: document start
+]
+
+ctrl - end [
+    @native_apps ~         # Terminal apps handle natively
+    *            | cmd - down       # Other apps: document end
 ]
 ```
 
-### Modal Workflow Example
-
-```bash
-# Window management mode
-:: window : echo ">>> Window Mode"
-cmd - w ; window
-
-window < h : yabai -m window --focus west
-window < j : yabai -m window --focus south
-window < k : yabai -m window --focus north
-window < l : yabai -m window --focus east
-
-# Resize submode
-window < r ; resize
-:: resize : echo ">>> Resize Mode"
-resize < h : yabai -m window --resize left:-20:0
-resize < l : yabai -m window --resize right:20:0
-resize < escape ; window
-
-window < escape ; default
-```
-
-## Running as Service
-
-```bash
-# Install service (creates ~/Library/LaunchAgents/com.koekeishiya.skhd.plist)
-skhd --install-service
-
-# Start service
-skhd --start-service
-
-# Restart service (useful after config changes)
-skhd --restart-service
-
-# Stop service
-skhd --stop-service
-
-# Uninstall service
-skhd --uninstall-service
-```
 
 ## Testing and Debugging
 
@@ -479,6 +532,7 @@ Key improvements over the original skhd:
 
 - Written in Zig for better memory safety and matching performance
 - **New**: Process groups with `.define` for cleaner configs
+- **New**: Command definitions with `.define` for reusable commands
 - Improved error reporting with detailed line numbers
 - Enhanced logging system
 

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.6] - 2025-01-04
+## [0.0.6] - 2025-07-04
 
 ### Added
 - **Command definitions feature** with `.define` directive for reusable command templates
@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Command definition parsing now properly handles escaped characters in templates
 - Improved error reporting for invalid placeholder syntax
 
-## [0.0.5] - 2025-01-02
+## [0.0.5] - 2025-07-02
 
 ### Changed
 - Improved service mode execution to always use fork/exec for better reliability
@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Import statement cleanup for better code organization
 - GitHub Actions workflow now directly triggers Homebrew tap updates
 
-## [0.0.4] - 2025-01-02
+## [0.0.4] - 2025-07-02
 
 ### Added
 - Comprehensive execution tracer with `-P/--profile` flag for performance analysis
@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - High CPU usage compared to original skhd implementation
 - Unnecessary system calls in hot path
 
-## [0.0.3] - 2025-01-01
+## [0.0.3] - 2025-07-01
 
 ### Added
 - `--start-service` now automatically installs/updates the service plist to ensure it uses the current binary
@@ -72,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Service management commands now provide better error messages and guidance
 - Homebrew service integration now works more reliably with proper binary path updates
 
-## [0.0.2] - 2025-01-01
+## [0.0.2] - 2025-07-01
 
 ### Fixed
 - Support for uppercase option names (.SHELL, .BLACKLIST) in configuration files
@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed release workflow permissions for uploading artifacts
 - Simplified release workflow to build natively for each architecture
 
-## [0.0.1] - 2025-01-01
+## [0.0.1] - 2025-07-01
 
 ### Added
 - Initial release of skhd.zig - a complete Zig port of skhd

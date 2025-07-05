@@ -8,24 +8,10 @@ extern "c" fn getpid() c_int;
 
 /// Check if the current process has accessibility permissions
 pub fn hasAccessibilityPermissions() bool {
-    // Try to create an event tap to check permissions
-    const mask: u32 = (1 << c.kCGEventKeyDown);
-    const tap = c.CGEventTapCreate(
-        c.kCGSessionEventTap,
-        c.kCGHeadInsertEventTap,
-        c.kCGEventTapOptionDefault,
-        mask,
-        null,
-        null,
-    );
-
-    if (tap == null) {
-        return false;
-    }
-
-    // Clean up
-    c.CFRelease(tap);
-    return true;
+    // Use the official macOS API to check accessibility permissions
+    // AXIsProcessTrusted() is the recommended way to check if the current
+    // process has been granted accessibility permissions by the user
+    return c.AXIsProcessTrusted() != 0;
 }
 
 /// PID file management

@@ -542,7 +542,6 @@ pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey
 ///     self.tracer.traceHotkeyFound(false);
 ///     return null;
 /// }
-
 /// Process a hotkey - single lookup that handles both forwarding and execution
 inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !bool {
     const mode = self.current_mode orelse return false;

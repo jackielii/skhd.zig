@@ -36,14 +36,13 @@ jobs:
         tar -czf skhd-${{ matrix.arch }}-macos.tar.gz skhd-${{ matrix.arch }}-macos
     
     - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./skhd-${{ matrix.arch }}-macos.tar.gz
-        asset_name: skhd-${{ matrix.arch }}-macos.tar.gz
-        asset_content_type: application/gzip
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release upload ${{ github.event.release.tag_name }} \
+          ./skhd-${{ matrix.arch }}-macos.tar.gz \
+          --repo ${{ github.repository }} \
+          --clobber
 
   update-homebrew:
     needs: build-release

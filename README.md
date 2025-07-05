@@ -33,11 +33,10 @@ sudo cp skhd /usr/local/bin/
 
 If you need builds with different optimization levels (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall), you can download them directly from GitHub Actions:
 
-1. Go to the [Actions tab](https://github.com/jackielii/skhd.zig/actions) on GitHub
-2. Click on `CI` workflow in the left sidebar
-3. Click on the latest successful run
-4. Scroll down to the "Artifacts" section
-5. Download the build artifact for your desired optimization level:
+1. Go to the [CI workflow](https://github.com/jackielii/skhd.zig/actions/workflows/ci.yml) in Actions tab
+2. Click on the latest successful run
+3. Scroll down to the "Artifacts" section
+4. Download the build artifact for your desired optimization level:
    - `skhd-Debug` - Debug build with full debugging symbols
    - `skhd-ReleaseSafe` - Release build with safety checks and runtime safety
    - `skhd-ReleaseFast` - Optimized for performance (recommended for daily use)

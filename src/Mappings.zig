@@ -80,6 +80,9 @@ pub fn set_shell(self: *Mappings, shell: []const u8) !void {
 }
 
 pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
+    if (self.blacklist.contains(key)) {
+        return error.BlacklistEntryAlreadyExists;
+    }
     const owned = try self.allocator.dupe(u8, key);
     try self.blacklist.put(self.allocator, owned, void{});
 }
@@ -139,8 +142,10 @@ pub fn get_or_create_mode(self: *Mappings, mode_name: []const u8) !*Mode {
 }
 
 pub fn put_mode(self: *Mappings, mode: Mode) !void {
+    if (self.mode_map.contains(mode.name)) {
+        return error.ModeAlreadyExists;
+    }
     const key = try self.allocator.dupe(u8, mode.name);
-    errdefer self.allocator.free(key);
     try self.mode_map.put(self.allocator, key, mode);
 }
 
@@ -165,4 +170,42 @@ test "format" {
     defer alloc.free(formatted);
     try std.testing.expect(formatted.len > 0);
     try std.testing.expect(mode != null);
+}
+
+test "add_blacklist returns error on duplicate" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // First add should succeed
+    try mappings.add_blacklist("firefox");
+
+    // Duplicate should fail
+    const result = mappings.add_blacklist("firefox");
+    try std.testing.expectError(error.BlacklistEntryAlreadyExists, result);
+
+    // Verify the original entry is still there
+    try std.testing.expect(mappings.blacklist.contains("firefox"));
+    try std.testing.expectEqual(@as(usize, 1), mappings.blacklist.count());
+}
+
+test "put_mode returns error on duplicate" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Create and add a mode
+    const mode1 = try Mode.init(alloc, "test_mode");
+    try mappings.put_mode(mode1);
+
+    // Try to add another mode with the same name
+    var mode2 = try Mode.init(alloc, "test_mode");
+    defer mode2.deinit(); // We need to clean this up since put_mode will fail
+
+    const result = mappings.put_mode(mode2);
+    try std.testing.expectError(error.ModeAlreadyExists, result);
+
+    // Verify the original mode is still there
+    try std.testing.expect(mappings.mode_map.contains("test_mode"));
+    try std.testing.expectEqual(@as(usize, 1), mappings.mode_map.count());
 }

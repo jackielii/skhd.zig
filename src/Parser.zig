@@ -55,8 +55,6 @@ pub const CommandDef = struct {
 };
 
 pub fn deinit(self: *Parser) void {
-    // self.allocator.free(self.filename);
-    // self.allocator.free(self.content);
     self.keycodes.deinit();
     for (self.load_directives.items) |directive| {
         self.allocator.free(directive.filename);
@@ -184,7 +182,7 @@ fn match(self: *Parser, typ: Tokenizer.TokenType) bool {
 }
 
 /// Process escape sequences in a string, replacing \\ with \ and \" with "
-fn processString(self: *Parser, str: []const u8) ![]const u8 {
+fn processStringOwned(self: *Parser, str: []const u8) ![]const u8 {
     var result = std.ArrayList(u8).init(self.allocator);
     errdefer result.deinit();
 
@@ -420,7 +418,7 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     // std.debug.print("parse_proc_list: entering\n", .{});
     if (self.match(.Token_String)) {
         const name_token = self.previous();
-        const process_name = try self.processString(name_token.text);
+        const process_name = try self.processStringOwned(name_token.text);
         defer self.allocator.free(process_name);
         if (self.match(.Token_Command)) {
             if (self.peek_check(.Token_Reference)) {
@@ -610,7 +608,7 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
 
             if (self.match(.Token_String)) {
                 const arg_token = self.previous();
-                const processed_arg = try self.processString(arg_token.text);
+                const processed_arg = try self.processStringOwned(arg_token.text);
                 try args.append(processed_arg);
 
                 // Check for comma or closing paren
@@ -782,19 +780,22 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             var parsed = try self.parseCommandTemplate(command_template, command_token);
             errdefer parsed.deinit(self.allocator);
 
-            const owned_name = try self.allocator.dupe(u8, name);
-            errdefer self.allocator.free(owned_name);
+            if (self.command_defs.contains(name)) {
+                return error.CommandAlreadyDefined;
+            }
 
+            const owned_name = try self.allocator.dupe(u8, name);
             try self.command_defs.put(self.allocator, owned_name, parsed);
         } else if (self.match(.Token_BeginList)) {
             // Process group definition: define name ["app1", "app2"]
             var process_list = std.ArrayList([]const u8).init(self.allocator);
-            errdefer for (process_list.items) |process| {
-                self.allocator.free(process);
-            };
+            errdefer {
+                for (process_list.items) |process| self.allocator.free(process);
+                process_list.deinit();
+            }
 
             while (self.match(.Token_String)) {
-                const process_name = try self.processString(self.previous().text);
+                const process_name = try self.processStringOwned(self.previous().text);
                 try process_list.append(process_name);
 
                 // Skip optional comma
@@ -807,10 +808,11 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
                 return error.ParseErrorOccurred;
             }
 
-            const owned_name = try self.allocator.dupe(u8, name);
-            errdefer self.allocator.free(owned_name);
+            if (self.process_groups.contains(name)) {
+                return error.ProcessGroupAlreadyDefined;
+            }
 
-            // Just take ownership of the array we built
+            const owned_name = try self.allocator.dupe(u8, name);
             const owned_processes = try process_list.toOwnedSlice();
             try self.process_groups.put(self.allocator, owned_name, owned_processes);
         } else {
@@ -821,7 +823,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
     } else if (std.mem.eql(u8, option, "load")) {
         if (self.match(.Token_String)) {
             const filename_token = self.previous();
-            const filename = try self.processString(filename_token.text);
+            const filename = try self.processStringOwned(filename_token.text);
             try self.load_directives.append(LoadDirective{
                 .filename = filename,
                 .token = filename_token,
@@ -835,7 +837,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         if (self.match(.Token_BeginList)) {
             while (self.match(.Token_String)) {
                 const token = self.previous();
-                const app_name = try self.processString(token.text);
+                const app_name = try self.processStringOwned(token.text);
                 defer self.allocator.free(app_name);
                 try mappings.add_blacklist(app_name);
             }
@@ -851,7 +853,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         }
     } else if (std.mem.eql(u8, option, "shell") or std.mem.eql(u8, option, "SHELL")) {
         if (self.match(.Token_String)) {
-            const shell_path = try self.processString(self.previous().text);
+            const shell_path = try self.processStringOwned(self.previous().text);
             defer self.allocator.free(shell_path);
             try mappings.set_shell(shell_path);
         } else {
@@ -1633,4 +1635,52 @@ test "invalid placeholder in command definition" {
         const error_info = parser.getError().?;
         try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, test_case.expected_error));
     }
+}
+
+test "duplicate command definition returns error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // First add a command definition
+    const content1 = ".define test_cmd : echo first";
+    try parser.parse(&mappings, content1);
+
+    // Verify it was added
+    try std.testing.expect(parser.command_defs.contains("test_cmd"));
+
+    // Now try to add a duplicate
+    const content2 = ".define test_cmd : echo second";
+    const result = parser.parse(&mappings, content2);
+    try std.testing.expectError(error.CommandAlreadyDefined, result);
+
+    // Verify the original is still there
+    try std.testing.expect(parser.command_defs.contains("test_cmd"));
+}
+
+test "duplicate process group definition returns error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // First add a process group
+    const content1 = ".define browsers [\"firefox\", \"chrome\"]";
+    try parser.parse(&mappings, content1);
+
+    // Verify it was added
+    try std.testing.expect(parser.process_groups.contains("browsers"));
+
+    // Now try to add a duplicate
+    const content2 = ".define browsers [\"safari\", \"edge\"]";
+    const result = parser.parse(&mappings, content2);
+    try std.testing.expectError(error.ProcessGroupAlreadyDefined, result);
+
+    // Verify the original is still there
+    try std.testing.expect(parser.process_groups.contains("browsers"));
 }

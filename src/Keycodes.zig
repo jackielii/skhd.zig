@@ -164,8 +164,8 @@ pub const literal_keycode_value = [_]u32{
     // zig fmt: on
 };
 
-alloc: std.mem.Allocator = undefined,
-keymap_table: std.StringArrayHashMap(u32) = undefined,
+alloc: std.mem.Allocator,
+keymap_table: std.StringArrayHashMapUnmanaged(u32) = .empty,
 
 // const context = struct {
 //     pub fn hash(self: @This(), s: []const u8) u32 {
@@ -188,6 +188,8 @@ keymap_table: std.StringArrayHashMap(u32) = undefined,
 const Keycodes = @This();
 
 pub fn init(alloc: std.mem.Allocator) !Keycodes {
+    var self =  Keycodes{ .alloc = alloc };
+
     const keyboard = c.TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
     const uchr: c.CFDataRef = @ptrCast(c.TISGetInputSourceProperty(keyboard, c.kTISPropertyUnicodeKeyLayoutData));
     defer c.CFRelease(keyboard);
@@ -196,8 +198,6 @@ pub fn init(alloc: std.mem.Allocator) !Keycodes {
     if (keyboard_layout == null) {
         return error.@"Failed to get keyboard layout";
     }
-
-    var keymap_table = std.StringArrayHashMap(u32).init(alloc);
 
     var len: c.UniCharCount = 0;
     var chars = [_]c.UniChar{0} ** 255;
@@ -220,20 +220,20 @@ pub fn init(alloc: std.mem.Allocator) !Keycodes {
             const key_cfstring = c.CFStringCreateWithCharacters(c.kCFAllocatorDefault, &chars, @intCast(len));
             defer c.CFRelease(key_cfstring);
             const key_string = try copy_cfstring(alloc, key_cfstring);
-            try keymap_table.put(key_string, keycode);
+            errdefer alloc.free(key_string);
+            if (try self.keymap_table.fetchPut(alloc, key_string, keycode)) |_| return error.DuplicateKeycodeMapping;
         }
     }
 
-    return Keycodes{ .keymap_table = keymap_table, .alloc = alloc };
+    return self;
 }
 
 pub fn deinit(self: *Keycodes) void {
-    // std.debug.print("size: {}\n", .{self.keymap_table.count()});
     var it = self.keymap_table.iterator();
     while (it.next()) |kv| {
         self.alloc.free(kv.key_ptr.*);
     }
-    self.keymap_table.deinit();
+    self.keymap_table.deinit(self.alloc);
 }
 
 pub fn get_keycode(self: *Keycodes, key: []const u8) !u32 {
@@ -273,6 +273,14 @@ test "init_keycode_map" {
     // Verify literal keycodes exist in the arrays
     try std.testing.expect(literal_keycode_str.len > 0);
     try std.testing.expect(literal_keycode_value.len == literal_keycode_str.len);
+}
+
+test "duplicate keycode mapping returns error" {
+    const alloc = std.testing.allocator;
+    
+    var self = try init(alloc);
+    defer self.deinit();
+    try std.testing.expect(self.keymap_table.count() > 0);
 }
 
 /// Format modifier flags and key into a human-readable string

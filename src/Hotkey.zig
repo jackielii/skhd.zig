@@ -192,16 +192,9 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
 }
 
 pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: ProcessCommand) !void {
-    // Handle wildcard mappings
     if (std.mem.eql(u8, process_name, "*")) {
-        // Free old wildcard command if any
-        if (self.wildcard_command) |old_cmd| {
-            _ = old_cmd;
+        if (self.wildcard_command) |_| {
             return error.@"Wildcard command already exists";
-            // switch (old_cmd) {
-            //     .command => |str| self.allocator.free(str),
-            //     else => {},
-            // }
         }
 
         self.wildcard_command = try ProcessCommand.init(self.allocator, command);
@@ -298,6 +291,38 @@ test "ArrayHashMap hotkey implementation" {
 
     // Test count
     try std.testing.expectEqual(@as(usize, 3), hotkey.getProcessCount()); // firefox, chrome, terminal (wildcard is separate)
+}
+
+test "add_process_mapping returns error on duplicate" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // First mapping should succeed
+    try hotkey.add_process_mapping("firefox", ProcessCommand{ .command = "echo firefox" });
+
+    // Duplicate mapping should fail
+    const result = hotkey.add_process_mapping("firefox", ProcessCommand{ .command = "echo firefox2" });
+    try std.testing.expectError(error.@"Process command already exists", result);
+
+    // Case insensitive duplicate should also fail
+    const result2 = hotkey.add_process_mapping("FIREFOX", ProcessCommand{ .command = "echo firefox3" });
+    try std.testing.expectError(error.@"Process command already exists", result2);
+
+    // Original command should still be there
+    const cmd = hotkey.find_command_for_process("firefox");
+    try std.testing.expect(cmd != null);
+    try std.testing.expectEqualStrings("echo firefox", cmd.?.command);
+
+    // Test wildcard duplicate
+    try hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo wildcard" });
+    const wildcard_result = hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo wildcard2" });
+    try std.testing.expectError(error.@"Wildcard command already exists", wildcard_result);
+
+    // Original wildcard should still be there
+    const wildcard_cmd = hotkey.find_command_for_process("unknown_process");
+    try std.testing.expect(wildcard_cmd != null);
+    try std.testing.expectEqualStrings("echo wildcard", wildcard_cmd.?.command);
 }
 
 test "ArrayHashMap performance characteristics" {

@@ -156,11 +156,21 @@ pub const ProcessCommand = union(enum) {
     command: []const u8,
     forwarded: KeyPress,
     unbound: void,
+    mode_with_command: struct {
+        mode_name: []const u8,
+        command: []const u8,
+    },
 
     /// Create a new ProcessCommand by duplicating the command string if needed
     pub fn init(allocator: std.mem.Allocator, cmd: ProcessCommand) !ProcessCommand {
         return switch (cmd) {
             .command => |str| ProcessCommand{ .command = try allocator.dupe(u8, str) },
+            .mode_with_command => |mode_cmd| ProcessCommand{ 
+                .mode_with_command = .{
+                    .mode_name = try allocator.dupe(u8, mode_cmd.mode_name),
+                    .command = try allocator.dupe(u8, mode_cmd.command),
+                }
+            },
             else => cmd,
         };
     }
@@ -169,6 +179,10 @@ pub const ProcessCommand = union(enum) {
     pub fn deinit(self: ProcessCommand, allocator: std.mem.Allocator) void {
         switch (self) {
             .command => |str| allocator.free(str),
+            .mode_with_command => |mode_cmd| {
+                allocator.free(mode_cmd.mode_name);
+                allocator.free(mode_cmd.command);
+            },
             else => {},
         }
     }
@@ -188,6 +202,22 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("\n  flags: {}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
     try writer.print("\n  process_mappings: {} entries", .{self.mappings.count()});
+    
+    // Show details of wildcard command if it exists
+    if (self.wildcard_command) |wildcard_command| {
+        try writer.print("\n  wildcard_command: ", .{});
+        switch (wildcard_command) {
+            .command => try writer.print("{s}", .{wildcard_command.command}),
+            .forwarded => {
+                try writer.print("forwarded", .{});
+                try utils.indentPrint(self.allocator, writer, "  ", "{}", wildcard_command.forwarded);
+            },
+            .unbound => try writer.print("unbound", .{}),
+            .mode_with_command => |mode_cmd| try writer.print("mode_with_command: mode={s}, cmd={s}", .{mode_cmd.mode_name, mode_cmd.command}),
+        }
+    } else {
+        try writer.print("\n  wildcard_command: null", .{});
+    }
     try writer.print("\n}}", .{});
 }
 

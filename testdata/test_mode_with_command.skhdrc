@@ -1,0 +1,47 @@
+# Test configuration for mode with command syntax
+# Tests the new ;mode : command syntax
+
+# Declare modes
+:: window : echo "Window mode activated"
+:: browser : echo "Browser mode activated"
+:: default
+
+# Define process groups for testing
+.define terminal_apps ["kitty", "wezterm", "terminal"]
+.define browser_apps ["chrome", "safari", "firefox"]
+
+# Test mode activation with command (new syntax)
+cmd - w ; window : echo "Switching to window mode and running command"
+
+# Test mode exit with command
+window < escape ; default : echo "Exiting window mode and running command"
+
+# Test regular mode activation (original syntax for comparison)
+cmd - d ; default
+
+# Test process-specific mode activation with command (NEW FEATURE)
+cmd - m [
+    "iterm"     ; window : echo "iTerm 2 entering window mode"
+    "brave"       ; browser : echo "Brave entering browser mode"
+    @terminal_apps ; window : echo "Terminal apps entering window mode"
+    @browser_apps  ; browser : echo "Browser apps entering browser mode"
+    *              ; default : echo "Other apps entering default mode"
+]
+
+# Test process-specific mode activation without command (original)
+cmd - n [
+    "terminal" ; window
+    "chrome"   ; browser
+    *          ; default
+]
+
+# Test regular commands in window mode
+window < h : echo "Window mode: focus left"
+window < l : echo "Window mode: focus right"
+
+# Test regular commands in browser mode
+browser < h : echo "Browser mode: previous tab"
+browser < l : echo "Browser mode: next tab"
+
+# Test regular hotkeys in default mode  
+cmd - a : echo "Default mode: regular command"

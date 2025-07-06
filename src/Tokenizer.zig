@@ -143,7 +143,7 @@ pub fn get_token(self: *Tokenizer) ?Token {
             token.type = .Token_Activate;
             token.line = self.line;
             token.cursor = self.cursor;
-            token.text = self.acceptIdentifier();
+            token.text = self.acceptIdentifierUntilColon();
         },
         ':' => {
             if (self.accept(":") != null) {
@@ -248,6 +248,16 @@ fn acceptIdentifier(self: *Tokenizer) []const u8 {
     _ = self.acceptRun(identifier_chars ++ number_chars);
     const end = self.pos;
     return self.buffer[start..end];
+}
+
+fn acceptIdentifierUntilColon(self: *Tokenizer) []const u8 {
+    const start = self.pos;
+    while (self.peekRune()) |r| {
+        if (r[0] == ':' or r[0] == ' ' or r[0] == '\t' or r[0] == '\n') break;
+        if (std.mem.indexOfScalar(u8, identifier_chars ++ number_chars, r[0]) == null) break;
+        self.moveOver(r);
+    }
+    return self.buffer[start..self.pos];
 }
 
 fn acceptCommand(self: *Tokenizer) []const u8 {

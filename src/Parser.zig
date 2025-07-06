@@ -2,7 +2,7 @@ const std = @import("std");
 const c = @import("c.zig");
 const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
-const Hotkey = @import("HotkeyMultiArrayList.zig");
+const Hotkey = @import("Hotkey.zig");
 const assert = std.debug.assert;
 const Mode = @import("Mode.zig");
 const Mappings = @import("Mappings.zig");
@@ -517,7 +517,7 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         }
         try self.parse_proc_list(mappings, hotkey);
     } else if (self.match(.Token_EndList)) {
-        if (hotkey.getProcessNames().len == 0) {
+        if (hotkey.mappings.count() == 0) {
             const token = self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, "Empty process list", self.current_file_path);
             return error.ParseErrorOccurred;

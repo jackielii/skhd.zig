@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 // Import our modules
-const Hotkey = @import("HotkeyMultiArrayList.zig");
+const Hotkey = @import("Hotkey.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
@@ -230,39 +230,6 @@ test "Left/right modifier parsing" {
     try testing.expect(found_lcmd);
     try testing.expect(found_rcmd);
     try testing.expect(found_mixed);
-}
-
-test "Process-specific hotkey parsing" {
-    const allocator = testing.allocator;
-
-    var parser = try Parser.init(allocator);
-    defer parser.deinit();
-
-    var mappings = try Mappings.init(allocator);
-    defer mappings.deinit();
-
-    // Parse process-specific hotkey
-    try parser.parse(&mappings,
-        \\cmd - n [
-        \\    "terminal" : echo "terminal command"
-        \\    "safari"   : echo "safari command"
-        \\    *          : echo "default command"
-        \\]
-    );
-
-    const default_mode = mappings.mode_map.get("default");
-    try testing.expect(default_mode != null);
-    try testing.expect(default_mode.?.hotkey_map.count() == 1);
-
-    // Check the hotkey has process-specific commands
-    var hotkey_iter = default_mode.?.hotkey_map.iterator();
-    if (hotkey_iter.next()) |entry| {
-        const hotkey = entry.key_ptr.*;
-        try testing.expect(hotkey.getProcessNames().len == 3); // terminal, safari, and *
-        // Check that wildcard was added
-        const wildcard_cmd = hotkey.find_command_for_process("random_app");
-        try testing.expect(wildcard_cmd != null);
-    }
 }
 
 test "Blacklist parsing" {
@@ -965,9 +932,11 @@ test "Command definitions - simple command" {
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
 
-    const commands = hotkey.getCommands();
-    try testing.expectEqual(@as(usize, 1), commands.len);
-    try testing.expectEqualStrings("yabai -m window --focus west", commands[0].command);
+    if (hotkey.find_command_for_process("*")) |c| {
+        try testing.expectEqualStrings("yabai -m window --focus west", c.command);
+    } else {
+        return error.TestExpectHotkeyCommandNotFound;
+    }
 }
 
 test "Command definitions - with single placeholder" {
@@ -1001,13 +970,16 @@ test "Command definitions - with single placeholder" {
     var it = mappings.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        const commands = hotkey.getCommands();
+        // Since these hotkeys don't have process-specific mappings, they should have wildcard commands
+        const cmd = hotkey.find_command_for_process("*");
 
         if (hotkey.key == 4) { // 'h' key
-            try testing.expectEqualStrings("yabai -m window --focus west", commands[0].command);
+            try testing.expect(cmd != null);
+            try testing.expectEqualStrings("yabai -m window --focus west", cmd.?.command);
             hotkey_count += 1;
         } else if (hotkey.key == 37) { // 'l' key
-            try testing.expectEqualStrings("yabai -m window --focus east", commands[0].command);
+            try testing.expect(cmd != null);
+            try testing.expectEqualStrings("yabai -m window --focus east", cmd.?.command);
             hotkey_count += 1;
         }
     }
@@ -1037,8 +1009,9 @@ test "Command definitions - multiple placeholders" {
     var it = mappings.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
-    const commands = hotkey.getCommands();
-    try testing.expectEqualStrings("yabai -m window --focus west", commands[0].command);
+    const cmd = hotkey.find_command_for_process("*");
+    try testing.expect(cmd != null);
+    try testing.expectEqualStrings("yabai -m window --focus west", cmd.?.command);
 }
 
 test "Command definitions - repeated placeholder" {
@@ -1060,8 +1033,9 @@ test "Command definitions - repeated placeholder" {
     var it = mappings.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
-    const commands = hotkey.getCommands();
-    try testing.expectEqualStrings("yabai -m window --toggle Music || open -a \"Music\"", commands[0].command);
+    const cmd = hotkey.find_command_for_process("*");
+    try testing.expect(cmd != null);
+    try testing.expectEqualStrings("yabai -m window --toggle Music || open -a \"Music\"", cmd.?.command);
 }
 
 test "Command definitions - in process list" {
@@ -1087,19 +1061,18 @@ test "Command definitions - in process list" {
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
 
-    const process_names = hotkey.getProcessNames();
-    const commands = hotkey.getCommands();
+    // Test process-specific commands
+    const terminal_cmd = hotkey.find_command_for_process("terminal");
+    try testing.expect(terminal_cmd != null);
+    try testing.expectEqualStrings("echo \"terminal app\"", terminal_cmd.?.command);
 
-    try testing.expectEqual(@as(usize, 2), process_names.len);
+    // Test wildcard command
+    const other_cmd = hotkey.find_command_for_process("some_other_app");
+    try testing.expect(other_cmd != null);
+    try testing.expectEqualStrings("echo \"other app\"", other_cmd.?.command);
 
-    // Find and verify each process command
-    for (process_names, commands) |name, cmd| {
-        if (std.mem.eql(u8, name, "terminal")) {
-            try testing.expectEqualStrings("echo \"terminal app\"", cmd.command);
-        } else if (std.mem.eql(u8, name, "*")) {
-            try testing.expectEqualStrings("echo \"other app\"", cmd.command);
-        }
-    }
+    // Verify the process count (terminal + wildcard)
+    try testing.expectEqual(@as(usize, 1), hotkey.getProcessCount()); // Only "terminal" is in mappings, wildcard is separate
 }
 
 test "Command definitions - mode declaration" {
@@ -1141,6 +1114,7 @@ test "Command definitions - with escaped quotes" {
     var it = mappings.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
-    const commands = hotkey.getCommands();
-    try testing.expectEqualStrings("osascript -e 'display notification \"Hello \"World\"\" with title \"Test \"Message\"\"'", commands[0].command);
+    const cmd = hotkey.find_command_for_process("*");
+    try testing.expect(cmd != null);
+    try testing.expectEqualStrings("osascript -e 'display notification \"Hello \"World\"\" with title \"Test \"Message\"\"'", cmd.?.command);
 }

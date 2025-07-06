@@ -102,6 +102,7 @@ The service will:
 
 - **Process groups**: Define named groups of applications for cleaner configs
 - **Command definitions**: Define reusable commands with placeholders to reduce repetition
+- **Key Forwarding**: Forward / remap key binding to another key binding
 
 ### Command-Line Interface
 
@@ -301,12 +302,6 @@ home [
 ### Key Forwarding/Remapping
 
 ```bash
-# Simple key remapping (vim-style navigation)
-ctrl - h | left        # Remap Ctrl+H to Left Arrow
-ctrl - j | down        # Remap Ctrl+J to Down Arrow
-ctrl - k | up          # Remap Ctrl+K to Up Arrow
-ctrl - l | right       # Remap Ctrl+L to Right Arrow
-
 # Keyboard layout fixes
 0xa | 0x32             # UK keyboard § to `
 shift - 0xa | shift - 0x32  # shift - § to ~
@@ -317,7 +312,6 @@ fn - k | up
 fn - h | left
 fn - l | right
 
-# Common number key remapping (bypass app shortcuts)
 # When you have cmd - number for yabai spaces,
 # and you still want the cmd - number to work in applications
 ctrl - 1 | cmd - 1
@@ -493,7 +487,7 @@ However, command output will be shown if verbose flag is specified in release bu
 This is a trade-off between convenience and performance:
 
 - **Performance mode** (default): Command output is discarded for faster execution
-- **Verbose mode** (`-V`): Command output is preserved, which may add slight overhead but helps with debugging
+- **Verbose mode** (`-V`): Command output is preserved, which may add slight overhead but helps with trouble shooting
 
 To debug hotkey events and see detailed logging:
 
@@ -531,16 +525,6 @@ skhd -r
 zig build alloc -- -V
 ```
 
-## Compatibility
-
-Key improvements over the original skhd:
-
-- Written in Zig for better memory safety and matching performance
-- **New**: Process groups with `.define` for cleaner configs
-- **New**: Command definitions with `.define` for reusable commands
-- Improved error reporting with detailed line numbers
-- Enhanced logging system
-
 ## Contributing
 
 1. Fork the repository
@@ -561,7 +545,7 @@ Key improvements over the original skhd:
 6. **Create Release**: Use GitHub CLI to create the release:
 
    ```bash
-   gh release create v0.0.X --title "Release v0.0.X" --notes "See CHANGELOG.md for details"
+   gh release create v0.0.X --title "v0.0.X" --notes "See CHANGELOG.md for details"
    ```
 
    GitHub Actions will then automatically:

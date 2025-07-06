@@ -167,24 +167,6 @@ pub const literal_keycode_value = [_]u32{
 alloc: std.mem.Allocator,
 keymap_table: std.StringArrayHashMapUnmanaged(u32) = .empty,
 
-// const context = struct {
-//     pub fn hash(self: @This(), s: []const u8) u32 {
-//         _ = self;
-//         const ss = std.mem.sliceTo(s, 0);
-//         // std.debug.print("hash: {any}\n", .{ss});
-//         return std.array_hash_map.hashString(ss);
-//     }
-//     pub fn eql(self: @This(), a: []const u8, b: []const u8, b_index: usize) bool {
-//         _ = self;
-//         _ = b_index;
-//         // return std.array_hash_map.eqlString(a, b);
-//         // std.debug.print("a: {any}, b: {any}\n", .{ a, b });
-//         const aa = std.mem.sliceTo(a, 0);
-//         const bb = std.mem.sliceTo(b, 0);
-//         return std.mem.eql(u8, aa, bb);
-//     }
-// };
-
 const Keycodes = @This();
 
 pub fn init(alloc: std.mem.Allocator) !Keycodes {
@@ -283,34 +265,71 @@ test "duplicate keycode mapping returns error" {
     try std.testing.expect(self.keymap_table.count() > 0);
 }
 
-/// Format modifier flags and key into a human-readable string
-pub fn formatKeyPress(allocator: std.mem.Allocator, flags: ModifierFlag, keyCode: u32) ![]u8 {
-    var modifiers = std.ArrayList([]const u8).init(allocator);
-    defer modifiers.deinit();
-
+/// Format modifier flags and key into a human-readable string using a stack buffer
+/// Returns a slice pointing into the provided buffer
+pub fn formatKeyPressBuffer(buf: []u8, flags: ModifierFlag, keyCode: u32) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+    
+    var has_modifiers = false;
+    
     // Add modifiers in a consistent order
-    if (flags.lcmd or flags.cmd) try modifiers.append("lcmd");
-    if (flags.rcmd) try modifiers.append("rcmd");
-    if (flags.lalt or flags.alt) try modifiers.append("lalt");
-    if (flags.ralt) try modifiers.append("ralt");
-    if (flags.lshift or flags.shift) try modifiers.append("lshift");
-    if (flags.rshift) try modifiers.append("rshift");
-    if (flags.lcontrol or flags.control) try modifiers.append("lctrl");
-    if (flags.rcontrol) try modifiers.append("rctrl");
-    if (flags.@"fn") try modifiers.append("fn");
-
+    if (flags.lcmd or flags.cmd) {
+        try writer.print("lcmd", .{});
+        has_modifiers = true;
+    }
+    if (flags.rcmd) {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("rcmd", .{});
+        has_modifiers = true;
+    }
+    if (flags.lalt or flags.alt) {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("lalt", .{});
+        has_modifiers = true;
+    }
+    if (flags.ralt) {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("ralt", .{});
+        has_modifiers = true;
+    }
+    if (flags.lshift or flags.shift) {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("lshift", .{});
+        has_modifiers = true;
+    }
+    if (flags.rshift) {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("rshift", .{});
+        has_modifiers = true;
+    }
+    if (flags.lcontrol or flags.control) {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("lctrl", .{});
+        has_modifiers = true;
+    }
+    if (flags.rcontrol) {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("rctrl", .{});
+        has_modifiers = true;
+    }
+    if (flags.@"fn") {
+        if (has_modifiers) try writer.print(" + ", .{});
+        try writer.print("fn", .{});
+        has_modifiers = true;
+    }
+    
     // Get the key
     const key = getKeyString(keyCode);
-
-    // Format according to skhd convention: modifiers joined with + and final key with -
-    if (modifiers.items.len > 0) {
-        const modifier_str = try std.mem.join(allocator, " + ", modifiers.items);
-        defer allocator.free(modifier_str);
-        return std.fmt.allocPrint(allocator, "{s} - {s}", .{ modifier_str, key });
+    
+    // Add the key with proper separator
+    if (has_modifiers) {
+        try writer.print(" - {s}", .{key});
     } else {
-        // No modifiers, just return the key
-        return allocator.dupe(u8, key);
+        try writer.print("{s}", .{key});
     }
+    
+    return stream.getWritten();
 }
 
 /// Get a human-readable string representation of a keycode

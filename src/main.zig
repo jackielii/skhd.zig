@@ -1,8 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const track_alloc = @import("build_options").track_alloc;
+
+const service = @import("service.zig");
 const Skhd = @import("skhd.zig");
 const synthesize = @import("synthesize.zig");
-const service = @import("service.zig");
-const builtin = @import("builtin");
+const TrackingAllocator = @import("TrackingAllocator.zig");
 
 const version = std.mem.trimRight(u8, @embedFile("VERSION"), "\n\r\t ");
 const log = std.log.scoped(.main);
@@ -10,7 +13,8 @@ const log = std.log.scoped(.main);
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn main() !void {
-    const gpa, const is_debug = switch (builtin.mode) {
+    // Get base allocator
+    const base_gpa, const is_debug = switch (builtin.mode) {
         .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
         .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
     };
@@ -19,6 +23,23 @@ pub fn main() !void {
             .ok => {},
             .leak => std.debug.print("memory leak detected\n", .{}),
         }
+    };
+
+    // Set up tracking allocator if enabled at compile time
+    var tracker: if (track_alloc) TrackingAllocator else void = undefined;
+    const gpa = if (comptime track_alloc) blk: {
+        tracker = try TrackingAllocator.init(base_gpa);
+
+        std.debug.print("=== Allocation Logging Enabled ===\n", .{});
+        std.debug.print("All allocations and deallocations will be logged.\n\n", .{});
+
+        break :blk tracker.allocator();
+    } else base_gpa;
+
+    defer if (comptime track_alloc) {
+        std.debug.print("\n=== Final Allocation Report ===\n", .{});
+        tracker.printReport(std.io.getStdErr().writer()) catch {};
+        tracker.deinit();
     };
 
     // Parse command line arguments

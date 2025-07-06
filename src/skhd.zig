@@ -12,7 +12,9 @@ const log = std.log.scoped(.skhd);
 const Hotload = @import("Hotload.zig");
 const Tracer = @import("Tracer.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
+const TrackingAllocator = @import("TrackingAllocator.zig");
 const c = @import("c.zig");
+const forkAndExec = @import("exec.zig").forkAndExec;
 
 const Skhd = @This();
 
@@ -30,18 +32,18 @@ hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
 
-pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
+pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(gpa);
     errdefer mappings.deinit();
 
     // Parse configuration file
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(gpa);
     defer parser.deinit();
 
-    const content = try std.fs.cwd().readFileAlloc(allocator, config_file, 1 << 20); // 1MB max
-    defer allocator.free(content);
+    const content = try std.fs.cwd().readFileAlloc(gpa, config_file, 1 << 20); // 1MB max
+    defer gpa.free(content);
 
     parser.parseWithPath(&mappings, content, config_file) catch |err| {
         if (err == error.ParseErrorOccurred) {
@@ -65,7 +67,7 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
 
     // Log loaded modes
     var mode_iter = mappings.mode_map.iterator();
-    var modes_list = std.ArrayList(u8).init(allocator);
+    var modes_list = std.ArrayList(u8).init(gpa);
     defer modes_list.deinit();
     while (mode_iter.next()) |entry| {
         try modes_list.writer().print("'{s}' ", .{entry.key_ptr.*});
@@ -76,20 +78,20 @@ pub fn init(allocator: std.mem.Allocator, config_file: []const u8, verbose: bool
     log.info("Using shell: {s}", .{mappings.shell});
 
     // Initialize Carbon event handler for app switching
-    var carbon_event = try CarbonEvent.init(allocator);
+    var carbon_event = try CarbonEvent.init(gpa);
     errdefer carbon_event.deinit();
 
-    log.info("Initial process: {s}", .{carbon_event.process_name});
+    log.info("Initial process: {s}", .{carbon_event.getProcessName()});
 
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
 
     return Skhd{
-        .allocator = allocator,
+        .allocator = gpa,
         .mappings = mappings,
         .current_mode = current_mode,
         .event_tap = EventTap{ .mask = mask },
-        .config_file = try allocator.dupe(u8, config_file),
+        .config_file = try gpa.dupe(u8, config_file),
         .verbose = verbose,
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
@@ -625,83 +627,6 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
     return false;
 }
 
-/// Fork and exec a command, detaching it from the parent process
-///
-/// This function uses the classic "double fork" technique to create a true daemon process
-/// that is completely detached from the parent. This prevents:
-/// 1. The child from becoming a zombie when it exits
-/// 2. The child from being affected by terminal hangups
-/// 3. Terminal output from child processes appearing in skhd's logs
-///
-/// References:
-/// - W. Richard Stevens, "Advanced Programming in the UNIX Environment", Chapter 13: Daemon Processes
-/// - Linux daemon(3) man page implementation
-/// - systemd source code: src/basic/process-util.c
-///
-/// The double fork works as follows:
-/// 1. First fork: Parent creates child1
-/// 2. Child1 calls setsid() to become session leader in new session
-/// 3. Second fork: Child1 creates child2
-/// 4. Child1 exits immediately, child2 continues
-/// 5. Parent waits for child1 to prevent zombie
-/// 6. Child2 is now orphaned and adopted by init (PID 1)
-/// 7. When child2 eventually exits, init automatically reaps it
-inline fn forkAndExec(shell: []const u8, command: []const u8, verbose: bool) !void {
-    const cpid = c.fork();
-    if (cpid == -1) {
-        return error.ForkFailed;
-    }
-
-    if (cpid == 0) {
-        // Child process
-        // Create new session (detach from controlling terminal)
-        _ = c.setsid();
-
-        // Double fork to ensure we can't reacquire a controlling terminal
-        const cpid2 = c.fork();
-        if (cpid2 == -1) {
-            std.process.exit(1);
-        }
-        if (cpid2 > 0) {
-            // First child exits
-            std.process.exit(0);
-        }
-
-        // Second child continues
-        if (!verbose) {
-            const devnull = c.open("/dev/null", c.O_WRONLY);
-            if (devnull != -1) {
-                _ = c.dup2(devnull, 1); // stdout
-                _ = c.dup2(devnull, 2); // stderr
-                _ = c.close(devnull);
-            }
-        }
-
-        // Prepare arguments for execvp
-        // We need null-terminated strings
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-
-        const shell_z = try allocator.dupeZ(u8, shell);
-        const arg_z = try allocator.dupeZ(u8, "-c");
-        const command_z = try allocator.dupeZ(u8, command);
-
-        const argv = [_:null]?[*:0]const u8{ shell_z, arg_z, command_z, null };
-
-        const status_code = c.execvp(shell_z, @ptrCast(&argv));
-        // If execvp returns, it failed
-        std.process.exit(@intCast(status_code));
-    }
-
-    // Parent waits for first child to exit
-    // This prevents the first child from becoming a zombie and ensures
-    // the double fork completes before we return. The wait is very brief
-    // since child1 exits immediately after forking child2.
-    var status: c_int = 0;
-    _ = c.waitpid(cpid, &status, 0);
-}
-
 /// Signal handler for SIGUSR1 - reload configuration
 fn handleSigusr1(_: c_int) callconv(.C) void {
     if (global_skhd) |skhd| {
@@ -828,7 +753,7 @@ inline fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPres
     // Only log in interactive mode to avoid allocation in hot path
     if (!self.verbose) return;
 
-    const key_str = try Keycodes.formatKeyPress(self.allocator, key.flags, key.key);
-    defer self.allocator.free(key_str);
+    var buf: [256]u8 = undefined;
+    const key_str = try Keycodes.formatKeyPressBuffer(&buf, key.flags, key.key);
     log.debug(fmt, .{key_str} ++ rest);
 }

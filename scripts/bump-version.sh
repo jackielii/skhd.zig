@@ -6,7 +6,7 @@
 set -e
 
 BUMP_TYPE=${1:-patch}
-CURRENT_VERSION=$(cat src/VERSION)
+CURRENT_VERSION=$(cat VERSION)
 
 # Parse current version
 IFS='.' read -r -a version_parts <<< "$CURRENT_VERSION"
@@ -37,7 +37,7 @@ esac
 NEW_VERSION="$MAJOR.$MINOR.$PATCH"
 
 # Update VERSION file
-echo "$NEW_VERSION" > src/VERSION
+echo "$NEW_VERSION" > VERSION
 
 echo "Version bumped from $CURRENT_VERSION to $NEW_VERSION"
 echo ""

@@ -7,7 +7,8 @@ const log = std.log.scoped(.carbon_event);
 allocator: std.mem.Allocator,
 handler_ref: c.EventHandlerRef,
 event_type: c.EventTypeSpec,
-process_name: []const u8,
+process_buffer: [512]u8 = undefined,
+buffer_len: usize = 0,
 mutex: std.Thread.Mutex = .{},
 
 pub fn init(allocator: std.mem.Allocator) !*CarbonEvent {
@@ -21,12 +22,10 @@ pub fn init(allocator: std.mem.Allocator) !*CarbonEvent {
             .eventClass = c.kEventClassApplication,
             .eventKind = c.kEventAppFrontSwitched,
         },
-        .process_name = undefined,
     };
 
     // Get initial process name
-    self.process_name = try self.getCurrentProcessName();
-    errdefer self.allocator.free(self.process_name);
+    try self.updateProcessName();
 
     // Install event handler
     const status = c.InstallApplicationEventHandler(
@@ -48,9 +47,6 @@ pub fn deinit(self: *CarbonEvent) void {
     // Remove event handler
     _ = c.RemoveEventHandler(self.handler_ref);
 
-    // Free process name
-    self.allocator.free(self.process_name);
-
     // Free self
     self.allocator.destroy(self);
 }
@@ -59,67 +55,55 @@ pub fn deinit(self: *CarbonEvent) void {
 pub fn getProcessName(self: *CarbonEvent) []const u8 {
     self.mutex.lock();
     defer self.mutex.unlock();
-    return self.process_name;
+    
+    // Return "unknown" if we don't have a process name
+    if (self.buffer_len == 0) {
+        return "unknown";
+    }
+    return self.process_buffer[0..self.buffer_len];
 }
 
 /// Update the cached process name (called by event handler)
 fn updateProcessName(self: *CarbonEvent) !void {
-    const new_name = try self.getCurrentProcessName();
+    var psn: c.ProcessSerialNumber = undefined;
 
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    // Free old name and update
-    self.allocator.free(self.process_name);
-    self.process_name = new_name;
-}
-
-/// Get current process name (allocates memory)
-fn getCurrentProcessName(self: *CarbonEvent) ![]const u8 {
-    var psn: c.ProcessSerialNumber = undefined;
-
     const status = c.GetFrontProcess(&psn);
     if (status != c.noErr) {
-        return try self.allocator.dupe(u8, "unknown");
+        self.buffer_len = 0;
+        return;
     }
 
-    var process_name_ref: c.CFStringRef = undefined;
-    const copy_status = c.CopyProcessName(&psn, &process_name_ref);
+    var ref: c.CFStringRef = undefined;
+    const copy_status = c.CopyProcessName(&psn, &ref);
     if (copy_status != c.noErr) {
-        return try self.allocator.dupe(u8, "unknown");
+        self.buffer_len = 0;
+        return;
     }
-    defer c.CFRelease(process_name_ref);
-
-    // Get string length
-    const length = c.CFStringGetLength(process_name_ref);
-    const max_size = c.CFStringGetMaximumSizeForEncoding(length, c.kCFStringEncodingUTF8) + 1;
-
-    // Allocate buffer
-    const buffer = try self.allocator.alloc(u8, @intCast(max_size));
-    errdefer self.allocator.free(buffer);
+    defer c.CFRelease(ref);
 
     const success = c.CFStringGetCString(
-        process_name_ref,
-        buffer.ptr,
-        @intCast(buffer.len),
+        ref,
+        &self.process_buffer,
+        self.process_buffer.len,
         c.kCFStringEncodingUTF8,
     );
 
     if (success == 0) {
-        self.allocator.free(buffer);
-        return try self.allocator.dupe(u8, "unknown");
+        self.buffer_len = 0;
+        return;
     }
 
-    // Find actual length and resize
-    const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(buffer.ptr)));
-    const process_name = try self.allocator.realloc(buffer, c_string_len);
+    // Find actual length
+    const c_string_len = std.mem.len(@as([*:0]const u8, @ptrCast(&self.process_buffer)));
+    self.buffer_len = c_string_len;
 
-    // Convert to lowercase
-    for (process_name) |*char| {
+    // Convert to lowercase in-place
+    for (self.process_buffer[0..self.buffer_len]) |*char| {
         char.* = std.ascii.toLower(char.*);
     }
-
-    return process_name;
 }
 
 /// Carbon event handler callback

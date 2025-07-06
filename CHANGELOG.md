@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Fix cleanup logic when sending SIGINT to the process
+- Report errors instead of silently overwriting if there are duplicate entries in config
+
+### Changed
+- Enhanced test coverage with comprehensive duplicate detection tests
+
 ## [0.0.7] - 2025-07-05
 
 ### Fixed

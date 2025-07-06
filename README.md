@@ -524,6 +524,9 @@ skhd -t "hello world"
 
 # Reload config of running instance
 skhd -r
+
+# Debug memory allocations with real-time tracking
+zig build alloc -- -V
 ```
 
 ## Compatibility

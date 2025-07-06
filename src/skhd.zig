@@ -99,15 +99,23 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 }
 
 /// Switch to a target mode, handling both regular modes and default mode
-fn switchToMode(self: *Skhd, mode_name: []const u8) void {
+fn switchToMode(self: *Skhd, mode_name: []const u8) !void {
     if (self.mappings.mode_map.getPtr(mode_name)) |target_mode| {
         self.current_mode = target_mode;
         log.info("Switched to mode '{s}'", .{target_mode.name});
+        // Execute mode entry command if it exists
+        if (target_mode.command) |mode_cmd| {
+            try forkAndExec(self.mappings.shell, mode_cmd, self.verbose);
+        }
     } else if (std.mem.eql(u8, mode_name, "default")) {
         // Switching to default mode which should always exist
         if (self.mappings.mode_map.getPtr("default")) |default_mode| {
             self.current_mode = default_mode;
             log.info("Switched to default mode", .{});
+            // Execute default mode entry command if it exists
+            if (default_mode.command) |mode_cmd| {
+                try forkAndExec(self.mappings.shell, mode_cmd, self.verbose);
+            }
         }
     }
 }
@@ -609,8 +617,8 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                 .mode_with_command => |mode_with_cmd| {
                     log.debug("Mode activation with command: switching to '{s}' and executing '{s}'", .{mode_with_cmd.mode_name, mode_with_cmd.command});
                     
-                    // Switch to the target mode
-                    self.switchToMode(mode_with_cmd.mode_name);
+                    // Switch to the target mode and execute its entry command
+                    try self.switchToMode(mode_with_cmd.mode_name);
                     
                     // Execute the command
                     try forkAndExec(self.mappings.shell, mode_with_cmd.command, self.verbose);
@@ -644,8 +652,8 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
             .mode_with_command => |mode_with_cmd| {
                 log.debug("Executing mode with command: switching to '{s}' and executing '{s}' for process {s}", .{mode_with_cmd.mode_name, mode_with_cmd.command, process_name});
                 
-                // Switch to the target mode
-                self.switchToMode(mode_with_cmd.mode_name);
+                // Switch to the target mode and execute its entry command
+                try self.switchToMode(mode_with_cmd.mode_name);
                 
                 // Execute the command
                 self.tracer.traceCommandExecuted();

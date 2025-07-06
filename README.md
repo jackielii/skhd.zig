@@ -337,7 +337,6 @@ cmd - p -> : echo "This runs but Cmd+P still goes to app"
 ```bash
 # Window management mode with anybar visual indicator
 # Install anybar: brew install --cask anybar
-# Then run: open -n /Applications/AnyBar.app --args 1738
 
 # Define window management mode for warp/stack operations
 # Use anybar to indicate the mode: https://github.com/tonsky/AnyBar

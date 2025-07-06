@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Fix cleanup logic when sending SIGINT to the process
 - Report errors instead of silently overwriting if there are duplicate entries in config
+- **Eliminated memory allocations in event loop** - Replaced dynamic allocation for process names with fixed-size buffer
 
 ### Changed
 - Enhanced test coverage with comprehensive duplicate detection tests
+- CarbonEvent now uses a pre-allocated buffer for process names to avoid runtime allocations
 
 ## [0.0.7] - 2025-07-05
 

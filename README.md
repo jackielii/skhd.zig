@@ -504,6 +504,8 @@ To debug hotkey events and see detailed logging:
 zig build run -- -V
 ```
 
+**Performance:** The event loop is allocation-free in release builds, ensuring consistent low-latency hotkey processing.
+
 ### Testing Commands
 
 ```bash

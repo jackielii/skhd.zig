@@ -4,6 +4,7 @@ const Skhd = @import("skhd.zig");
 const Hotkey = @import("HotkeyMultiArrayList.zig");
 const HotkeyOriginal = @import("Hotkey.zig");
 const HotkeyMultiArray = @import("HotkeyMultiArrayList.zig");
+const HotkeyArrayHashMap = @import("HotkeyArrayHashMap.zig");
 const c = @import("c.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
@@ -14,22 +15,7 @@ var g_skhd: ?*Skhd = null;
 var g_esc_key: Hotkey.KeyPress = undefined;
 var g_hotkey_original: ?*HotkeyOriginal = null;
 var g_hotkey_multiarray: ?*HotkeyMultiArray = null;
-
-// Linear search benchmark
-fn benchLinearSearch(allocator: std.mem.Allocator) void {
-    _ = allocator;
-    const skhd = g_skhd orelse return;
-    const mode = skhd.current_mode orelse return;
-    _ = skhd.findHotkeyLinear(mode, g_esc_key);
-}
-
-// HashMap lookup benchmark
-fn benchHashMapLookup(allocator: std.mem.Allocator) void {
-    _ = allocator;
-    const skhd = g_skhd orelse return;
-    const mode = skhd.current_mode orelse return;
-    _ = skhd.findHotkeyHashMap(mode, g_esc_key);
-}
+var g_hotkey_arrayhashmap: ?*HotkeyArrayHashMap = null;
 
 // Process name lookup benchmark (system call)
 fn benchProcessNameLookup(allocator: std.mem.Allocator) void {
@@ -43,29 +29,6 @@ fn benchCachedProcessName(allocator: std.mem.Allocator) void {
     _ = allocator;
     const skhd = g_skhd orelse return;
     _ = skhd.carbon_event.getProcessName();
-}
-
-// Double lookup benchmark (simulating current hot path)
-fn benchDoubleLookup(allocator: std.mem.Allocator) void {
-    _ = allocator;
-    const skhd = g_skhd orelse return;
-    const mode = skhd.current_mode orelse return;
-
-    // First lookup (forward)
-    _ = skhd.findHotkeyInMode(mode, g_esc_key);
-
-    // Second lookup (exec)
-    _ = skhd.findHotkeyInMode(mode, g_esc_key);
-}
-
-// Single lookup benchmark (optimized path)
-fn benchSingleLookup(allocator: std.mem.Allocator) void {
-    _ = allocator;
-    const skhd = g_skhd orelse return;
-    const mode = skhd.current_mode orelse return;
-
-    // Single lookup
-    _ = skhd.findHotkeyInMode(mode, g_esc_key);
 }
 
 // Copy the getCurrentProcessNameBuf function for benchmarking
@@ -187,6 +150,19 @@ fn benchProcessMappingMultiArray(allocator: std.mem.Allocator) void {
     }
 }
 
+// Process mapping benchmarks - ArrayHashMap implementation
+fn benchProcessMappingArrayHashMap(allocator: std.mem.Allocator) void {
+    _ = allocator;
+    const hotkey = g_hotkey_arrayhashmap orelse return;
+
+    // Simulate process lookups
+    const test_processes = [_][]const u8{ "firefox", "CHROME", "Visual Studio Code", "Unknown App" };
+
+    for (test_processes) |proc_name| {
+        _ = hotkey.find_command_for_process(proc_name);
+    }
+}
+
 pub fn main() !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
@@ -224,6 +200,10 @@ pub fn main() !void {
         var hotkey_multiarray = try HotkeyMultiArray.create(allocator);
         g_hotkey_multiarray = hotkey_multiarray;
 
+        // ArrayHashMap implementation
+        var hotkey_arrayhashmap = try HotkeyArrayHashMap.create(allocator);
+        g_hotkey_arrayhashmap = hotkey_arrayhashmap;
+
         // Add common process mappings to both implementations
         const common_processes = [_][]const u8{
             "Firefox",            "Google Chrome",    "Safari",  "Terminal", "iTerm2",
@@ -241,32 +221,34 @@ pub fn main() !void {
 
             // MultiArrayList
             try hotkey_multiarray.add_process_mapping(process, HotkeyMultiArray.ProcessCommand{ .command = cmd });
+
+            // ArrayHashMap
+            try hotkey_arrayhashmap.add_process_mapping(process, HotkeyArrayHashMap.ProcessCommand{ .command = cmd });
         }
 
         // Set wildcard commands using unified API
         try hotkey_original.add_process_mapping("*", HotkeyOriginal.ProcessCommand{ .command = "echo 'default'" });
         try hotkey_multiarray.add_process_mapping("*", HotkeyMultiArray.ProcessCommand{ .command = "echo 'default'" });
+        try hotkey_arrayhashmap.add_process_mapping("*", HotkeyArrayHashMap.ProcessCommand{ .command = "echo 'default'" });
 
         std.debug.print("Initialized hotkeys with {} process mappings\n\n", .{common_processes.len});
     }
     defer if (g_hotkey_original) |h| h.destroy();
     defer if (g_hotkey_multiarray) |h| h.destroy();
+    defer if (g_hotkey_arrayhashmap) |h| h.destroy();
 
     // Create benchmark suite
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
     // Add benchmarks
-    try bench.add("Linear Search (ESC key)", benchLinearSearch, .{});
-    try bench.add("HashMap Lookup (ESC key)", benchHashMapLookup, .{});
-    try bench.add("Double Lookup (current)", benchDoubleLookup, .{});
-    try bench.add("Single Lookup (optimized)", benchSingleLookup, .{});
     try bench.add("Process Name Lookup (syscall)", benchProcessNameLookup, .{});
     try bench.add("Process Name Lookup (cached)", benchCachedProcessName, .{});
 
     // Add process mapping benchmarks
     try bench.add("Process Mapping (Original)", benchProcessMappingOriginal, .{});
     try bench.add("Process Mapping (MultiArrayList)", benchProcessMappingMultiArray, .{});
+    try bench.add("Process Mapping (ArrayHashMap)", benchProcessMappingArrayHashMap, .{});
 
     // Run benchmarks
     try bench.run(std.io.getStdOut().writer());

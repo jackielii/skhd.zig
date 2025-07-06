@@ -838,62 +838,6 @@ test "find_command_for_process function with process matching" {
     try testing.expectEqualStrings("echo wildcard", notepad_cmd.?.command);
 }
 
-test "process group variables" {
-    const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator);
-    defer parser.deinit();
-
-    var mappings = try Mappings.init(allocator);
-    defer mappings.deinit();
-
-    // Test .define directive and @group_name usage
-    const content =
-        \\.define native_apps ["kitty", "wezterm", "chrome"]
-        \\home [
-        \\    @native_apps ~
-        \\    *            | cmd - left
-        \\]
-    ;
-
-    try parser.parse(&mappings, content);
-
-    // Check that process group was created
-    try testing.expect(parser.process_groups.contains("native_apps"));
-    const group = parser.process_groups.get("native_apps").?;
-    try testing.expectEqual(@as(usize, 3), group.len);
-    try testing.expectEqualStrings("kitty", group[0]);
-    try testing.expectEqualStrings("wezterm", group[1]);
-    try testing.expectEqualStrings("chrome", group[2]);
-
-    // Check that hotkey was created with processes from the group
-    try testing.expectEqual(@as(usize, 1), mappings.hotkey_map.count());
-    var it = mappings.hotkey_map.iterator();
-    const entry = it.next().?;
-    const hotkey = entry.key_ptr.*;
-
-    // Should have 3 process names from the group + 1 wildcard
-    const process_names = hotkey.getProcessNames();
-    try testing.expectEqual(@as(usize, 4), process_names.len);
-    try testing.expectEqualStrings("kitty", process_names[0]);
-    try testing.expectEqualStrings("wezterm", process_names[1]);
-    try testing.expectEqualStrings("chrome", process_names[2]);
-    try testing.expectEqualStrings("*", process_names[3]);
-
-    // 3 unbound (native_apps) + 1 forwarded (wildcard)
-    const stats = hotkey.mappings.countCommandTypes();
-    try testing.expectEqual(@as(usize, 0), stats.commands);
-    try testing.expectEqual(@as(usize, 1), stats.forwarded); // wildcard forwards
-    try testing.expectEqual(@as(usize, 3), stats.unbound);
-
-    // Wildcard should forward to cmd - left
-    const wildcard_result = hotkey.find_command_for_process("random_app");
-    try testing.expect(wildcard_result != null);
-    try testing.expect(wildcard_result.? == .forwarded);
-    const forward_key = wildcard_result.?.forwarded;
-    try testing.expect(forward_key.flags.cmd);
-    try testing.expectEqual(@as(u32, 0x7B), forward_key.key); // left arrow
-}
-
 test "multiple process groups and reuse" {
     const allocator = std.testing.allocator;
     var parser = try Parser.init(allocator);

@@ -712,15 +712,10 @@ fn handleSigusr1(_: c_int) callconv(.C) void {
     }
 }
 
-/// Signal handler for SIGINT - print trace summary and exit
+/// Signal handler for SIGINT - stop the run loop to allow graceful shutdown
 fn handleSigint(_: c_int) callconv(.C) void {
-    if (global_skhd) |skhd| {
-        if (skhd.tracer.enabled) {
-            const stderr = std.io.getStdErr().writer();
-            skhd.tracer.printSummary(stderr) catch {};
-        }
-    }
-    std.process.exit(0);
+    // Stop the run loop to allow graceful shutdown with defer statements
+    c.CFRunLoopStop(c.CFRunLoopGetCurrent());
 }
 
 /// Reload configuration from file

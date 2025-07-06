@@ -138,7 +138,6 @@ pub fn hotkeyFlagsMatch(config: ModifierFlag, keyboard: ModifierFlag) bool {
         config.nx == keyboard.nx;
 }
 
-
 pub const ProcessCommand = union(enum) {
     command: []const u8,
     forwarded: KeyPress,
@@ -234,43 +233,6 @@ const ProcessMappings = struct {
         }
         return null;
     }
-
-    // Utility function to demonstrate field-specific iteration
-    pub const CommandStats = struct { commands: usize, forwarded: usize, unbound: usize };
-
-    pub fn countCommandTypes(self: *const ProcessMappings) CommandStats {
-        var result = CommandStats{ .commands = 0, .forwarded = 0, .unbound = 0 };
-
-        // MultiArrayList allows efficient access to just the command field
-        const commands = self.list.items(.command);
-        for (commands) |cmd| {
-            switch (cmd) {
-                .command => result.commands += 1,
-                .forwarded => result.forwarded += 1,
-                .unbound => result.unbound += 1,
-            }
-        }
-
-        return result;
-    }
-
-    // Demonstrate using slice() for multi-field access
-    pub fn findAllForwardedKeys(self: *const ProcessMappings, allocator: std.mem.Allocator) ![]KeyPress {
-        var forwarded = std.ArrayList(KeyPress).init(allocator);
-        defer forwarded.deinit();
-
-        // Get a slice view that allows coordinated access to multiple fields
-        const slice = self.list.slice();
-
-        for (0..self.list.len) |i| {
-            switch (slice.items(.command)[i]) {
-                .forwarded => |key_press| try forwarded.append(key_press),
-                else => {},
-            }
-        }
-
-        return try forwarded.toOwnedSlice();
-    }
 };
 
 pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -287,10 +249,6 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("\n  flags: {}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
     try writer.print("\n  process_mappings: {} entries", .{self.mappings.list.len});
-
-    // Show command type distribution
-    const stats = self.mappings.countCommandTypes();
-    try writer.print("\n    commands: {}, forwarded: {}, unbound: {}", .{ stats.commands, stats.forwarded, stats.unbound });
     try writer.print("\n}}", .{});
 }
 
@@ -352,12 +310,6 @@ test "MultiArrayList hotkey implementation" {
     const unknown_cmd = hotkey.find_command_for_process("unknown");
     try std.testing.expect(unknown_cmd != null);
     try std.testing.expectEqualStrings("echo default", unknown_cmd.?.command);
-
-    // Test command type counting
-    const stats = hotkey.mappings.countCommandTypes();
-    try std.testing.expectEqual(@as(usize, 3), stats.commands); // firefox, chrome, and wildcard
-    try std.testing.expectEqual(@as(usize, 1), stats.forwarded);
-    try std.testing.expectEqual(@as(usize, 0), stats.unbound);
 
     // Test field access
     const names = hotkey.getProcessNames();

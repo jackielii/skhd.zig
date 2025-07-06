@@ -78,7 +78,6 @@ pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     try self.blacklist.put(self.allocator, owned, void{});
 }
 
-
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
     // if (fmt.len != 0) {
     //     std.fmt.invalidFmtError(fmt, self);

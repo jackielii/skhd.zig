@@ -102,7 +102,7 @@ fn cleanInvisibleChars(name: []const u8) []const u8 {
 
 // Process mapping benchmarks - Original implementation
 fn benchProcessMappingOriginal(allocator: std.mem.Allocator) void {
-    _ = allocator;  
+    _ = allocator;
     const hotkey = g_hotkey_original orelse return;
 
     // Simulate process lookups

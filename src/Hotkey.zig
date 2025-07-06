@@ -26,7 +26,7 @@ pub fn destroy(self: *Hotkey) void {
         }
     }
     self.mappings.deinit(self.allocator);
-    
+
     // Free wildcard command if any
     if (self.wildcard_command) |cmd| {
         switch (cmd) {
@@ -34,7 +34,7 @@ pub fn destroy(self: *Hotkey) void {
             else => {},
         }
     }
-    
+
     self.mode_list.deinit();
     self.allocator.destroy(self);
 }
@@ -195,7 +195,7 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
             //     else => {},
             // }
         }
-        
+
         // Clone command for wildcard
         self.wildcard_command = switch (command) {
             .command => |str| blk: {
@@ -206,15 +206,15 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
         };
         return;
     }
-    
+
     // Create lowercase version of process name for storage
     const owned_name = try self.allocator.dupe(u8, process_name);
     errdefer self.allocator.free(owned_name);
-    
+
     for (owned_name, 0..) |c, i| {
         owned_name[i] = std.ascii.toLower(c);
     }
-    
+
     // Clone command if needed
     const owned_cmd = switch (command) {
         .command => |str| blk: {
@@ -223,7 +223,7 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
         },
         else => command,
     };
-    
+
     // Put into hashmap
     try self.mappings.put(self.allocator, owned_name, owned_cmd);
 }
@@ -236,17 +236,17 @@ pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?
     // Create lowercase version for lookup
     var name_buf: [256]u8 = undefined;
     if (process_name.len > name_buf.len) return self.wildcard_command;
-    
+
     for (process_name, 0..) |c, i| {
         name_buf[i] = std.ascii.toLower(c);
     }
     const lower_name = name_buf[0..process_name.len];
-    
+
     // First try to find exact match
     if (self.mappings.get(lower_name)) |cmd| {
         return cmd;
     }
-    
+
     // If no exact match, return wildcard
     return self.wildcard_command;
 }

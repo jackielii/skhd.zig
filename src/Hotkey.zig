@@ -15,24 +15,16 @@ wildcard_command: ?ProcessCommand = null,
 mode_list: std.AutoArrayHashMap(*Mode, void),
 
 pub fn destroy(self: *Hotkey) void {
-    // Free all keys (process names)
     var it = self.mappings.iterator();
     while (it.next()) |entry| {
         self.allocator.free(entry.key_ptr.*);
-        // Free command strings
-        switch (entry.value_ptr.*) {
-            .command => |str| self.allocator.free(str),
-            else => {},
-        }
+        entry.value_ptr.*.deinit(self.allocator);
     }
     self.mappings.deinit(self.allocator);
 
     // Free wildcard command if any
     if (self.wildcard_command) |cmd| {
-        switch (cmd) {
-            .command => |str| self.allocator.free(str),
-            else => {},
-        }
+        cmd.deinit(self.allocator);
     }
 
     self.mode_list.deinit();
@@ -164,6 +156,22 @@ pub const ProcessCommand = union(enum) {
     command: []const u8,
     forwarded: KeyPress,
     unbound: void,
+
+    /// Create a new ProcessCommand by duplicating the command string if needed
+    pub fn init(allocator: std.mem.Allocator, cmd: ProcessCommand) !ProcessCommand {
+        return switch (cmd) {
+            .command => |str| ProcessCommand{ .command = try allocator.dupe(u8, str) },
+            else => cmd,
+        };
+    }
+
+    /// Free any owned memory
+    pub fn deinit(self: ProcessCommand, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .command => |str| allocator.free(str),
+            else => {},
+        }
+    }
 };
 
 pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -196,14 +204,7 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
             // }
         }
 
-        // Clone command for wildcard
-        self.wildcard_command = switch (command) {
-            .command => |str| blk: {
-                const owned_str = try self.allocator.dupe(u8, str);
-                break :blk ProcessCommand{ .command = owned_str };
-            },
-            else => command,
-        };
+        self.wildcard_command = try ProcessCommand.init(self.allocator, command);
         return;
     }
 
@@ -215,14 +216,17 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
         owned_name[i] = std.ascii.toLower(c);
     }
 
-    // Clone command if needed
-    const owned_cmd = switch (command) {
-        .command => |str| blk: {
-            const owned_str = try self.allocator.dupe(u8, str);
-            break :blk ProcessCommand{ .command = owned_str };
-        },
-        else => command,
-    };
+    // Clone command using init
+    const owned_cmd = try ProcessCommand.init(self.allocator, command);
+    errdefer owned_cmd.deinit(self.allocator);
+
+    // Check if we're replacing an existing mapping
+    if (self.mappings.get(owned_name)) |existing_cmd| {
+        _ = existing_cmd;
+        return error.@"Process command already exists";
+        // Free the existing command
+        // existing_cmd.deinit(self.allocator);
+    }
 
     // Put into hashmap
     try self.mappings.put(self.allocator, owned_name, owned_cmd);

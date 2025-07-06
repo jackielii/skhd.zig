@@ -785,10 +785,10 @@ test "find_command_for_process function with process matching" {
     var hotkey = try Hotkey.create(allocator);
     defer hotkey.destroy();
 
-    try hotkey.add_process_mapping("chrome", Hotkey.ProcessCommand{ .command = "echo chrome" });
-    try hotkey.add_process_mapping("firefox", Hotkey.ProcessCommand{ .command = "echo firefox" });
-    try hotkey.add_process_mapping("whatsapp", Hotkey.ProcessCommand{ .command = "echo whatsapp" });
-    try hotkey.add_process_mapping("*", Hotkey.ProcessCommand{ .command = "echo wildcard" });
+    try hotkey.add_process_mapping("chrome", .{ .command = "echo chrome" });
+    try hotkey.add_process_mapping("firefox", .{ .command = "echo firefox" });
+    try hotkey.add_process_mapping("whatsapp", .{ .command = "echo whatsapp" });
+    try hotkey.add_process_mapping("*", .{ .command = "echo wildcard" });
 
     // Test finding existing processes (case insensitive)
     const chrome_cmd = hotkey.find_command_for_process("Chrome");

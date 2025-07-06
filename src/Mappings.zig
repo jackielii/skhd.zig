@@ -59,7 +59,13 @@ pub fn deinit(self: *Mappings) void {
 }
 
 pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
-    try self.hotkey_map.put(self.allocator, hotkey, {});
+    // Check if we're replacing an existing hotkey
+    const result = try self.hotkey_map.getOrPut(self.allocator, hotkey);
+    if (result.found_existing) {
+        // Destroy the old hotkey that's being replaced
+        result.key_ptr.*.destroy();
+        result.key_ptr.* = hotkey;
+    }
 
     var it = hotkey.mode_list.iterator();
     while (it.next()) |kv| {

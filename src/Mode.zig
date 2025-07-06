@@ -73,7 +73,7 @@ test "init" {
 
     var key = try Hotkey.create(alloc);
     defer key.destroy();
-    try key.add_process_mapping("notepad.exe", Hotkey.ProcessCommand{ .command = "echo notepad" });
+    try key.add_process_mapping("notepad.exe", .{ .command = "echo notepad" });
     try key.add_mode(&mode);
     try mode.add_hotkey(key);
 

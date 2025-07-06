@@ -7,14 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- Fix cleanup logic when sending SIGINT to the process
-- Report errors instead of silently overwriting if there are duplicate entries in config
-- **Eliminated memory allocations in event loop** - Replaced dynamic allocation for process names with fixed-size buffer
+## [0.0.8] - 2025-07-06
 
 ### Changed
+- **Major performance improvement**: Achieved allocation-free event loop
+  - Replaced dynamic allocation for process names with fixed-size buffer
+  - Zero allocations during runtime after initialization
+  - Event loop is now completely allocation-free in release builds
+- Refactored hotkey implementation for simplicity and performance
+  - Removed HotkeyArrayHashMap and HotkeyMultiArrayList (740+ lines removed)
+  - Consolidated hotkey functionality in Hotkey.zig
 - Enhanced test coverage with comprehensive duplicate detection tests
 - CarbonEvent now uses a pre-allocated buffer for process names to avoid runtime allocations
+- Moved VERSION file from src/VERSION to root directory for better visibility
+- Code cleanup and formatting improvements across multiple modules
+
+### Fixed
+- Fixed cleanup logic when sending SIGINT to the process
+- Fixed memory leaks in Hotkey.zig and improved memory management
+- **Duplicate definition detection**: Now reports errors instead of silently overwriting duplicate entries in config
+- Fixed CI/CD release workflow by replacing deprecated upload-release-asset action with gh CLI
+
+### Internal
+- Added TrackingAllocator for monitoring memory allocations during development
+- Created new exec.zig module for command execution
+- Improved error handling in Parser, Mappings, and Keycodes modules
 
 ## [0.0.7] - 2025-07-05
 
@@ -151,7 +168,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.8...HEAD
+[0.0.8]: https://github.com/jackielii/skhd.zig/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/jackielii/skhd.zig/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/jackielii/skhd.zig/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/jackielii/skhd.zig/compare/v0.0.4...v0.0.5

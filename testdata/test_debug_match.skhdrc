@@ -7,5 +7,6 @@ lcmd - h : @focus_direction("west", "recent")
 # Enter window mode with meh + m
 ctrl - m ; winmode
 winmode < escape ; default
+winmode < ctrl - m ; default
 winmode < h : echo "Window mode: focus west"
 winmode < l : echo "Window mode: focus east"

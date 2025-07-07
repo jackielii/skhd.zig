@@ -70,8 +70,6 @@ pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
     if (self.hotkey_map.getKeyAdapted(keypress, ctx) != null) {
         return error.DuplicateHotkeyInMode;
     }
-    
-    // Now add it
     try self.hotkey_map.put(self.allocator, hotkey, {});
 }
 

@@ -7,8 +7,8 @@ const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const log = std.log.scoped(.hotkey_array_hashmap);
 
 allocator: std.mem.Allocator,
-flags: ModifierFlag = undefined,
-key: u32 = undefined,
+flags: ModifierFlag = .{},
+key: u32 = 0,
 wildcard_command: ?ProcessCommand = null,
 // Use ArrayHashMap for process name -> command mapping
 mappings: std.StringArrayHashMapUnmanaged(ProcessCommand) = .empty,
@@ -286,6 +286,23 @@ test "ArrayHashMap hotkey implementation" {
 
     // Test count
     try std.testing.expectEqual(@as(usize, 3), hotkey.getProcessCount()); // firefox, chrome, terminal (wildcard is separate)
+}
+
+test "hotkey initialization" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // Test that flags are properly initialized to empty
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(hotkey.flags)));
+    
+    // Test that key is properly initialized to 0
+    try std.testing.expectEqual(@as(u32, 0), hotkey.key);
+    
+    // Test that other fields are properly initialized
+    try std.testing.expectEqual(@as(?ProcessCommand, null), hotkey.wildcard_command);
+    try std.testing.expectEqual(@as(usize, 0), hotkey.mappings.count());
+    try std.testing.expectEqual(@as(usize, 0), hotkey.mode_list.count());
 }
 
 test "add_process_mapping returns error on duplicate" {

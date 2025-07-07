@@ -48,11 +48,10 @@ jobs:
         # Combine auto-generated notes with custom notes
         FULL_NOTES="$AUTO_NOTES"$'\n\n'"$CUSTOM_NOTES"
         
-        # Update the release with combined notes and publish it
+        # Update the release with combined notes but keep it as draft
         gh release edit ${{ github.ref_name }} \
           --repo ${{ github.repository }} \
-          --notes "$FULL_NOTES" \
-          --draft=false
+          --notes "$FULL_NOTES"
 
   build-release:
     needs: create-release
@@ -91,8 +90,20 @@ jobs:
           --repo ${{ github.repository }} \
           --clobber
 
-  update-homebrew:
+  publish-release:
     needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Publish Release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release edit ${{ github.ref_name }} \
+          --repo ${{ github.repository }} \
+          --draft=false
+
+  update-homebrew:
+    needs: publish-release
     runs-on: ubuntu-latest
     steps:
     - name: Checkout homebrew-tap

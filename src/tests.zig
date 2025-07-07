@@ -1118,3 +1118,238 @@ test "Command definitions - with escaped quotes" {
     try testing.expect(cmd != null);
     try testing.expectEqualStrings("osascript -e 'display notification \"Hello \"World\"\" with title \"Test \"Message\"\"'", cmd.?.command);
 }
+
+test "Mode with command syntax" {
+    const allocator = testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\:: window : echo "Window mode activated"
+        \\:: browser : echo "Browser mode activated"
+        \\:: default
+        \\
+        \\# Test basic mode activation with command (new syntax)
+        \\cmd - w ; window : echo "Switching to window mode"
+        \\
+        \\# Test mode exit with command
+        \\window < escape ; default : echo "Exiting window mode"
+        \\
+        \\# Test process-specific mode activation with command
+        \\cmd - m [
+        \\    "chrome"  ; browser : echo "Chrome entering browser mode"
+        \\    "vscode"  ; window : echo "VSCode entering window mode"
+        \\    *         ; default : echo "Other apps entering default mode"
+        \\]
+        \\
+        \\# Test regular mode activation (original syntax for comparison)
+        \\cmd - d ; default
+    ;
+
+    try parser.parse(&mappings, config);
+
+    // Check that all modes were created
+    try testing.expect(mappings.mode_map.contains("default"));
+    try testing.expect(mappings.mode_map.contains("window"));
+    try testing.expect(mappings.mode_map.contains("browser"));
+
+    const default_mode = mappings.mode_map.get("default").?;
+    const window_mode = mappings.mode_map.get("window").?;
+
+    // Test 1: Basic mode activation with command (cmd - w ; window : echo "...")
+    // Find the hotkey in default mode
+    const ctx = Hotkey.KeyboardLookupContext{};
+    const w_keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x0D }; // W key
+    const w_hotkey = default_mode.hotkey_map.getKeyAdapted(w_keypress, ctx);
+    try testing.expect(w_hotkey != null);
+
+    // Check that it has the mode activation command
+    const w_cmd = w_hotkey.?.find_command_for_process(";");
+    try testing.expect(w_cmd != null);
+    
+    // Verify it's a mode_with_command variant
+    switch (w_cmd.?) {
+        .mode_with_command => |mode_cmd| {
+            try testing.expectEqualStrings("window", mode_cmd.mode_name);
+            try testing.expectEqualStrings("echo \"Switching to window mode\"", mode_cmd.command);
+        },
+        else => try testing.expect(false), // Should be mode_with_command
+    }
+
+    // Test 2: Mode exit with command (window < escape ; default : echo "...")
+    const escape_keypress = Hotkey.KeyPress{ .flags = .{}, .key = 0x35 }; // Escape key
+    const escape_hotkey = window_mode.hotkey_map.getKeyAdapted(escape_keypress, ctx);
+    try testing.expect(escape_hotkey != null);
+
+    const escape_cmd = escape_hotkey.?.find_command_for_process(";");
+    try testing.expect(escape_cmd != null);
+    
+    switch (escape_cmd.?) {
+        .mode_with_command => |mode_cmd| {
+            try testing.expectEqualStrings("default", mode_cmd.mode_name);
+            try testing.expectEqualStrings("echo \"Exiting window mode\"", mode_cmd.command);
+        },
+        else => try testing.expect(false),
+    }
+
+    // Test 3: Process-specific mode activation with command (cmd - m [...])
+    const m_keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x2E }; // M key
+    const m_hotkey = default_mode.hotkey_map.getKeyAdapted(m_keypress, ctx);
+    try testing.expect(m_hotkey != null);
+
+    // Test Chrome mapping
+    const chrome_cmd = m_hotkey.?.find_command_for_process("chrome");
+    try testing.expect(chrome_cmd != null);
+    
+    switch (chrome_cmd.?) {
+        .mode_with_command => |mode_cmd| {
+            try testing.expectEqualStrings("browser", mode_cmd.mode_name);
+            try testing.expectEqualStrings("echo \"Chrome entering browser mode\"", mode_cmd.command);
+        },
+        else => try testing.expect(false),
+    }
+
+    // Test VSCode mapping
+    const vscode_cmd = m_hotkey.?.find_command_for_process("vscode");
+    try testing.expect(vscode_cmd != null);
+    
+    switch (vscode_cmd.?) {
+        .mode_with_command => |mode_cmd| {
+            try testing.expectEqualStrings("window", mode_cmd.mode_name);
+            try testing.expectEqualStrings("echo \"VSCode entering window mode\"", mode_cmd.command);
+        },
+        else => try testing.expect(false),
+    }
+
+    // Test wildcard mapping
+    const wildcard_cmd = m_hotkey.?.find_command_for_process("unknown_app");
+    try testing.expect(wildcard_cmd != null);
+    
+    switch (wildcard_cmd.?) {
+        .mode_with_command => |mode_cmd| {
+            try testing.expectEqualStrings("default", mode_cmd.mode_name);
+            try testing.expectEqualStrings("echo \"Other apps entering default mode\"", mode_cmd.command);
+        },
+        else => try testing.expect(false),
+    }
+
+    // Test 4: Regular mode activation (original syntax - cmd - d ; default)
+    const d_keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x02 }; // D key
+    const d_hotkey = default_mode.hotkey_map.getKeyAdapted(d_keypress, ctx);
+    try testing.expect(d_hotkey != null);
+
+    const d_cmd = d_hotkey.?.find_command_for_process(";");
+    try testing.expect(d_cmd != null);
+    
+    // This should be a regular command (mode name only), not mode_with_command
+    switch (d_cmd.?) {
+        .command => |cmd| {
+            try testing.expectEqualStrings("default", cmd);
+        },
+        else => try testing.expect(false), // Should be regular command
+    }
+
+    // Test 5: Verify memory management - check that ProcessCommand.deinit handles mode_with_command
+    var test_cmd = Hotkey.ProcessCommand{ 
+        .mode_with_command = .{
+            .mode_name = try allocator.dupe(u8, "test_mode"),
+            .command = try allocator.dupe(u8, "test_command"),
+        }
+    };
+    
+    // This should not leak memory
+    test_cmd.deinit(allocator);
+}
+
+test "Mode entry commands with mode+command syntax" {
+    const allocator = testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\:: window : echo "Window mode entry command"
+        \\:: browser : echo "Browser mode entry command"
+        \\:: default
+        \\
+        \\# Regular mode activation (should execute mode entry command)
+        \\cmd - 1 ; window
+        \\
+        \\# Mode activation with command (should execute BOTH mode entry AND hotkey command)
+        \\cmd - 2 ; window : echo "Hotkey command"
+        \\
+        \\# Mode activation with command to different mode
+        \\cmd - 3 ; browser : echo "Browser hotkey command"
+    ;
+
+    try parser.parse(&mappings, config);
+
+    // Verify modes were created with entry commands
+    const window_mode = mappings.mode_map.get("window").?;
+    const browser_mode = mappings.mode_map.get("browser").?;
+    const default_mode = mappings.mode_map.get("default").?;
+
+    try testing.expectEqualStrings("echo \"Window mode entry command\"", window_mode.command.?);
+    try testing.expectEqualStrings("echo \"Browser mode entry command\"", browser_mode.command.?);
+    try testing.expect(default_mode.command == null); // Default mode has no entry command
+
+    // Test 1: Regular mode activation (cmd - 1 ; window)
+    const ctx = Hotkey.KeyboardLookupContext{};
+    const key1_press = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x12 }; // 1 key
+    const hotkey1 = default_mode.hotkey_map.getKeyAdapted(key1_press, ctx);
+    try testing.expect(hotkey1 != null);
+
+    const cmd1 = hotkey1.?.find_command_for_process(";");
+    try testing.expect(cmd1 != null);
+    
+    // Should be regular command (mode name only)
+    switch (cmd1.?) {
+        .command => |mode_name| {
+            try testing.expectEqualStrings("window", mode_name);
+        },
+        else => try testing.expect(false),
+    }
+
+    // Test 2: Mode activation with command (cmd - 2 ; window : echo "Hotkey command")
+    const key2_press = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x13 }; // 2 key
+    const hotkey2 = default_mode.hotkey_map.getKeyAdapted(key2_press, ctx);
+    try testing.expect(hotkey2 != null);
+
+    const cmd2 = hotkey2.?.find_command_for_process(";");
+    try testing.expect(cmd2 != null);
+    
+    // Should be mode_with_command variant
+    switch (cmd2.?) {
+        .mode_with_command => |mode_cmd| {
+            try testing.expectEqualStrings("window", mode_cmd.mode_name);
+            try testing.expectEqualStrings("echo \"Hotkey command\"", mode_cmd.command);
+        },
+        else => try testing.expect(false),
+    }
+
+    // Test 3: Mode activation with command to different mode (cmd - 3 ; browser : echo "Browser hotkey command")
+    const key3_press = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x14 }; // 3 key
+    const hotkey3 = default_mode.hotkey_map.getKeyAdapted(key3_press, ctx);
+    try testing.expect(hotkey3 != null);
+
+    const cmd3 = hotkey3.?.find_command_for_process(";");
+    try testing.expect(cmd3 != null);
+    
+    // Should be mode_with_command variant for browser
+    switch (cmd3.?) {
+        .mode_with_command => |mode_cmd| {
+            try testing.expectEqualStrings("browser", mode_cmd.mode_name);
+            try testing.expectEqualStrings("echo \"Browser hotkey command\"", mode_cmd.command);
+        },
+        else => try testing.expect(false),
+    }
+
+    // Note: The actual execution of mode entry commands is tested through integration
+    // tests since it requires the full skhd runtime. This test verifies that the
+    // data structures are set up correctly to support mode entry command execution.
+}

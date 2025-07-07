@@ -258,9 +258,15 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         // Mode activation hotkey - don't add command, just set flag
         hotkey.flags = hotkey.flags.merge(.{ .activate = true });
         const mode_name = self.previous().text;
-        // Don't add the target mode to the hotkey's mode list - that's for activation
-        // Instead, store it as a command (the mode name to switch to) with ";" as process name
-        try hotkey.add_process_mapping(";", .{ .command = mode_name });
+        
+        // Check if followed by a command (new syntax: ; mode : command)
+        const activation = try self.parse_mode_activation(mode_name);
+        try hotkey.add_process_mapping(";", activation.process_command);
+        
+        // Clean up allocated command reference if needed
+        if (activation.should_free) {
+            defer self.allocator.free(activation.process_command.mode_with_command.command);
+        }
     } else if (self.match(.Token_Forward)) {
         try hotkey.add_process_mapping("*", .{ .forwarded = try self.parse_keypress() });
     } else if (self.match(.Token_Command)) {
@@ -434,9 +440,18 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
             try hotkey.add_process_mapping(process_name, .{ .forwarded = try self.parse_keypress() });
         } else if (self.match(.Token_Unbound)) {
             try hotkey.add_process_mapping(process_name, .{ .unbound = void{} });
+        } else if (self.match(.Token_Activate)) {
+            // Mode activation in process list: "process" ; mode or "process" ; mode : command
+            const mode_name = self.previous().text;
+            const activation = try self.parse_mode_activation(mode_name);
+            try hotkey.add_process_mapping(process_name, activation.process_command);
+            
+            if (activation.should_free) {
+                defer self.allocator.free(activation.process_command.mode_with_command.command);
+            }
         } else {
             const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected command ':', forward '|' or unbound '~' after process name", self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected command ':', forward '|', unbound '~', or mode activation ';' after process name", self.current_file_path);
             return error.ParseErrorOccurred;
         }
         try self.parse_proc_list(mappings, hotkey);
@@ -481,9 +496,21 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
                 for (processes) |process_name| {
                     try hotkey.add_process_mapping(process_name, .{ .unbound = void{} });
                 }
+            } else if (self.match(.Token_Activate)) {
+                // Mode activation for process group: @group ; mode or @group ; mode : command
+                const mode_name = self.previous().text;
+                const activation = try self.parse_mode_activation(mode_name);
+                
+                for (processes) |process_name| {
+                    try hotkey.add_process_mapping(process_name, activation.process_command);
+                }
+                
+                if (activation.should_free) {
+                    defer self.allocator.free(activation.process_command.mode_with_command.command);
+                }
             } else {
                 const err_token = self.peek() orelse self.previous();
-                self.error_info = try ParseError.fromToken(self.allocator, err_token, "Expected command ':', forward '|' or unbound '~' after process group", self.current_file_path);
+                self.error_info = try ParseError.fromToken(self.allocator, err_token, "Expected command ':', forward '|', unbound '~', or mode activation ';' after process group", self.current_file_path);
                 return error.ParseErrorOccurred;
             }
         } else {
@@ -508,9 +535,18 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
             try hotkey.add_process_mapping("*", .{ .forwarded = try self.parse_keypress() });
         } else if (self.match(.Token_Unbound)) {
             try hotkey.add_process_mapping("*", .{ .unbound = {} });
+        } else if (self.match(.Token_Activate)) {
+            // Mode activation for wildcard: * ; mode or * ; mode : command
+            const mode_name = self.previous().text;
+            const activation = try self.parse_mode_activation(mode_name);
+            try hotkey.add_process_mapping("*", activation.process_command);
+            
+            if (activation.should_free) {
+                defer self.allocator.free(activation.process_command.mode_with_command.command);
+            }
         } else {
             const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected command ':', forward '|' or unbound '~' after wildcard", self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected command ':', forward '|', unbound '~', or mode activation ';' after wildcard", self.current_file_path);
             return error.ParseErrorOccurred;
         }
         try self.parse_proc_list(mappings, hotkey);
@@ -569,6 +605,48 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
         }
     } else {
         try mappings.put_mode(mode);
+    }
+}
+
+/// Parse a command after matching Token_Command, handling both regular commands and command references
+fn parse_command_after_colon(self: *Parser) !struct { command: []const u8, is_reference: bool } {
+    var command: []const u8 = undefined;
+    var is_reference = false;
+    
+    if (self.previous().text.len == 0 and self.peek_check(.Token_Reference)) {
+        // Empty command followed by reference (e.g., : @command)
+        command = try self.parse_command_reference();
+        is_reference = true;
+    } else {
+        // Regular command text from the Token_Command
+        command = self.previous().text;
+    }
+    
+    return .{ .command = command, .is_reference = is_reference };
+}
+
+/// Parse mode activation with optional command: ; mode or ; mode : command
+/// Returns the ProcessCommand to add and whether command memory should be freed
+fn parse_mode_activation(self: *Parser, mode_name: []const u8) !struct { process_command: Hotkey.ProcessCommand, should_free: bool } {
+    if (self.match(.Token_Command)) {
+        // Mode activation with command: ; mode : command
+        const parsed = try self.parse_command_after_colon();
+        
+        return .{
+            .process_command = Hotkey.ProcessCommand{ 
+                .mode_with_command = .{
+                    .mode_name = mode_name,
+                    .command = parsed.command,
+                }
+            },
+            .should_free = parsed.is_reference,
+        };
+    } else {
+        // Mode activation only: ; mode
+        return .{
+            .process_command = Hotkey.ProcessCommand{ .command = mode_name },
+            .should_free = false,
+        };
     }
 }
 

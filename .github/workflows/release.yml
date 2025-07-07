@@ -19,22 +19,11 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
+        NOTES=$'## Installation\n\n```bash\nbrew install jackielii/tap/skhd-zig\n```\n\nor upgrade:\n\n```bash\nbrew upgrade jackielii/tap/skhd-zig\n```\n\nSee [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for details.'
         gh release create ${{ github.ref_name }} \
           --repo ${{ github.repository }} \
           --title "${{ github.ref_name }}" \
-          --notes "## Installation
-
-\`\`\`bash
-brew install jackielii/tap/skhd-zig
-\`\`\`
-
-or upgrade:
-
-\`\`\`bash
-brew upgrade jackielii/tap/skhd-zig
-\`\`\`
-
-See [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for details."
+          --notes "$NOTES"
 
   build-release:
     needs: create-release

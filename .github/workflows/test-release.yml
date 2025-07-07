@@ -1,0 +1,31 @@
+name: Test Release
+
+on:
+  push:
+    tags:
+      - 'test-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  test-release:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Create Draft Release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "Creating test draft release for ${{ github.ref_name }}"
+        gh release create ${{ github.ref_name }} \
+          --repo ${{ github.repository }} \
+          --draft \
+          --title "TEST: ${{ github.ref_name }}" \
+          --notes "This is a test release. Do not use.
+
+## Test Release Notes
+
+- Testing automated release workflow
+- This is a draft and should not be published
+
+See [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for real release details."

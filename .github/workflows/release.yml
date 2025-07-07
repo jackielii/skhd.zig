@@ -18,12 +18,41 @@ jobs:
       id: create_release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        CUSTOM_NOTES: |
+          ## Installation
+          
+          ```bash
+          brew install jackielii/tap/skhd-zig
+          ```
+          
+          or upgrade:
+          
+          ```bash
+          brew upgrade jackielii/tap/skhd-zig
+          ```
+          
+          ## Documentation
+          
+          See [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for detailed changes.
       run: |
-        NOTES=$'## Installation\n\n```bash\nbrew install jackielii/tap/skhd-zig\n```\n\nor upgrade:\n\n```bash\nbrew upgrade jackielii/tap/skhd-zig\n```\n\nSee [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for details.'
+        # Create a draft release with auto-generated notes
         gh release create ${{ github.ref_name }} \
           --repo ${{ github.repository }} \
           --title "${{ github.ref_name }}" \
-          --notes "$NOTES"
+          --generate-notes \
+          --draft
+        
+        # Get the auto-generated notes
+        AUTO_NOTES=$(gh release view ${{ github.ref_name }} --repo ${{ github.repository }} --json body -q .body)
+        
+        # Combine auto-generated notes with custom notes
+        FULL_NOTES="$AUTO_NOTES"$'\n\n'"$CUSTOM_NOTES"
+        
+        # Update the release with combined notes and publish it
+        gh release edit ${{ github.ref_name }} \
+          --repo ${{ github.repository }} \
+          --notes "$FULL_NOTES" \
+          --draft=false
 
   build-release:
     needs: create-release

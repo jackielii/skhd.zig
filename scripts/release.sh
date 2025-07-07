@@ -32,7 +32,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 CURRENT_VERSION=$(cat VERSION)
-TAG="v$CURRENT_VERSION"
+# Use test prefix for testing
+TAG="test-v$CURRENT_VERSION"
 
 echo "Preparing to release version $CURRENT_VERSION"
 echo ""

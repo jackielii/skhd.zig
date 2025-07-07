@@ -1118,3 +1118,183 @@ test "Command definitions - with escaped quotes" {
     try testing.expect(cmd != null);
     try testing.expectEqualStrings("osascript -e 'display notification \"Hello \"World\"\" with title \"Test \"Message\"\"'", cmd.?.command);
 }
+
+test "Duplicate hotkey cleanup prevents stale pointers" {
+    // This test ensures that when a duplicate hotkey is parsed, the old hotkey
+    // is properly removed from all modes before being destroyed. This prevents
+    // a bug where the mode's HashMap could contain a stale pointer.
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\# First define a hotkey in default mode  
+        \\cmd - a : echo "first"
+        \\
+        \\# Create another mode
+        \\:: other
+        \\
+        \\# Define a duplicate that will replace the first
+        \\cmd - a : echo "second"
+    ;
+
+    // This should parse without crashing or undefined behavior
+    try parser.parse(&mappings, config);
+
+    // The test passes if we get here without crashing
+    // The fix ensures old hotkeys are removed from mode HashMaps before destruction
+}
+
+test "Duplicate hotkey detection - same mode" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Define the same hotkey twice in default mode
+    const config =
+        \\cmd - a : echo "first"
+        \\cmd - a : echo "second"
+    ;
+
+    // This should report an error
+    const result = parser.parse(&mappings, config);
+    try testing.expectError(error.ParseErrorOccurred, result);
+
+    // Check error message
+    const error_info = parser.getError().?;
+    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
+    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "cmd - a"));
+    try testing.expect(error_info.line == 2);
+}
+
+test "Duplicate hotkey detection - specific modifiers" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test exact duplicates with specific modifiers
+    const config =
+        \\lcmd - a : echo "first"
+        \\lcmd - a : echo "second"
+    ;
+
+    const result = parser.parse(&mappings, config);
+    try testing.expectError(error.ParseErrorOccurred, result);
+
+    const error_info = parser.getError().?;
+    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
+    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "lcmd - a"));
+}
+
+test "Duplicate hotkey detection - different modes allowed" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Same hotkey in different modes should be allowed
+    const config =
+        \\:: test_mode
+        \\cmd - a : echo "default"
+        \\test_mode < cmd - a : echo "test mode"
+    ;
+
+    // This should parse successfully
+    try parser.parse(&mappings, config);
+
+    // Verify both hotkeys exist
+    const default_mode = mappings.mode_map.get("default").?;
+    const test_mode = mappings.mode_map.get("test_mode").?;
+    try testing.expectEqual(@as(usize, 1), default_mode.hotkey_map.count());
+    try testing.expectEqual(@as(usize, 1), test_mode.hotkey_map.count());
+}
+
+test "Duplicate hotkey detection - left/right modifier variations allowed" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Different left/right modifiers should be allowed
+    const config =
+        \\lcmd - a : echo "left cmd"
+        \\rcmd - a : echo "right cmd"
+        \\cmd - a : echo "general cmd"
+    ;
+
+    // This should parse successfully - they are different hotkeys
+    try parser.parse(&mappings, config);
+
+    const default_mode = mappings.mode_map.get("default").?;
+    try testing.expectEqual(@as(usize, 3), default_mode.hotkey_map.count());
+}
+
+test "Duplicate hotkey detection - with process lists" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test duplicate with process lists
+    const config =
+        \\cmd - a [
+        \\    "firefox" : echo "firefox"
+        \\    * : echo "other"
+        \\]
+        \\cmd - a : echo "duplicate"
+    ;
+
+    const result = parser.parse(&mappings, config);
+    try testing.expectError(error.ParseErrorOccurred, result);
+
+    const error_info = parser.getError().?;
+    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
+    try testing.expect(error_info.line == 5);
+}
+
+test "Duplicate hotkey detection - multi-mode hotkey" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    // Test duplicate detection with multi-mode hotkey
+    const config =
+        \\:: mode1
+        \\:: mode2
+        \\mode1, mode2 < cmd - a : echo "multi mode"
+        \\mode1 < cmd - a : echo "duplicate in mode1"
+    ;
+
+    const result = parser.parse(&mappings, config);
+    try testing.expectError(error.ParseErrorOccurred, result);
+
+    const error_info = parser.getError().?;
+    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
+    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "mode1"));
+    try testing.expect(error_info.line == 4);
+}

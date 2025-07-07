@@ -1,0 +1,11 @@
+.define focus_direction : yabai -m window --focus {{1}} || yabai -m display --focus {{1}} || yabai -m display --focus {{2}}
+lcmd - h : @focus_direction("west", "recent")
+
+:: winmode @ : echo "Window mode: enabled"
+:: default : echo "Default mode: enabled"
+
+# Enter window mode with meh + m
+ctrl - m ; winmode
+winmode < escape ; default
+winmode < h : echo "Window mode: focus west"
+winmode < l : echo "Window mode: focus east"

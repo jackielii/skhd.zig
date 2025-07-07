@@ -55,7 +55,7 @@ pub fn deinit(self: *CarbonEvent) void {
 pub fn getProcessName(self: *CarbonEvent) []const u8 {
     self.mutex.lock();
     defer self.mutex.unlock();
-    
+
     // Return "unknown" if we don't have a process name
     if (self.buffer_len == 0) {
         return "unknown";

@@ -856,7 +856,7 @@ test "multiple process groups and reuse" {
     try testing.expectEqual(@as(usize, 4), native_group.len);
 
     // Should have 3 hotkeys
-    try testing.expectEqual(@as(usize, 3), mappings.hotkey_map.count());
+    try testing.expectEqual(@as(usize, 3), mappings.mode_map.get("default").?.hotkey_map.count());
 }
 
 test "Mode capture behavior" {
@@ -928,7 +928,7 @@ test "Command definitions - simple command" {
     try testing.expectEqual(@as(u8, 0), cmd_def.max_placeholder);
 
     // Check hotkey has expanded command
-    var it = mappings.hotkey_map.iterator();
+    var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
 
@@ -967,7 +967,7 @@ test "Command definitions - with single placeholder" {
 
     // Find hotkeys and check their commands
     var hotkey_count: usize = 0;
-    var it = mappings.hotkey_map.iterator();
+    var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
         // Since these hotkeys don't have process-specific mappings, they should have wildcard commands
@@ -1006,7 +1006,7 @@ test "Command definitions - multiple placeholders" {
     try testing.expectEqual(@as(u8, 2), cmd_def.max_placeholder);
 
     // Check expanded command
-    var it = mappings.hotkey_map.iterator();
+    var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
     const cmd = hotkey.find_command_for_process("*");
@@ -1030,7 +1030,7 @@ test "Command definitions - repeated placeholder" {
     try parser.parse(&mappings, config);
 
     // Check expanded command
-    var it = mappings.hotkey_map.iterator();
+    var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
     const cmd = hotkey.find_command_for_process("*");
@@ -1057,7 +1057,7 @@ test "Command definitions - in process list" {
     try parser.parse(&mappings, config);
 
     // Check hotkey has correct commands
-    var it = mappings.hotkey_map.iterator();
+    var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
 
@@ -1111,7 +1111,7 @@ test "Command definitions - with escaped quotes" {
     try parser.parse(&mappings, config);
 
     // Check expanded command has properly escaped quotes
-    var it = mappings.hotkey_map.iterator();
+    var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
     const cmd = hotkey.find_command_for_process("*");
@@ -1120,9 +1120,8 @@ test "Command definitions - with escaped quotes" {
 }
 
 test "Duplicate hotkey cleanup prevents stale pointers" {
-    // This test ensures that when a duplicate hotkey is parsed, the old hotkey
-    // is properly removed from all modes before being destroyed. This prevents
-    // a bug where the mode's HashMap could contain a stale pointer.
+    // This test ensures that when a duplicate hotkey is parsed, the error
+    // is properly handled without memory corruption or stale pointers.
     const allocator = std.testing.allocator;
 
     var parser = try Parser.init(allocator);
@@ -1135,18 +1134,16 @@ test "Duplicate hotkey cleanup prevents stale pointers" {
         \\# First define a hotkey in default mode  
         \\cmd - a : echo "first"
         \\
-        \\# Create another mode
-        \\:: other
-        \\
-        \\# Define a duplicate that will replace the first
+        \\# Try to define a duplicate in same mode
         \\cmd - a : echo "second"
     ;
 
-    // This should parse without crashing or undefined behavior
-    try parser.parse(&mappings, config);
+    // This should fail with a duplicate error
+    const result = parser.parse(&mappings, config);
+    try testing.expectError(error.ParseErrorOccurred, result);
 
     // The test passes if we get here without crashing
-    // The fix ensures old hotkeys are removed from mode HashMaps before destruction
+    // The hotkey tracking ensures proper cleanup even on errors
 }
 
 test "Duplicate hotkey detection - same mode" {

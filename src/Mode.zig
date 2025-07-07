@@ -63,6 +63,15 @@ pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOpti
 }
 
 pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
+    // First check if this hotkey already exists using the lookup context
+    const ctx = Hotkey.KeyboardLookupContext{};
+    const keypress = Hotkey.KeyPress{ .flags = hotkey.flags, .key = hotkey.key };
+    
+    if (self.hotkey_map.getKeyAdapted(keypress, ctx) != null) {
+        return error.DuplicateHotkeyInMode;
+    }
+    
+    // Now add it
     try self.hotkey_map.put(self.allocator, hotkey, {});
 }
 

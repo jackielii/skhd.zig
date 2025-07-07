@@ -7,9 +7,10 @@ const log = std.log.scoped(.mappings);
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
 blacklist: std.StringHashMapUnmanaged(void) = .empty,
-hotkey_map: Hotkey.HotkeyMap = .empty,
 shell: []const u8,
 loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
+// Track all hotkeys for cleanup (hotkeys can belong to multiple modes)
+hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
 
 const Mappings = @This();
 
@@ -27,13 +28,12 @@ pub fn init(alloc: std.mem.Allocator) !Mappings {
 }
 
 pub fn deinit(self: *Mappings) void {
-    {
-        var it = self.hotkey_map.iterator();
-        while (it.next()) |kv| {
-            kv.key_ptr.*.destroy();
-        }
-        self.hotkey_map.deinit(self.allocator);
+    // First destroy all hotkeys (must be done before destroying modes)
+    for (self.hotkeys.items) |hotkey| {
+        hotkey.destroy();
     }
+    self.hotkeys.deinit(self.allocator);
+
     {
         var it = self.mode_map.iterator();
         while (it.next()) |kv| {
@@ -59,16 +59,15 @@ pub fn deinit(self: *Mappings) void {
 }
 
 pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
-    const result = try self.hotkey_map.getOrPut(self.allocator, hotkey);
-    if (result.found_existing) {
-        return error.DuplicateHotkeyDefined;
-    }
-
+    // First try to add to all modes
     var it = hotkey.mode_list.iterator();
     while (it.next()) |kv| {
         const mode = kv.key_ptr.*;
         try mode.add_hotkey(hotkey);
     }
+    
+    // Only track the hotkey after successful addition to all modes
+    try self.hotkeys.append(self.allocator, hotkey);
 }
 
 pub fn set_shell(self: *Mappings, shell: []const u8) !void {

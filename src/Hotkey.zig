@@ -9,10 +9,10 @@ const log = std.log.scoped(.hotkey_array_hashmap);
 allocator: std.mem.Allocator,
 flags: ModifierFlag = undefined,
 key: u32 = undefined,
-// Use ArrayHashMap for process name -> command mapping
-mappings: std.StringArrayHashMapUnmanaged(ProcessCommand),
 wildcard_command: ?ProcessCommand = null,
-mode_list: std.AutoArrayHashMap(*Mode, void),
+// Use ArrayHashMap for process name -> command mapping
+mappings: std.StringArrayHashMapUnmanaged(ProcessCommand) = .empty,
+mode_list: std.AutoArrayHashMapUnmanaged(*Mode, void) = .empty,
 
 pub fn destroy(self: *Hotkey) void {
     var it = self.mappings.iterator();
@@ -27,7 +27,7 @@ pub fn destroy(self: *Hotkey) void {
         cmd.deinit(self.allocator);
     }
 
-    self.mode_list.deinit();
+    self.mode_list.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
@@ -35,11 +35,6 @@ pub fn create(allocator: std.mem.Allocator) !*Hotkey {
     const hotkey = try allocator.create(Hotkey);
     hotkey.* = .{
         .allocator = allocator,
-        .flags = ModifierFlag{},
-        .key = 0,
-        .mappings = .{},
-        .wildcard_command = null,
-        .mode_list = .init(allocator),
     };
     return hotkey;
 }
@@ -252,7 +247,7 @@ pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
     if (self.mode_list.contains(mode)) {
         return error.@"Mode already exists in hotkey mode";
     }
-    try self.mode_list.put(mode, {});
+    try self.mode_list.put(self.allocator, mode, {});
 }
 
 // Additional utility methods

@@ -38,9 +38,9 @@ TAG="test-v$CURRENT_VERSION"
 echo "Preparing to release version $CURRENT_VERSION"
 echo ""
 
-# Check if we're on main branch
+# Check if we're on main branch (skip for test branches)
 CURRENT_BRANCH=$(git branch --show-current)
-if [ "$CURRENT_BRANCH" != "main" ]; then
+if [[ "$CURRENT_BRANCH" != "main" && ! "$CURRENT_BRANCH" =~ ^test- ]]; then
     echo -e "${RED}Error: Not on main branch. Current branch: $CURRENT_BRANCH${NC}"
     echo "Please switch to main branch before releasing"
     exit 1

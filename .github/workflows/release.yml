@@ -1,14 +1,43 @@
 name: Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+    - name: Create Release
+      id: create_release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create ${{ github.ref_name }} \
+          --repo ${{ github.repository }} \
+          --title "${{ github.ref_name }}" \
+          --notes "## Installation
+
+\`\`\`bash
+brew install jackielii/tap/skhd-zig
+\`\`\`
+
+or upgrade:
+
+\`\`\`bash
+brew upgrade jackielii/tap/skhd-zig
+\`\`\`
+
+See [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for details."
+
   build-release:
+    needs: create-release
     strategy:
       matrix:
         include:
@@ -39,7 +68,7 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        gh release upload ${{ github.event.release.tag_name }} \
+        gh release upload ${{ github.ref_name }} \
           ./skhd-${{ matrix.arch }}-macos.tar.gz \
           --repo ${{ github.repository }} \
           --clobber
@@ -60,7 +89,7 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        VERSION="${{ github.event.release.tag_name }}"
+        VERSION="${{ github.ref_name }}"
         echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
         
         # Download release assets to calculate SHA256

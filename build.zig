@@ -4,15 +4,29 @@ fn linkFrameworks(exe: *std.Build.Step.Compile) void {
     exe.linkFramework("Cocoa");
     exe.linkFramework("Carbon");
     exe.linkFramework("CoreServices");
-
 }
 
 fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    const version_step = b.addSystemCommand(&[_][]const u8{
+        "sh", "-c",
+        \\VERSION=$(cat VERSION | tr -d '\n')
+        \\GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')
+        \\# Check if we're on a tagged commit
+        \\if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+        \\    # On a tag, just show version-hash
+        \\    printf "%s-%s" "$VERSION" "$GIT_HASH"
+        \\else
+        \\    # Not on a tag, show version-dev-hash
+        \\    printf "%s-dev-%s" "$VERSION" "$GIT_HASH"
+        \\fi
+    });
+    version_step.has_side_effects = true;
+
+    const version_file = version_step.captureStdOut();
     exe.root_module.addAnonymousImport("VERSION", .{
-        .root_source_file = b.path("VERSION"),
+        .root_source_file = version_file,
     });
 }
-
 
 const track_alloc_option = "track_alloc";
 
@@ -33,7 +47,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption(bool, track_alloc_option, false);
-    
+
     linkFrameworks(exe);
     addVersionImport(b, exe);
     exe.root_module.addOptions("build_options", options);

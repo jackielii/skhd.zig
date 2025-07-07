@@ -13,8 +13,7 @@ This implementation is **fully compatible with the original skhd configuration f
 The easiest way to install skhd.zig:
 
 ```bash
-brew tap jackielii/tap
-brew install skhd-zig
+brew install jackielii/tap/skhd-zig
 ```
 
 ### Pre-built Binaries
@@ -537,21 +536,37 @@ zig build alloc -- -V
 
 ### Release Process
 
-1. **Update Version**: Run `./scripts/bump-version.sh` to update the version number
-2. **Update Changelog**: Edit `CHANGELOG.md` with the changes for the new version
-3. **Commit Changes**: Commit both the version and changelog updates
-4. **Create Tag**: Create an annotated tag: `git tag -a v0.0.X -m "Release v0.0.X"`
-5. **Push**: Push commits and tag: `git push origin main && git push origin v0.0.X`
-6. **Create Release**: Use GitHub CLI to create the release:
+Our release workflow is fully automated through GitHub Actions:
 
+1. **Prepare for Release**:
+   - Ensure all changes are committed and pushed to main
+   - Update `CHANGELOG.md` with the changes for the current version
+   - Commit the changelog updates
+
+2. **Create and Deploy Release**:
    ```bash
-   gh release create v0.0.X --title "v0.0.X" --notes "See CHANGELOG.md for details"
+   # This script will:
+   # - Verify you're on main branch with no uncommitted changes
+   # - Run tests
+   # - Create and push a git tag
+   # - Optionally bump version for next development cycle
+   ./scripts/release.sh --bump patch
    ```
 
-   GitHub Actions will then automatically:
+3. **GitHub Actions** will automatically:
+   - Create a GitHub release with standardized release notes
    - Build binaries for both architectures
    - Upload artifacts to the release
    - Update the Homebrew tap formula
+
+The `--bump` flag is optional but recommended. It automatically prepares the version for the next development cycle after creating the release.
+
+### Version Format
+
+- **Tagged releases**: `0.0.8-9f3cfa4` (version-commit)
+- **Development builds**: `0.0.9-dev-1dc886e` (version-dev-commit)
+
+This allows users to easily identify whether they're running a released version or a development build.
 
 ## License
 

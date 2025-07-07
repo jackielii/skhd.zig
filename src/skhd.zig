@@ -1,21 +1,21 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
+const c = @import("c.zig");
+const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
-const Mappings = @import("Mappings.zig");
-const Parser = @import("Parser.zig");
+const forkAndExec = @import("exec.zig").forkAndExec;
 const Hotkey = @import("Hotkey.zig");
-const Mode = @import("Mode.zig");
+const Hotload = @import("Hotload.zig");
 const Keycodes = @import("Keycodes.zig");
 const ModifierFlag = Keycodes.ModifierFlag;
+const Mappings = @import("Mappings.zig");
+const Mode = @import("Mode.zig");
+const Parser = @import("Parser.zig");
+const Tracer = @import("Tracer.zig");
+
 // Use scoped logging for skhd module
 const log = std.log.scoped(.skhd);
-const Hotload = @import("Hotload.zig");
-const Tracer = @import("Tracer.zig");
-const CarbonEvent = @import("CarbonEvent.zig");
-const TrackingAllocator = @import("TrackingAllocator.zig");
-const c = @import("c.zig");
-const forkAndExec = @import("exec.zig").forkAndExec;
-
 const Skhd = @This();
 
 // Global reference for signal handler

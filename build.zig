@@ -7,18 +7,34 @@ fn linkFrameworks(exe: *std.Build.Step.Compile) void {
 }
 
 fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    // Get build mode string
+    const mode_str = switch (exe.root_module.optimize.?) {
+        .Debug => "debug",
+        .ReleaseSafe => "safe",
+        .ReleaseFast => "fast",
+        .ReleaseSmall => "small",
+    };
+    
     const version_step = b.addSystemCommand(&[_][]const u8{
         "sh", "-c",
-        \\VERSION=$(cat VERSION | tr -d '\n')
-        \\GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')
-        \\# Check if we're on a tagged commit
-        \\if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
-        \\    # On a tag, just show version-hash
-        \\    printf "%s-%s" "$VERSION" "$GIT_HASH"
-        \\else
-        \\    # Not on a tag, show version-dev-hash
-        \\    printf "%s-dev-%s" "$VERSION" "$GIT_HASH"
-        \\fi
+        b.fmt(
+            \\VERSION=$(cat VERSION | tr -d '\n')
+            \\GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')
+            \\# Check if working tree is dirty
+            \\if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+            \\    DIRTY="-dirty"
+            \\else
+            \\    DIRTY=""
+            \\fi
+            \\# Check if we're on a tagged commit
+            \\if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+            \\    # On a tag, just show version-hash
+            \\    printf "%s-%s%s ({s})" "$VERSION" "$GIT_HASH" "$DIRTY"
+            \\else
+            \\    # Not on a tag, show version-dev-hash
+            \\    printf "%s-dev-%s%s ({s})" "$VERSION" "$GIT_HASH" "$DIRTY"
+            \\fi
+        , .{ mode_str, mode_str }),
     });
     version_step.has_side_effects = true;
 

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9] - 2025-07-07
+
+### Fixed
+
+- A subtle but critical bug only happens in release mode due to how memory allocation works with aggressive allocators like `smp_allocator` or `c_allocator`. This bug caused HashMaps to silently point to different objects after destroying an object that was still referenced in the map. This has been fixed by using a array list to track the hotkeys instead of a HashMap, which avoids this issue entirely.
+
+### Added
+- Improved duplicate hotkey detection with better error reporting
+
+### Internal
+- Added issue template for better bug reporting
+- Updated CI workflow configuration
+- Include build mode in version string output
+
 ## [0.0.8] - 2025-07-06
 
 ### Changed

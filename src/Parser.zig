@@ -272,6 +272,9 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         } else {
             try hotkey.add_process_mapping("*", .{ .command = self.previous().text });
         }
+    } else if (self.match(.Token_Unbound)) {
+        // Simple unbound action: <keysym> ~
+        try hotkey.add_process_mapping("*", .{ .unbound = {} });
     } else if (self.match(.Token_BeginList)) {
         try self.parse_proc_list(mappings, hotkey);
     }

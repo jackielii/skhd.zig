@@ -295,10 +295,10 @@ test "hotkey initialization" {
 
     // Test that flags are properly initialized to empty
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(hotkey.flags)));
-    
+
     // Test that key is properly initialized to 0
     try std.testing.expectEqual(@as(u32, 0), hotkey.key);
-    
+
     // Test that other fields are properly initialized
     try std.testing.expectEqual(@as(?ProcessCommand, null), hotkey.wildcard_command);
     try std.testing.expectEqual(@as(usize, 0), hotkey.mappings.count());

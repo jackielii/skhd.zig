@@ -21,6 +21,13 @@ const Skhd = @This();
 // Global reference for signal handler
 var global_skhd: ?*Skhd = null;
 
+// Result of processing a hotkey
+const HotkeyResult = enum {
+    consumed, // Hotkey handled, consume the event
+    passthrough, // Hotkey found but marked as passthrough/unbound
+    not_found, // No matching hotkey
+};
+
 allocator: std.mem.Allocator,
 mappings: Mappings,
 current_mode: ?*Mode = null,
@@ -250,26 +257,30 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return event;
     }
 
-    // Create hotkey from event
     const eventkey = createEventKey(event);
+    const result = try self.processHotkey(&eventkey, event, process_name);
+    return try self.handleHotkeyResult(result, event, eventkey, process_name);
+}
 
-    // Single lookup to handle both forwarding and execution
-    if (try self.processHotkey(&eventkey, event, process_name)) {
-        // Hotkey was handled (forwarded or executed), consume the event
-        return @ptrFromInt(0);
+/// Process the result of a hotkey lookup and determine what to do with the event
+inline fn handleHotkeyResult(self: *Skhd, result: HotkeyResult, event: c.CGEventRef, eventkey: Hotkey.KeyPress, process_name: []const u8) !c.CGEventRef {
+    switch (result) {
+        .consumed => return @ptrFromInt(0),
+        .passthrough => return event,
+        .not_found => {
+            // Check if current mode has capture enabled
+            if (self.current_mode) |mode| {
+                if (mode.capture) {
+                    // Mode has capture enabled, consume all unmatched keypresses
+                    try self.logKeyPress("Capture mode consuming unmatched key: {s}, process name: {s}", eventkey, .{process_name});
+                    return @ptrFromInt(0);
+                }
+            }
+
+            try self.logKeyPress("No matching hotkey found for key: {s}, process name: {s}", eventkey, .{process_name});
+            return event;
+        },
     }
-
-    // Check if current mode has capture enabled
-    if (self.current_mode) |mode| {
-        if (mode.capture) {
-            // Mode has capture enabled, consume all keypresses
-            try self.logKeyPress("Capture mode consuming unmatched key: {s}, process name: {s}", eventkey, .{process_name});
-            return @ptrFromInt(0);
-        }
-    }
-
-    try self.logKeyPress("No matching hotkey found for key: {s}, process name: {s}", eventkey, .{process_name});
-    return event;
 }
 
 inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
@@ -296,17 +307,8 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
 
     var eventkey: Hotkey.KeyPress = undefined;
     if (interceptSystemKey(event, &eventkey)) {
-        if (try self.processHotkey(&eventkey, event, process_name)) {
-            return @ptrFromInt(0);
-        }
-
-        // Check if current mode has capture enabled
-        if (self.current_mode) |mode| {
-            if (mode.capture) {
-                // Mode has capture enabled, consume all system keypresses
-                return @ptrFromInt(0);
-            }
-        }
+        const result = try self.processHotkey(&eventkey, event, process_name);
+        return try self.handleHotkeyResult(result, event, eventkey, process_name);
     }
 
     return event;
@@ -545,15 +547,15 @@ pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey
 ///     return null;
 /// }
 /// Process a hotkey - single lookup that handles both forwarding and execution
-inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !bool {
-    const mode = self.current_mode orelse return false;
+inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !HotkeyResult {
+    const mode = self.current_mode orelse return .not_found;
 
     self.tracer.traceHotkeyLookup();
     const found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
 
     if (found_hotkey == null) {
         self.tracer.traceHotkeyFound(false);
-        return false;
+        return .not_found;
     }
 
     try self.logKeyPress("Found hotkey: '{s}' for process: '{s}' in mode '{s}'", eventkey.*, .{ process_name, mode.name });
@@ -578,19 +580,19 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                         if (target_mode.command) |mode_cmd| {
                             try forkAndExec(self.mappings.shell, mode_cmd, self.verbose);
                         }
-                        return true;
+                        return .consumed;
                     } else if (std.mem.eql(u8, mode_name, "default")) {
                         // Switching to default mode which should always exist
                         if (self.mappings.mode_map.getPtr("default")) |default_mode| {
                             self.current_mode = default_mode;
                             log.info("Switched to default mode", .{});
-                            return true;
+                            return .consumed;
                         }
                     }
 
                     // If we get here, mode wasn't found but we should still consume the event
                     // since this is a mode activation hotkey
-                    return true;
+                    return .consumed;
                 },
                 else => {
                     log.debug("Activate flag set but no command found", .{});
@@ -599,7 +601,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         } else {
             log.debug("Activate flag set but no activation mapping found", .{});
         }
-        return false;
+        return .not_found;
     }
 
     // Check for process-specific command/forward (includes wildcard fallback)
@@ -609,22 +611,22 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                 try self.logKeyPress("Forwarding key '{s}' for process {s}", target_key, .{process_name});
                 self.tracer.traceKeyForwarded();
                 try forwardKey(target_key, event);
-                return true;
+                return .consumed;
             },
             .command => |cmd| {
                 log.debug("Executing command '{s}' for process {s}", .{ cmd, process_name });
                 self.tracer.traceCommandExecuted();
                 try forkAndExec(self.mappings.shell, cmd, self.verbose);
-                return !hotkey.flags.passthrough;
+                return if (hotkey.flags.passthrough) .passthrough else .consumed;
             },
             .unbound => {
                 log.debug("Unbound key for process {s}", .{process_name});
-                return false;
+                return .passthrough;
             },
         }
     }
 
-    return false;
+    return .not_found;
 }
 
 /// Signal handler for SIGUSR1 - reload configuration
@@ -756,4 +758,85 @@ inline fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPres
     var buf: [256]u8 = undefined;
     const key_str = try Keycodes.formatKeyPressBuffer(&buf, key.flags, key.key);
     log.debug(fmt, .{key_str} ++ rest);
+}
+
+// Test helper to create a Skhd instance from a config string
+fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !Skhd {
+    // Parse the config
+    var mappings = try Mappings.init(allocator);
+    errdefer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    // Set up default mode if it exists
+    var current_mode: ?*Mode = null;
+    if (mappings.mode_map.getPtr("default")) |default_mode| {
+        current_mode = default_mode;
+    }
+
+    // Create carbon event mock
+    const carbon_event = try CarbonEvent.init(allocator);
+    errdefer carbon_event.deinit();
+
+    return Skhd{
+        .allocator = allocator,
+        .mappings = mappings,
+        .current_mode = current_mode,
+        .event_tap = EventTap{ .mask = 0 },
+        .config_file = try allocator.dupe(u8, "test.conf"),
+        .verbose = false,
+        .tracer = Tracer.init(false),
+        .carbon_event = carbon_event,
+    };
+}
+
+test "processHotkey respects passthrough in capture mode" {
+    const alloc = std.testing.allocator;
+
+    const config =
+        \\:: capture @
+        \\capture < cmd - a -> : echo passthrough
+        \\capture < cmd - b : echo normal
+        \\capture < cmd - c ~
+    ;
+
+    var skhd = try createTestSkhdFromConfig(alloc, config);
+    defer skhd.deinit();
+
+    // Switch to capture mode
+    skhd.current_mode = skhd.mappings.mode_map.getPtr("capture");
+
+    // Create mock event
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    // Test passthrough command
+    {
+        const keypress = Hotkey.KeyPress{ .key = 0x00, .flags = ModifierFlag{ .cmd = true } }; // Cmd+A
+        const result = try skhd.processHotkey(&keypress, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.passthrough, result);
+    }
+
+    // Test normal command
+    {
+        const keypress = Hotkey.KeyPress{ .key = 0x0B, .flags = ModifierFlag{ .cmd = true } }; // Cmd+B
+        const result = try skhd.processHotkey(&keypress, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.consumed, result);
+    }
+
+    // Test unbound action
+    {
+        const keypress = Hotkey.KeyPress{ .key = 0x08, .flags = ModifierFlag{ .cmd = true } }; // Cmd+C
+        const result = try skhd.processHotkey(&keypress, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.passthrough, result);
+    }
+
+    // Test unmatched key (should return not_found, allowing capture mode to consume it)
+    {
+        const keypress = Hotkey.KeyPress{ .key = 0x02, .flags = ModifierFlag{ .cmd = true } }; // Cmd+D (not defined)
+        const result = try skhd.processHotkey(&keypress, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.not_found, result);
+    }
 }

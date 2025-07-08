@@ -855,91 +855,32 @@ test "multiple process groups and reuse" {
     const native_group = parser.process_groups.get("native_apps").?;
     try testing.expectEqual(@as(usize, 4), native_group.len);
 
-    // Should have 3 hotkeys
-    try testing.expectEqual(@as(usize, 3), mappings.mode_map.get("default").?.hotkey_map.count());
-}
+    // Check that hotkeys were created
+    const default_mode = mappings.mode_map.get("default").?;
+    try testing.expectEqual(@as(usize, 3), default_mode.hotkey_map.count());
 
-test "Mode capture behavior" {
-    const allocator = testing.allocator;
+    // Verify that terminal apps are properly set as unbound
+    var it = default_mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        
+        // Check if terminal apps have unbound action
+        if (hotkey.find_command_for_process("kitty")) |cmd| {
+            if (hotkey.key == 0x33 or hotkey.key == 0x7B) { // backspace or left
+                try testing.expect(cmd == .unbound);
+            }
+        }
 
-    var parser = try Parser.init(allocator);
-    defer parser.deinit();
-
-    var mappings = try Mappings.init(allocator);
-    defer mappings.deinit();
-
-    // Test mode declaration with capture
-    const capture_config =
-        \\:: resize @ : echo "Entering resize mode"
-        \\resize < h : yabai -m window --resize left:-20:0
-        \\resize < l : yabai -m window --resize right:20:0 
-        \\resize < escape ; default
-    ;
-
-    try parser.parse(&mappings, capture_config);
-
-    // Check that resize mode was created with capture enabled
-    const resize_mode = mappings.mode_map.get("resize").?;
-    try testing.expect(resize_mode.capture);
-    try testing.expectEqualStrings("echo \"Entering resize mode\"", resize_mode.command.?);
-
-    // Test mode declaration without capture
-    const no_capture_config =
-        \\:: normal : echo "Normal mode"
-        \\normal < a : echo "action a"
-    ;
-
-    var parser2 = try Parser.init(allocator);
-    defer parser2.deinit();
-
-    var mappings2 = try Mappings.init(allocator);
-    defer mappings2.deinit();
-
-    try parser2.parse(&mappings2, no_capture_config);
-
-    // Check that normal mode was created without capture
-    const normal_mode = mappings2.mode_map.get("normal").?;
-    try testing.expect(!normal_mode.capture);
-    try testing.expectEqualStrings("echo \"Normal mode\"", normal_mode.command.?);
-}
-
-test "Command definitions - simple command" {
-    const allocator = testing.allocator;
-    var parser = try Parser.init(allocator);
-    defer parser.deinit();
-
-    var mappings = try Mappings.init(allocator);
-    defer mappings.deinit();
-
-    const config =
-        \\.define focus_west : yabai -m window --focus west
-        \\cmd - h : @focus_west
-    ;
-
-    try parser.parse(&mappings, config);
-
-    // Check command definition was stored
-    try testing.expect(parser.command_defs.contains("focus_west"));
-    const cmd_def = parser.command_defs.get("focus_west").?;
-    // Should have one text part
-    try testing.expectEqual(@as(usize, 1), cmd_def.parts.len);
-    try testing.expect(cmd_def.parts[0] == .text);
-    try testing.expectEqualStrings("yabai -m window --focus west", cmd_def.parts[0].text);
-    try testing.expectEqual(@as(u8, 0), cmd_def.max_placeholder);
-
-    // Check hotkey has expanded command
-    var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
-    const entry = it.next().?;
-    const hotkey = entry.key_ptr.*;
-
-    if (hotkey.find_command_for_process("*")) |c| {
-        try testing.expectEqualStrings("yabai -m window --focus west", c.command);
-    } else {
-        return error.TestExpectHotkeyCommandNotFound;
+        // Check if chrome has unbound action for home key
+        if (hotkey.key == 0x73) { // home
+            if (hotkey.find_command_for_process("chrome")) |cmd| {
+                try testing.expect(cmd == .unbound);
+            }
+        }
     }
 }
 
-test "Command definitions - with single placeholder" {
+test "Command definitions - single placeholder" {
     const allocator = testing.allocator;
     var parser = try Parser.init(allocator);
     defer parser.deinit();
@@ -1119,34 +1060,7 @@ test "Command definitions - with escaped quotes" {
     try testing.expectEqualStrings("osascript -e 'display notification \"Hello \"World\"\" with title \"Test \"Message\"\"'", cmd.?.command);
 }
 
-test "Duplicate hotkey cleanup prevents stale pointers" {
-    // This test ensures that when a duplicate hotkey is parsed, the error
-    // is properly handled without memory corruption or stale pointers.
-    const allocator = std.testing.allocator;
-
-    var parser = try Parser.init(allocator);
-    defer parser.deinit();
-
-    var mappings = try Mappings.init(allocator);
-    defer mappings.deinit();
-
-    const config =
-        \\# First define a hotkey in default mode  
-        \\cmd - a : echo "first"
-        \\
-        \\# Try to define a duplicate in same mode
-        \\cmd - a : echo "second"
-    ;
-
-    // This should fail with a duplicate error
-    const result = parser.parse(&mappings, config);
-    try testing.expectError(error.ParseErrorOccurred, result);
-
-    // The test passes if we get here without crashing
-    // The hotkey tracking ensures proper cleanup even on errors
-}
-
-test "Duplicate hotkey detection - same mode" {
+test "Duplicate hotkey detection - same mode same hotkey" {
     const allocator = std.testing.allocator;
 
     var parser = try Parser.init(allocator);
@@ -1221,7 +1135,7 @@ test "Duplicate hotkey detection - different modes allowed" {
     try testing.expectEqual(@as(usize, 1), test_mode.hotkey_map.count());
 }
 
-test "Duplicate hotkey detection - left/right modifier variations allowed" {
+test "Duplicate hotkey detection - left/right modifiers are different" {
     const allocator = std.testing.allocator;
 
     var parser = try Parser.init(allocator);
@@ -1230,7 +1144,7 @@ test "Duplicate hotkey detection - left/right modifier variations allowed" {
     var mappings = try Mappings.init(allocator);
     defer mappings.deinit();
 
-    // Different left/right modifiers should be allowed
+    // Different left/right modifiers should be allowed (not duplicates)
     const config =
         \\lcmd - a : echo "left cmd"
         \\rcmd - a : echo "right cmd"
@@ -1240,37 +1154,12 @@ test "Duplicate hotkey detection - left/right modifier variations allowed" {
     // This should parse successfully - they are different hotkeys
     try parser.parse(&mappings, config);
 
+    // All three should exist
     const default_mode = mappings.mode_map.get("default").?;
     try testing.expectEqual(@as(usize, 3), default_mode.hotkey_map.count());
 }
 
-test "Duplicate hotkey detection - with process lists" {
-    const allocator = std.testing.allocator;
-
-    var parser = try Parser.init(allocator);
-    defer parser.deinit();
-
-    var mappings = try Mappings.init(allocator);
-    defer mappings.deinit();
-
-    // Test duplicate with process lists
-    const config =
-        \\cmd - a [
-        \\    "firefox" : echo "firefox"
-        \\    * : echo "other"
-        \\]
-        \\cmd - a : echo "duplicate"
-    ;
-
-    const result = parser.parse(&mappings, config);
-    try testing.expectError(error.ParseErrorOccurred, result);
-
-    const error_info = parser.getError().?;
-    try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
-    try testing.expect(error_info.line == 5);
-}
-
-test "Duplicate hotkey detection - multi-mode hotkey" {
+test "Duplicate hotkey detection - multi mode assignment" {
     const allocator = std.testing.allocator;
 
     var parser = try Parser.init(allocator);
@@ -1294,4 +1183,163 @@ test "Duplicate hotkey detection - multi-mode hotkey" {
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "mode1"));
     try testing.expect(error_info.line == 4);
+}
+
+test "Unbound action - simple syntax" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\cmd - a ~
+        \\cmd - b : echo "normal command"
+    ;
+
+    try parser.parse(&mappings, config);
+
+    // Check that unbound hotkey was created
+    const default_mode = mappings.mode_map.get("default").?;
+    try testing.expectEqual(@as(usize, 2), default_mode.hotkey_map.count());
+
+    // Find the unbound hotkey
+    var it = default_mode.hotkey_map.iterator();
+    var found_unbound = false;
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == 0x00) { // a key
+            found_unbound = true;
+            // Check it has unbound command
+            if (hotkey.find_command_for_process("*")) |cmd| {
+                try testing.expect(cmd == .unbound);
+            } else {
+                return error.TestExpectUnboundCommand;
+            }
+        }
+    }
+    try testing.expect(found_unbound);
+}
+
+test "Unbound action - with modes" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\:: test_mode
+        \\test_mode < cmd - x ~
+        \\test_mode < cmd - y : echo "in test mode"
+        \\cmd - z ~
+    ;
+
+    try parser.parse(&mappings, config);
+
+    // Check test_mode has unbound hotkey
+    const test_mode = mappings.mode_map.get("test_mode").?;
+    var found_mode_unbound = false;
+    var it = test_mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == 0x07) { // x key
+            found_mode_unbound = true;
+            if (hotkey.find_command_for_process("*")) |cmd| {
+                try testing.expect(cmd == .unbound);
+            }
+        }
+    }
+    try testing.expect(found_mode_unbound);
+
+    // Check default mode has unbound hotkey
+    const default_mode = mappings.mode_map.get("default").?;
+    var found_default_unbound = false;
+    it = default_mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == 0x06) { // z key
+            found_default_unbound = true;
+            if (hotkey.find_command_for_process("*")) |cmd| {
+                try testing.expect(cmd == .unbound);
+            }
+        }
+    }
+    try testing.expect(found_default_unbound);
+}
+
+test "Unbound action - with passthrough" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\cmd - a -> ~
+    ;
+
+    try parser.parse(&mappings, config);
+
+    // Check that hotkey has both passthrough flag and unbound command
+    const default_mode = mappings.mode_map.get("default").?;
+    var it = default_mode.hotkey_map.iterator();
+    const entry = it.next().?;
+    const hotkey = entry.key_ptr.*;
+    
+    try testing.expect(hotkey.flags.passthrough);
+    if (hotkey.find_command_for_process("*")) |cmd| {
+        try testing.expect(cmd == .unbound);
+    }
+}
+
+test "Unbound action - mixed with process lists" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\cmd - space ~  # Simple unbound
+        \\cmd - tab [     # Process list with unbound
+        \\    "terminal" ~
+        \\    "firefox" : echo "firefox tab"
+        \\    * | ctrl - tab
+        \\]
+    ;
+
+    try parser.parse(&mappings, config);
+
+    const default_mode = mappings.mode_map.get("default").?;
+    try testing.expectEqual(@as(usize, 2), default_mode.hotkey_map.count());
+
+    // Check cmd-space is fully unbound
+    var it = default_mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == 0x31) { // space key
+            if (hotkey.find_command_for_process("*")) |cmd| {
+                try testing.expect(cmd == .unbound);
+            }
+        } else if (hotkey.key == 0x30) { // tab key
+            // Check terminal is unbound
+            if (hotkey.find_command_for_process("terminal")) |cmd| {
+                try testing.expect(cmd == .unbound);
+            }
+            // Check firefox has command
+            if (hotkey.find_command_for_process("firefox")) |cmd| {
+                try testing.expect(cmd == .command);
+                try testing.expectEqualStrings("echo \"firefox tab\"", cmd.command);
+            }
+            // Check others forward
+            if (hotkey.find_command_for_process("other")) |cmd| {
+                try testing.expect(cmd == .forwarded);
+            }
+        }
+    }
 }

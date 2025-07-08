@@ -14,6 +14,7 @@ mode         = 'name of mode' | <mode> ',' <mode>
 action       = <keysym> '[' <proc_map_lst> ']' | <keysym> '->' '[' <proc_map_lst> ']'
                <keysym> ':' <command>          | <keysym> '->' ':' <command>
                <keysym> ';' <mode>             | <keysym> '->' ';' <mode>
+               <keysym> '~'
 
 keysym       = <mod> '-' <key> | <key>
 

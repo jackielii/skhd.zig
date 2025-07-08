@@ -14,6 +14,7 @@ NC='\033[0m' # No Color
 # Parse arguments
 BUMP_VERSION=false
 BUMP_TYPE="patch"
+CUSTOM_MESSAGE=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --bump)
@@ -24,8 +25,18 @@ while [[ $# -gt 0 ]]; do
             fi
             shift
             ;;
+        --message|-m)
+            if [[ -n "$2" ]]; then
+                CUSTOM_MESSAGE="$2"
+                shift
+            else
+                echo "Error: --message requires a value"
+                exit 1
+            fi
+            shift
+            ;;
         *)
-            echo "Usage: $0 [--bump major|minor|patch]"
+            echo "Usage: $0 [--bump major|minor|patch] [--message \"Release message\"]"
             exit 1
             ;;
     esac
@@ -80,7 +91,13 @@ zig build -Doptimize=ReleaseFast
 # Create tag
 echo ""
 echo -e "${YELLOW}Creating tag $TAG...${NC}"
-git tag -a "$TAG" -m "Release $TAG"
+if [ -n "$CUSTOM_MESSAGE" ]; then
+    # Use custom message
+    git tag -a "$TAG" -m "$CUSTOM_MESSAGE"
+else
+    # Default message
+    git tag -a "$TAG" -m "Release $TAG"
+fi
 
 echo ""
 echo -e "${GREEN}Release $TAG created successfully!${NC}"

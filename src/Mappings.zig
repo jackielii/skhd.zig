@@ -65,7 +65,7 @@ pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
         const mode = kv.key_ptr.*;
         try mode.add_hotkey(hotkey);
     }
-    
+
     // Only track the hotkey after successful addition to all modes
     try self.hotkeys.append(self.allocator, hotkey);
 }

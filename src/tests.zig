@@ -863,7 +863,7 @@ test "multiple process groups and reuse" {
     var it = default_mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        
+
         // Check if terminal apps have unbound action
         if (hotkey.find_command_for_process("kitty")) |cmd| {
             if (hotkey.key == 0x33 or hotkey.key == 0x7B) { // backspace or left
@@ -1289,7 +1289,7 @@ test "Unbound action - with passthrough" {
     var it = default_mode.hotkey_map.iterator();
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
-    
+
     try testing.expect(hotkey.flags.passthrough);
     if (hotkey.find_command_for_process("*")) |cmd| {
         try testing.expect(cmd == .unbound);

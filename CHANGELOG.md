@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10] - 2025-07-08
+
+### Fixed
+- **Critical bug fix**: Capture mode now respects passthrough and unbound actions
+  - Previously, capture mode would consume all keys including those explicitly marked as passthrough (`->`) or unbound (`~`)
+  - Now these keys are properly passed through to applications even in capture mode
+
+### Added
+- Support for unbound action syntax: `<keysym> ~`
+  - Keys marked as unbound are not captured and pass through to applications
+  - Compatible with all existing features (modes, process lists, etc.)
+- Added `--message` flag to release script for custom tag messages
+
+### Changed
+- Refactored hotkey processing to use `HotkeyResult` enum instead of boolean return
+  - Clearer distinction between consumed, passthrough, and not_found states
+  - Eliminated code duplication between `handleKeyDown` and `handleSystemKey`
+
+### Internal
+- Added comprehensive tests for capture mode behavior with passthrough and unbound actions
+- Extracted common hotkey result handling into `handleHotkeyResult` helper function
+- Updated SYNTAX.md documentation to include unbound action syntax
+
 ## [0.0.9] - 2025-07-07
 
 ### Fixed

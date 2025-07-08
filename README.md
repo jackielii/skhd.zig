@@ -532,42 +532,6 @@ zig build alloc -- -V
 4. Run tests: `zig build test`
 5. Submit a pull request
 
-## Publishing & Releases
-
-### Release Process
-
-Our release workflow is fully automated through GitHub Actions:
-
-1. **Prepare for Release**:
-   - Ensure all changes are committed and pushed to main
-   - Update `CHANGELOG.md` with the changes for the current version
-   - Commit the changelog updates
-
-2. **Create and Deploy Release**:
-   ```bash
-   # This script will:
-   # - Verify you're on main branch with no uncommitted changes
-   # - Run tests
-   # - Create and push a git tag
-   # - Optionally bump version for next development cycle
-   ./scripts/release.sh --bump patch
-   ```
-
-3. **GitHub Actions** will automatically:
-   - Create a GitHub release with standardized release notes
-   - Build binaries for both architectures
-   - Upload artifacts to the release
-   - Update the Homebrew tap formula
-
-The `--bump` flag is optional but recommended. It automatically prepares the version for the next development cycle after creating the release.
-
-### Version Format
-
-- **Tagged releases**: `0.0.8-9f3cfa4` (version-commit)
-- **Development builds**: `0.0.9-dev-1dc886e` (version-dev-commit)
-
-This allows users to easily identify whether they're running a released version or a development build.
-
 ## License
 
 This project maintains compatibility with the original skhd license.

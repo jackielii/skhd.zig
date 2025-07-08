@@ -14,7 +14,7 @@ fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
         .ReleaseFast => "fast",
         .ReleaseSmall => "small",
     };
-    
+
     const version_step = b.addSystemCommand(&[_][]const u8{
         "sh", "-c",
         b.fmt(

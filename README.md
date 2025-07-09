@@ -274,28 +274,6 @@ cmd - n [
     "finder"   : echo "New finder window"
     *          : echo "New window in other apps"
 ]
-
-# Unbind keys in specific applications
-cmd - q [
-    "terminal" ~  # Unbind Cmd+Q in Terminal (key is ignored)
-    *          : echo "Quit other applications"
-]
-
-# Using process groups (New in skhd.zig!)
-ctrl - backspace [
-    @terminal_apps ~       # All terminal apps handle natively
-    *              | alt - backspace  # Other apps: delete word
-]
-
-ctrl - left [
-    @terminal_apps ~       # All terminal apps handle natively
-    *              | alt - left       # Other apps: move word left
-]
-
-home [
-    @native_apps ~         # Native apps handle home key
-    *            | cmd - left       # Other apps: line start
-]
 ```
 
 ### Key Forwarding/Remapping

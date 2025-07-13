@@ -157,11 +157,11 @@ pub fn main() !void {
         for (common_processes) |process| {
             const cmd = try std.fmt.allocPrint(allocator, "echo '{s}'", .{process});
             defer allocator.free(cmd);
-            try hotkey_original.add_process_mapping(process, HotkeyOriginal.ProcessCommand{ .command = cmd });
+            try hotkey_original.add_process_command(process, cmd);
         }
 
         // Set wildcard commands using unified API
-        try hotkey_original.add_process_mapping("*", HotkeyOriginal.ProcessCommand{ .command = "echo 'default'" });
+        try hotkey_original.add_process_command("*", "echo 'default'");
 
         std.debug.print("Initialized hotkeys with {} process mappings\n\n", .{common_processes.len});
     }

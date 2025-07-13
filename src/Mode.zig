@@ -15,7 +15,7 @@ const log = std.log.scoped(.mode);
 
 allocator: std.mem.Allocator,
 name: []const u8,
-command: ?[]const u8 = null,
+command: ?[:0]const u8 = null,
 capture: bool = false,
 initialized: bool = false,
 hotkey_map: Hotkey.HotkeyMap = .empty,
@@ -38,7 +38,7 @@ pub fn deinit(self: *Mode) void {
 
 pub fn set_command(self: *Mode, command: []const u8) !void {
     if (self.command) |cmd| self.allocator.free(cmd);
-    self.command = try self.allocator.dupe(u8, command);
+    self.command = try self.allocator.dupeZ(u8, command);
 }
 
 pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -80,7 +80,7 @@ test "init" {
 
     var key = try Hotkey.create(alloc);
     defer key.destroy();
-    try key.add_process_mapping("notepad.exe", .{ .command = "echo notepad" });
+    try key.add_process_command("notepad.exe", "echo notepad");
     try key.add_mode(&mode);
     try mode.add_hotkey(key);
 

@@ -148,16 +148,23 @@ pub fn hotkeyFlagsMatch(config: ModifierFlag, keyboard: ModifierFlag) bool {
 }
 
 pub const ProcessCommand = union(enum) {
-    command: []const u8,
+    command: [:0]const u8,
     forwarded: KeyPress,
     unbound: void,
 
-    /// Create a new ProcessCommand by duplicating the command string if needed
-    pub fn init(allocator: std.mem.Allocator, cmd: ProcessCommand) !ProcessCommand {
-        return switch (cmd) {
-            .command => |str| ProcessCommand{ .command = try allocator.dupe(u8, str) },
-            else => cmd,
-        };
+    /// Create a command variant with a duplicated null-terminated string
+    pub fn initCommand(allocator: std.mem.Allocator, cmd: []const u8) !ProcessCommand {
+        return ProcessCommand{ .command = try allocator.dupeZ(u8, cmd) };
+    }
+
+    /// Create a forwarded variant
+    pub fn initForwarded(key_press: KeyPress) ProcessCommand {
+        return ProcessCommand{ .forwarded = key_press };
+    }
+
+    /// Create an unbound variant
+    pub fn initUnbound() ProcessCommand {
+        return ProcessCommand{ .unbound = {} };
     }
 
     /// Free any owned memory
@@ -186,13 +193,16 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("\n}}", .{});
 }
 
-pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: ProcessCommand) !void {
+pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []const u8) !void {
+    const owned_cmd = try ProcessCommand.initCommand(self.allocator, command);
+    errdefer owned_cmd.deinit(self.allocator);
+
     if (std.mem.eql(u8, process_name, "*")) {
         if (self.wildcard_command) |_| {
             return error.@"Wildcard command already exists";
         }
 
-        self.wildcard_command = try ProcessCommand.init(self.allocator, command);
+        self.wildcard_command = owned_cmd;
         return;
     }
 
@@ -204,16 +214,70 @@ pub fn add_process_mapping(self: *Hotkey, process_name: []const u8, command: Pro
         owned_name[i] = std.ascii.toLower(c);
     }
 
-    // Clone command using init
-    const owned_cmd = try ProcessCommand.init(self.allocator, command);
-    errdefer owned_cmd.deinit(self.allocator);
+    // Check if we're replacing an existing mapping
+    if (self.mappings.get(owned_name)) |existing_cmd| {
+        _ = existing_cmd;
+        return error.@"Process command already exists";
+    }
+
+    // Put into hashmap
+    try self.mappings.put(self.allocator, owned_name, owned_cmd);
+}
+
+pub fn add_process_forward(self: *Hotkey, process_name: []const u8, key_press: KeyPress) !void {
+    const owned_cmd = ProcessCommand.initForwarded(key_press);
+
+    if (std.mem.eql(u8, process_name, "*")) {
+        if (self.wildcard_command) |_| {
+            return error.@"Wildcard command already exists";
+        }
+
+        self.wildcard_command = owned_cmd;
+        return;
+    }
+
+    // Create lowercase version of process name for storage
+    const owned_name = try self.allocator.dupe(u8, process_name);
+    errdefer self.allocator.free(owned_name);
+
+    for (owned_name, 0..) |c, i| {
+        owned_name[i] = std.ascii.toLower(c);
+    }
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
         _ = existing_cmd;
         return error.@"Process command already exists";
-        // Free the existing command
-        // existing_cmd.deinit(self.allocator);
+    }
+
+    // Put into hashmap
+    try self.mappings.put(self.allocator, owned_name, owned_cmd);
+}
+
+pub fn add_process_unbound(self: *Hotkey, process_name: []const u8) !void {
+    const owned_cmd = ProcessCommand.initUnbound();
+
+    if (std.mem.eql(u8, process_name, "*")) {
+        if (self.wildcard_command) |_| {
+            return error.@"Wildcard command already exists";
+        }
+
+        self.wildcard_command = owned_cmd;
+        return;
+    }
+
+    // Create lowercase version of process name for storage
+    const owned_name = try self.allocator.dupe(u8, process_name);
+    errdefer self.allocator.free(owned_name);
+
+    for (owned_name, 0..) |c, i| {
+        owned_name[i] = std.ascii.toLower(c);
+    }
+
+    // Check if we're replacing an existing mapping
+    if (self.mappings.get(owned_name)) |existing_cmd| {
+        _ = existing_cmd;
+        return error.@"Process command already exists";
     }
 
     // Put into hashmap
@@ -264,9 +328,9 @@ test "ArrayHashMap hotkey implementation" {
     hotkey.key = 0x2;
 
     // Test the API
-    try hotkey.add_process_mapping("firefox", ProcessCommand{ .command = "echo firefox" });
-    try hotkey.add_process_mapping("chrome", ProcessCommand{ .command = "echo chrome" });
-    try hotkey.add_process_mapping("terminal", ProcessCommand{ .forwarded = KeyPress{ .flags = .{}, .key = 0x24 } });
+    try hotkey.add_process_command("firefox", "echo firefox");
+    try hotkey.add_process_command("chrome", "echo chrome");
+    try hotkey.add_process_forward("terminal", KeyPress{ .flags = .{}, .key = 0x24 });
 
     // Test lookup
     const firefox_cmd = hotkey.find_command_for_process("Firefox");
@@ -279,7 +343,7 @@ test "ArrayHashMap hotkey implementation" {
     try std.testing.expectEqualStrings("echo chrome", chrome_cmd.?.command);
 
     // Test wildcard
-    try hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo default" });
+    try hotkey.add_process_command("*", "echo default");
     const unknown_cmd = hotkey.find_command_for_process("unknown");
     try std.testing.expect(unknown_cmd != null);
     try std.testing.expectEqualStrings("echo default", unknown_cmd.?.command);
@@ -305,20 +369,20 @@ test "hotkey initialization" {
     try std.testing.expectEqual(@as(usize, 0), hotkey.mode_list.count());
 }
 
-test "add_process_mapping returns error on duplicate" {
+test "add_process returns error on duplicate" {
     const alloc = std.testing.allocator;
     var hotkey = try Hotkey.create(alloc);
     defer hotkey.destroy();
 
     // First mapping should succeed
-    try hotkey.add_process_mapping("firefox", ProcessCommand{ .command = "echo firefox" });
+    try hotkey.add_process_command("firefox", "echo firefox");
 
     // Duplicate mapping should fail
-    const result = hotkey.add_process_mapping("firefox", ProcessCommand{ .command = "echo firefox2" });
+    const result = hotkey.add_process_command("firefox", "echo firefox2");
     try std.testing.expectError(error.@"Process command already exists", result);
 
     // Case insensitive duplicate should also fail
-    const result2 = hotkey.add_process_mapping("FIREFOX", ProcessCommand{ .command = "echo firefox3" });
+    const result2 = hotkey.add_process_command("FIREFOX", "echo firefox3");
     try std.testing.expectError(error.@"Process command already exists", result2);
 
     // Original command should still be there
@@ -327,8 +391,8 @@ test "add_process_mapping returns error on duplicate" {
     try std.testing.expectEqualStrings("echo firefox", cmd.?.command);
 
     // Test wildcard duplicate
-    try hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo wildcard" });
-    const wildcard_result = hotkey.add_process_mapping("*", ProcessCommand{ .command = "echo wildcard2" });
+    try hotkey.add_process_command("*", "echo wildcard");
+    const wildcard_result = hotkey.add_process_command("*", "echo wildcard2");
     try std.testing.expectError(error.@"Wildcard command already exists", wildcard_result);
 
     // Original wildcard should still be there
@@ -349,7 +413,7 @@ test "ArrayHashMap performance characteristics" {
         const cmd = try std.fmt.allocPrint(alloc, "echo process_{}", .{i});
         defer alloc.free(cmd);
 
-        try hotkey.add_process_mapping(name, ProcessCommand{ .command = cmd });
+        try hotkey.add_process_command(name, cmd);
     }
 
     // Test some lookups

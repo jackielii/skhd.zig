@@ -7,7 +7,7 @@ const log = std.log.scoped(.mappings);
 allocator: std.mem.Allocator,
 mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
 blacklist: std.StringHashMapUnmanaged(void) = .empty,
-shell: []const u8,
+shell: [:0]const u8,
 loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
 // Track all hotkeys for cleanup (hotkeys can belong to multiple modes)
 hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
@@ -15,12 +15,12 @@ hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
 const Mappings = @This();
 
 pub fn init(alloc: std.mem.Allocator) !Mappings {
-    var shell: []const u8 = "/bin/bash";
-    if (std.posix.getenv("SHELL")) |env| {
-        shell = try alloc.dupe(u8, env);
-    } else {
-        shell = try alloc.dupe(u8, shell);
-    }
+    const default_shell = "/bin/bash";
+    const shell = if (std.posix.getenv("SHELL")) |env|
+        try alloc.dupeZ(u8, env)
+    else
+        try alloc.dupeZ(u8, default_shell);
+        
     return Mappings{
         .shell = shell,
         .allocator = alloc,
@@ -72,7 +72,7 @@ pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
 
 pub fn set_shell(self: *Mappings, shell: []const u8) !void {
     self.allocator.free(self.shell);
-    self.shell = try self.allocator.dupe(u8, shell);
+    self.shell = try self.allocator.dupeZ(u8, shell);
 }
 
 pub fn add_blacklist(self: *Mappings, key: []const u8) !void {

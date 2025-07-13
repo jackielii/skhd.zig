@@ -22,7 +22,7 @@ const std = @import("std");
 /// 5. Parent waits for child1 to prevent zombie
 /// 6. Child2 is now orphaned and adopted by init (PID 1)
 /// 7. When child2 eventually exits, init automatically reaps it
-pub inline fn forkAndExec(shell: []const u8, command: []const u8, verbose: bool) !void {
+pub inline fn forkAndExec(shell: [:0]const u8, command: [:0]const u8, verbose: bool) !void {
     const cpid = c.fork();
     if (cpid == -1) {
         return error.ForkFailed;
@@ -54,18 +54,11 @@ pub inline fn forkAndExec(shell: []const u8, command: []const u8, verbose: bool)
         }
 
         // Prepare arguments for execvp
-        // We need null-terminated strings
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
+        // No allocation needed - strings are already null-terminated
+        const arg_c = "-c";
+        const argv = [_:null]?[*:0]const u8{ shell.ptr, arg_c, command.ptr, null };
 
-        const shell_z = try allocator.dupeZ(u8, shell);
-        const arg_z = try allocator.dupeZ(u8, "-c");
-        const command_z = try allocator.dupeZ(u8, command);
-
-        const argv = [_:null]?[*:0]const u8{ shell_z, arg_z, command_z, null };
-
-        const status_code = c.execvp(shell_z, @ptrCast(&argv));
+        const status_code = c.execvp(shell.ptr, @ptrCast(&argv));
         // If execvp returns, it failed
         std.process.exit(@intCast(status_code));
     }

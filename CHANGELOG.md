@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11] - 2025-07-13
+
 ### Changed
 - Optimized command execution by using null-terminated strings throughout, eliminating runtime allocations in exec.zig
 - Refactored Hotkey API to have separate methods for each action type (add_process_command, add_process_forward, add_process_unbound)
+
+### Fixed
+- Fixed benchmark to use new Hotkey API methods
 
 ## [0.0.10] - 2025-07-08
 

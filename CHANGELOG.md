@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Mode activation with optional command execution** - Enhanced mode switching with command execution support
+  - New syntax: `keysym ; mode : command` executes command when switching to mode
+  - Process-specific mode activation in process lists (e.g., `"terminal" ; vim_mode`)
+  - Process group mode activation (e.g., `@browsers ; browser_mode`)
+  - Comprehensive test coverage for all activation scenarios
+- Added `activation` variant to `ProcessCommand` enum for proper mode activation tracking
+
+### Changed
+- Refactored command parsing to eliminate code duplication with helper function `parse_command`
+- Removed redundant `flags.activate` field from `ModifierFlag` 
+- Updated SYNTAX.md and README.md with comprehensive mode activation documentation
+
+### Fixed
+- Fixed mode activation implementation to use dedicated enum variant instead of borrowing command enum
+- Improved error handling for empty commands followed by references
+
 ## [0.0.11] - 2025-07-13
 
 ### Changed

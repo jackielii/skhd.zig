@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12] - 2025-07-15
+
 ### Added
 - **Mode activation with optional command execution** - Enhanced mode switching with command execution support
   - New syntax: `keysym ; mode : command` executes command when switching to mode

@@ -9,12 +9,12 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Parse arguments
 BUMP_VERSION=false
 BUMP_TYPE="patch"
-CUSTOM_MESSAGE=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --bump)
@@ -25,18 +25,8 @@ while [[ $# -gt 0 ]]; do
             fi
             shift
             ;;
-        --message|-m)
-            if [[ -n "$2" ]]; then
-                CUSTOM_MESSAGE="$2"
-                shift
-            else
-                echo "Error: --message requires a value"
-                exit 1
-            fi
-            shift
-            ;;
         *)
-            echo "Usage: $0 [--bump major|minor|patch] [--message \"Release message\"]"
+            echo "Usage: $0 [--bump major|minor|patch]"
             exit 1
             ;;
     esac
@@ -74,6 +64,34 @@ fi
 echo "Pulling latest changes from origin..."
 git pull origin main
 
+# Check if CHANGELOG.md has an entry for this version
+echo ""
+echo "Checking CHANGELOG.md..."
+if ! grep -q "## \[$CURRENT_VERSION\]" CHANGELOG.md; then
+    echo -e "${YELLOW}Warning: No changelog entry found for version $CURRENT_VERSION${NC}"
+    echo "Using Claude to generate changelog entry..."
+    
+    # Get git diff since last tag
+    LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+    if [ -n "$LAST_TAG" ]; then
+        GIT_LOG=$(git log --oneline $LAST_TAG..HEAD)
+    else
+        GIT_LOG=$(git log --oneline -20)
+    fi
+    
+    # Use Claude to analyze changes and update CHANGELOG.md
+    claude -p "Please analyze these git commits and update CHANGELOG.md with an entry for version $CURRENT_VERSION. Follow the existing format in the file. Here are the commits since the last release:\n\n$GIT_LOG\n\nPlease add the new entry after ## [Unreleased] and before the previous version entry. Use the current date." CHANGELOG.md
+    
+    echo ""
+    echo "CHANGELOG.md has been updated. Please review the changes."
+    echo -e "${YELLOW}Press Enter to continue with the updated changelog, or Ctrl+C to cancel${NC}"
+    read -r
+    
+    # Commit the changelog update
+    git add CHANGELOG.md
+    git commit -m "Update CHANGELOG.md for version $CURRENT_VERSION"
+fi
+
 # Run tests
 echo ""
 echo "Running tests..."
@@ -88,16 +106,31 @@ echo ""
 echo "Building release binaries..."
 zig build -Doptimize=ReleaseFast
 
-# Create tag
+# Generate release notes using Claude
+echo ""
+echo -e "${BLUE}Generating release notes...${NC}"
+CHANGELOG_ENTRY=$(awk "/## \[$CURRENT_VERSION\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
+
+RELEASE_NOTES=$(claude -p "Generate concise GitHub release notes for skhd.zig version $CURRENT_VERSION based on this changelog entry. Format it nicely with markdown, highlighting the most important changes first. Keep it user-friendly and avoid technical jargon where possible:\n\n$CHANGELOG_ENTRY")
+
+echo ""
+echo -e "${YELLOW}Release Notes:${NC}"
+echo "----------------------------------------"
+echo "$RELEASE_NOTES"
+echo "----------------------------------------"
+echo ""
+echo -e "${YELLOW}Do you want to proceed with creating tag $TAG with these release notes? (y/n)${NC}"
+read -r CONFIRM
+
+if [ "$CONFIRM" != "y" ]; then
+    echo -e "${RED}Release cancelled${NC}"
+    exit 1
+fi
+
+# Create tag with release notes
 echo ""
 echo -e "${YELLOW}Creating tag $TAG...${NC}"
-if [ -n "$CUSTOM_MESSAGE" ]; then
-    # Use custom message
-    git tag -a "$TAG" -m "$CUSTOM_MESSAGE"
-else
-    # Default message
-    git tag -a "$TAG" -m "Release $TAG"
-fi
+git tag -a "$TAG" -m "$RELEASE_NOTES"
 
 echo ""
 echo -e "${GREEN}Release $TAG created successfully!${NC}"

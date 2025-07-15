@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Script to create a release and optionally bump version for next cycle
-# Usage: ./scripts/release.sh [--bump major|minor|patch]
+# Script to create a release and bump version for next cycle
+# Usage: ./scripts/release.sh [--bump major|minor|patch] [--no-bump]
 
 set -e
 
@@ -13,8 +13,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Parse arguments
-BUMP_VERSION=false
-BUMP_TYPE="patch"
+BUMP_VERSION=true  # Default to true - always bump version
+BUMP_TYPE="patch"  # Default to patch bump
 while [[ $# -gt 0 ]]; do
     case $1 in
         --bump)
@@ -25,8 +25,14 @@ while [[ $# -gt 0 ]]; do
             fi
             shift
             ;;
+        --no-bump)
+            BUMP_VERSION=false
+            shift
+            ;;
         *)
-            echo "Usage: $0 [--bump major|minor|patch]"
+            echo "Usage: $0 [--bump major|minor|patch] [--no-bump]"
+            echo "  Default: bump patch version after release"
+            echo "  Use --no-bump to skip version bump"
             exit 1
             ;;
     esac

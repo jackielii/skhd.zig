@@ -20,7 +20,7 @@ pub fn init(alloc: std.mem.Allocator) !Mappings {
         try alloc.dupeZ(u8, env)
     else
         try alloc.dupeZ(u8, default_shell);
-        
+
     return Mappings{
         .shell = shell,
         .allocator = alloc,

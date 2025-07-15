@@ -527,25 +527,6 @@ pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey
     return result;
 }
 
-/// /// Linear search through all hotkeys in the mode
-/// pub inline fn findHotkeyLinear(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-///     self.tracer.traceHotkeyLookup();
-///     var it = mode.hotkey_map.iterator();
-///     var iterations: u64 = 0;
-///     while (it.next()) |entry| {
-///         iterations += 1;
-///         self.tracer.traceHotkeyComparison();
-///         const hotkey = entry.key_ptr.*;
-///         if (hotkey.key == eventkey.key and hotkeyFlagsMatch(hotkey.flags, eventkey.flags)) {
-///             self.tracer.traceLinearSearchIterations(iterations);
-///             self.tracer.traceHotkeyFound(true);
-///             return hotkey;
-///         }
-///     }
-///     self.tracer.traceLinearSearchIterations(iterations);
-///     self.tracer.traceHotkeyFound(false);
-///     return null;
-/// }
 /// Process a hotkey - single lookup that handles both forwarding and execution
 inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !HotkeyResult {
     const mode = self.current_mode orelse return .not_found;
@@ -561,48 +542,6 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
     try self.logKeyPress("Found hotkey: '{s}' for process: '{s}' in mode '{s}'", eventkey.*, .{ process_name, mode.name });
     self.tracer.traceHotkeyFound(true);
     const hotkey = found_hotkey.?;
-
-    // Check for mode activation first
-    if (hotkey.flags.activate) {
-        log.debug("Mode activation hotkey triggered", .{});
-        // Get the mode name from the activation mapping (stored with ";" as process name)
-        if (hotkey.find_command_for_process(";")) |cmd| {
-            switch (cmd) {
-                .command => |mode_name| {
-                    log.debug("Attempting to switch to mode '{s}'", .{mode_name});
-                    // Try to find the mode
-                    const new_mode = self.mappings.mode_map.getPtr(mode_name);
-
-                    if (new_mode) |target_mode| {
-                        self.current_mode = target_mode;
-                        log.info("Switched to mode '{s}'", .{target_mode.name});
-                        // Execute mode command if exists
-                        if (target_mode.command) |mode_cmd| {
-                            try forkAndExec(self.mappings.shell, mode_cmd, self.verbose);
-                        }
-                        return .consumed;
-                    } else if (std.mem.eql(u8, mode_name, "default")) {
-                        // Switching to default mode which should always exist
-                        if (self.mappings.mode_map.getPtr("default")) |default_mode| {
-                            self.current_mode = default_mode;
-                            log.info("Switched to default mode", .{});
-                            return .consumed;
-                        }
-                    }
-
-                    // If we get here, mode wasn't found but we should still consume the event
-                    // since this is a mode activation hotkey
-                    return .consumed;
-                },
-                else => {
-                    log.debug("Activate flag set but no command found", .{});
-                },
-            }
-        } else {
-            log.debug("Activate flag set but no activation mapping found", .{});
-        }
-        return .not_found;
-    }
 
     // Check for process-specific command/forward (includes wildcard fallback)
     if (hotkey.find_command_for_process(process_name)) |process_cmd| {
@@ -622,6 +561,27 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
             .unbound => {
                 log.debug("Unbound key for process {s}", .{process_name});
                 return .passthrough;
+            },
+            .activation => |act| {
+                // Execute activation command if provided
+                if (act.command) |activation_cmd| {
+                    log.debug("Executing activation command: {s}", .{activation_cmd});
+                    try forkAndExec(self.mappings.shell, activation_cmd, self.verbose);
+                }
+                log.debug("Activating mode '{s}'", .{act.mode_name});
+                self.current_mode = self.mappings.mode_map.getPtr(act.mode_name);
+                if (self.current_mode) |_mode| {
+                    if (_mode.command) |mode_cmd| {
+                        log.debug("Executing mode command: {s}", .{mode_cmd});
+                        try forkAndExec(self.mappings.shell, mode_cmd, self.verbose);
+                    }
+                } else {
+                    log.err("Failed to activate mode '{s}': mode not found", .{act.mode_name});
+                    log.debug("Resetting to default mode", .{});
+                    self.current_mode = self.mappings.mode_map.getPtr("default");
+                }
+
+                return .consumed;
             },
         }
     }

@@ -11,9 +11,9 @@ hotkey       = <mode> '<' <action> | <action>
 
 mode         = 'name of mode' | <mode> ',' <mode>
 
-action       = <keysym> '[' <proc_map_lst> ']' | <keysym> '->' '[' <proc_map_lst> ']'
-               <keysym> ':' <command>          | <keysym> '->' ':' <command>
-               <keysym> ';' <mode>             | <keysym> '->' ';' <mode>
+action       = <keysym> '[' <proc_map_lst> ']'   | <keysym> '->' '[' <proc_map_lst> ']'
+               <keysym> ':' <command>            | <keysym> '->' ':' <command>
+               <keysym> ';' <mode_activation>    | <keysym> '->' ';' <mode_activation>
                <keysym> '~'
 
 keysym       = <mod> '-' <key> | <key>
@@ -28,10 +28,13 @@ keycode      = 'apple keyboard kVK_<Key> values (0x3C)'
 
 proc_map_lst = * <proc_map>
 
-proc_map     = <string> ':' <command> | <string>     '~' |
-               '*'      ':' <command> | '*'          '~' |
-               '@' <group_name> ':' <command> | 
-               '@' <group_name> '~'
+proc_map     = <string> ':' <command>         | <string> '~'   |
+               '*'      ':' <command>         | '*'      '~'   |
+               <string> ';' <mode_activation> |
+               '*'      ';' <mode_activation> |
+               '@' <group_name> ':' <command> |
+               '@' <group_name> '~'           |
+               '@' <group_name> ';' <mode_activation>
 
 string       = '"' 'sequence of characters' '"'
 
@@ -55,12 +58,35 @@ command_reference = '@' <identifier> |
 
 arg_list     = <string> | <string> ',' <arg_list>
 
+mode_activation = <mode> | <mode> ':' <command>
+
 ->           = keypress is not consumed by skhd
 
 *            = matches every application not specified in <proc_map_lst>
 
 ~            = application is unbound and keypress is forwarded per usual
 ```
+
+## Mode Activation
+
+Mode activation allows switching between different hotkey modes. The syntax is:
+
+```
+mode_activation = <mode> | <mode> ':' <command>
+```
+
+- `;` followed by a mode name switches to that mode
+- An optional `:` followed by a command executes that command when switching modes
+
+### Examples:
+- `cmd - w ; window` - Switch to window mode
+- `cmd - w ; window : echo "Window mode"` - Switch to window mode and execute command
+- `escape ; default` - Switch back to default mode
+
+Mode activation can be used in:
+1. **Global hotkeys**: `cmd - w ; window`
+2. **Process-specific bindings**: `"terminal" ; vim_mode`
+3. **Process group bindings**: `@browsers ; browser_mode`
 
 ## Mode Declaration
 
@@ -223,9 +249,35 @@ home [
 # Enter mode
 cmd - w ; window
 
+# Enter mode and execute command
+cmd - w ; window : echo "Switching to window mode"
+
 # Commands in mode
 window < h : yabai -m window --focus west
-window < escape ; default
+window < escape ; default : echo "Returning to default mode"
+```
+
+### Process-Specific Mode Activation
+Mode activation can also be used in process lists, allowing different applications to trigger different modes:
+
+```bash
+# Define terminal and browser app groups
+.define terminal_apps ["kitty", "wezterm", "terminal"]
+.define browser_apps ["chrome", "safari", "firefox"]
+
+# Different apps switch to different modes with Cmd+M
+cmd - m [
+    @terminal_apps ; vim_mode : echo "Vim mode for terminals"
+    @browser_apps ; browser_mode : echo "Browser mode activated"
+    * ; default : echo "Back to default"
+]
+
+# Mode activation with command in process list
+cmd - e [
+    "code" ; edit_mode : osascript -e 'display notification "Edit mode for VS Code"'
+    "xcode" ; edit_mode : osascript -e 'display notification "Edit mode for Xcode"'
+    * : echo "No special mode for this app"
+]
 ```
 
 ### Passthrough Mode

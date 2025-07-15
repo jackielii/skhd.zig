@@ -102,6 +102,7 @@ The service will:
 - **Process groups**: Define named groups of applications for cleaner configs
 - **Command definitions**: Define reusable commands with placeholders to reduce repetition
 - **Key Forwarding**: Forward / remap key binding to another key binding
+- **Mode activation with command**: Execute a command when switching modes (e.g., `cmd - w ; window : echo "Window mode"`)
 
 ### Command-Line Interface
 
@@ -315,9 +316,15 @@ cmd - p -> : echo "This runs but Cmd+P still goes to app"
 :: default : echo -n "hollow" | nc -4u -w0 localhost 1738
 
 # Enter window mode with meh + m (shift + alt + ctrl + m)
-meh - m ; winmode
+meh - w ; winmode
 winmode < escape ; default
-winmode < meh - m ; default
+winmode < meh - w ; default
+
+# Alternative: Enter window mode AND show notification (New in skhd.zig!)
+# This executes the command when switching to the mode
+# It allows for different commands to execute and switch to another mode
+meh - w ; winmode : osascript -e 'display notification "Window mode active" with title "skhd"'
+winmode < escape ; default : osascript -e 'display notification "Normal mode" with title "skhd"'
 
 # Focus operations - basic hjkl for focus
 winmode < h : yabai -m window --focus west || yabai -m display --focus west

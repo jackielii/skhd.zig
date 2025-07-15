@@ -151,6 +151,12 @@ pub const ProcessCommand = union(enum) {
     command: [:0]const u8,
     forwarded: KeyPress,
     unbound: void,
+    activation: Activation,
+
+    pub const Activation = struct {
+        mode_name: []const u8,
+        command: ?[:0]const u8 = null,
+    };
 
     /// Create a command variant with a duplicated null-terminated string
     pub fn initCommand(allocator: std.mem.Allocator, cmd: []const u8) !ProcessCommand {
@@ -167,10 +173,22 @@ pub const ProcessCommand = union(enum) {
         return ProcessCommand{ .unbound = {} };
     }
 
+    /// Create an activation variant with a duplicated string and optional command
+    pub fn initActivation(allocator: std.mem.Allocator, mode_name: []const u8, cmd: ?[]const u8) !ProcessCommand {
+        return ProcessCommand{ .activation = .{
+            .mode_name = try allocator.dupe(u8, mode_name),
+            .command = if (cmd) |c| try allocator.dupeZ(u8, c) else null,
+        } };
+    }
+
     /// Free any owned memory
     pub fn deinit(self: ProcessCommand, allocator: std.mem.Allocator) void {
         switch (self) {
             .command => |str| allocator.free(str),
+            .activation => |act| {
+                allocator.free(act.mode_name);
+                if (act.command) |cmd| allocator.free(cmd);
+            },
             else => {},
         }
     }
@@ -206,13 +224,8 @@ pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []c
         return;
     }
 
-    // Create lowercase version of process name for storage
-    const owned_name = try self.allocator.dupe(u8, process_name);
+    const owned_name = try self.toLowercaseOwned(process_name);
     errdefer self.allocator.free(owned_name);
-
-    for (owned_name, 0..) |c, i| {
-        owned_name[i] = std.ascii.toLower(c);
-    }
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
@@ -222,6 +235,14 @@ pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []c
 
     // Put into hashmap
     try self.mappings.put(self.allocator, owned_name, owned_cmd);
+}
+
+fn toLowercaseOwned(self: *Hotkey, process_name: []const u8) ![]const u8 {
+    const owned_name = try self.allocator.dupe(u8, process_name);
+    for (owned_name, 0..) |c, i| {
+        owned_name[i] = std.ascii.toLower(c);
+    }
+    return owned_name;
 }
 
 pub fn add_process_forward(self: *Hotkey, process_name: []const u8, key_press: KeyPress) !void {
@@ -236,13 +257,8 @@ pub fn add_process_forward(self: *Hotkey, process_name: []const u8, key_press: K
         return;
     }
 
-    // Create lowercase version of process name for storage
-    const owned_name = try self.allocator.dupe(u8, process_name);
+    const owned_name = try self.toLowercaseOwned(process_name);
     errdefer self.allocator.free(owned_name);
-
-    for (owned_name, 0..) |c, i| {
-        owned_name[i] = std.ascii.toLower(c);
-    }
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
@@ -266,13 +282,34 @@ pub fn add_process_unbound(self: *Hotkey, process_name: []const u8) !void {
         return;
     }
 
-    // Create lowercase version of process name for storage
-    const owned_name = try self.allocator.dupe(u8, process_name);
+    const owned_name = try self.toLowercaseOwned(process_name);
     errdefer self.allocator.free(owned_name);
 
-    for (owned_name, 0..) |c, i| {
-        owned_name[i] = std.ascii.toLower(c);
+    // Check if we're replacing an existing mapping
+    if (self.mappings.get(owned_name)) |existing_cmd| {
+        _ = existing_cmd;
+        return error.@"Process command already exists";
     }
+
+    // Put into hashmap
+    try self.mappings.put(self.allocator, owned_name, owned_cmd);
+}
+
+pub fn add_process_activation(self: *Hotkey, process_name: []const u8, mode_name: []const u8, cmd: ?[]const u8) !void {
+    const owned_cmd = try ProcessCommand.initActivation(self.allocator, mode_name, cmd);
+    errdefer owned_cmd.deinit(self.allocator);
+
+    if (std.mem.eql(u8, process_name, "*")) {
+        if (self.wildcard_command) |_| {
+            return error.@"Wildcard command already exists";
+        }
+
+        self.wildcard_command = owned_cmd;
+        return;
+    }
+
+    const owned_name = try self.toLowercaseOwned(process_name);
+    errdefer self.allocator.free(owned_name);
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {

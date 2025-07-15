@@ -180,11 +180,13 @@ test "Mode switching hotkey" {
     const hotkey_count = default_mode.?.hotkey_map.count();
     try testing.expect(hotkey_count == 1);
 
-    // Check if the hotkey has the activate flag
+    // Check if the hotkey has activation for wildcard process
     var hotkey_iter = default_mode.?.hotkey_map.iterator();
     if (hotkey_iter.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        try testing.expect(hotkey.flags.activate);
+        const process_cmd = hotkey.find_command_for_process("*");
+        try testing.expect(process_cmd != null);
+        try testing.expect(process_cmd.? == .activation);
     }
 }
 
@@ -1340,6 +1342,447 @@ test "Unbound action - mixed with process lists" {
             if (hotkey.find_command_for_process("other")) |cmd| {
                 try testing.expect(cmd == .forwarded);
             }
+        }
+    }
+}
+
+test "mode activation uses activation variant" {
+    const allocator = std.testing.allocator;
+
+    const config =
+        \\:: window
+        \\cmd - w ; window
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    // Get the default mode and find the hotkey
+    const default_mode = mappings.mode_map.getPtr("default").?;
+    var it = default_mode.hotkey_map.iterator();
+
+    var found_activation = false;
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == 0x0D and hotkey.flags.cmd) { // cmd - w
+            const process_cmd = hotkey.find_command_for_process("*");
+            try std.testing.expect(process_cmd != null);
+            switch (process_cmd.?) {
+                .activation => |act| {
+                    try std.testing.expectEqualStrings("window", act.mode_name);
+                    try std.testing.expect(act.command == null);
+                    found_activation = true;
+                },
+                else => return error.WrongCommandType,
+            }
+        }
+    }
+
+    try std.testing.expect(found_activation);
+}
+
+test "mode activation with command" {
+    const allocator = std.testing.allocator;
+
+    const config =
+        \\:: window
+        \\cmd - w ; window : echo "Entering window mode"
+        \\escape ; default : echo "Back to default"
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    // Get the default mode and find the hotkey
+    const default_mode = mappings.mode_map.getPtr("default").?;
+    var it = default_mode.hotkey_map.iterator();
+
+    var found_window_activation = false;
+    var found_default_activation = false;
+
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == 0x0D and hotkey.flags.cmd) { // cmd - w
+            const process_cmd = hotkey.find_command_for_process("*");
+            try std.testing.expect(process_cmd != null);
+            switch (process_cmd.?) {
+                .activation => |act| {
+                    try std.testing.expectEqualStrings("window", act.mode_name);
+                    try std.testing.expect(act.command != null);
+                    try std.testing.expectEqualStrings("echo \"Entering window mode\"", act.command.?);
+                    found_window_activation = true;
+                },
+                else => return error.WrongCommandType,
+            }
+        } else if (hotkey.key == 0x35) { // escape
+            const process_cmd = hotkey.find_command_for_process("*");
+            try std.testing.expect(process_cmd != null);
+            switch (process_cmd.?) {
+                .activation => |act| {
+                    try std.testing.expectEqualStrings("default", act.mode_name);
+                    try std.testing.expect(act.command != null);
+                    try std.testing.expectEqualStrings("echo \"Back to default\"", act.command.?);
+                    found_default_activation = true;
+                },
+                else => return error.WrongCommandType,
+            }
+        }
+    }
+
+    try std.testing.expect(found_window_activation);
+    try std.testing.expect(found_default_activation);
+}
+
+test "mode activation with command reference" {
+    const allocator = std.testing.allocator;
+
+    const config =
+        \\.define notify : osascript -e 'display notification "{{1}}" with title "skhd"'
+        \\:: window
+        \\cmd - w ; window : @notify("Window mode active")
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    // Get the default mode and find the hotkey
+    const default_mode = mappings.mode_map.getPtr("default").?;
+    var it = default_mode.hotkey_map.iterator();
+
+    var found_activation = false;
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+        if (hotkey.key == 0x0D and hotkey.flags.cmd) { // cmd - w
+            const process_cmd = hotkey.find_command_for_process("*");
+            try std.testing.expect(process_cmd != null);
+            switch (process_cmd.?) {
+                .activation => |act| {
+                    try std.testing.expectEqualStrings("window", act.mode_name);
+                    try std.testing.expect(act.command != null);
+                    try std.testing.expectEqualStrings("osascript -e 'display notification \"Window mode active\" with title \"skhd\"'", act.command.?);
+                    found_activation = true;
+                },
+                else => return error.WrongCommandType,
+            }
+        }
+    }
+
+    try std.testing.expect(found_activation);
+}
+
+test "mode activation in process list" {
+    const allocator = std.testing.allocator;
+
+    const config =
+        \\:: vim_mode
+        \\:: browser_mode
+        \\cmd - m [
+        \\    "terminal" ; vim_mode : echo "Vim mode for terminal"
+        \\    "chrome" ; browser_mode
+        \\    * ; default : echo "Back to default"
+        \\]
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    // Get the default mode and find the hotkey
+    const default_mode = mappings.mode_map.getPtr("default").?;
+    var it = default_mode.hotkey_map.iterator();
+
+    var hotkey: ?*Hotkey = null;
+    while (it.next()) |entry| {
+        const hk = entry.key_ptr.*;
+        if (hk.key == 0x2E) { // m key
+            hotkey = hk;
+            break;
+        }
+    }
+
+    try std.testing.expect(hotkey != null);
+
+    // Check terminal process has vim_mode activation with command
+    const terminal_cmd = hotkey.?.find_command_for_process("terminal");
+    try std.testing.expect(terminal_cmd != null);
+    switch (terminal_cmd.?) {
+        .activation => |act| {
+            try std.testing.expectEqualStrings("vim_mode", act.mode_name);
+            try std.testing.expect(act.command != null);
+            try std.testing.expectEqualStrings("echo \"Vim mode for terminal\"", act.command.?);
+        },
+        else => return error.WrongCommandType,
+    }
+
+    // Check chrome process has browser_mode activation without command
+    const chrome_cmd = hotkey.?.find_command_for_process("chrome");
+    try std.testing.expect(chrome_cmd != null);
+    switch (chrome_cmd.?) {
+        .activation => |act| {
+            try std.testing.expectEqualStrings("browser_mode", act.mode_name);
+            try std.testing.expect(act.command == null);
+        },
+        else => return error.WrongCommandType,
+    }
+
+    // Check wildcard has default mode activation with command
+    const wildcard_cmd = hotkey.?.find_command_for_process("*");
+    try std.testing.expect(wildcard_cmd != null);
+    switch (wildcard_cmd.?) {
+        .activation => |act| {
+            try std.testing.expectEqualStrings("default", act.mode_name);
+            try std.testing.expect(act.command != null);
+            try std.testing.expectEqualStrings("echo \"Back to default\"", act.command.?);
+        },
+        else => return error.WrongCommandType,
+    }
+}
+
+test "process group command reference parsing" {
+    const allocator = std.testing.allocator;
+
+    // Test specifically: process groups with command references vs regular commands containing @
+    const config =
+        \\.define browsers ["firefox", "chrome"]
+        \\.define echo_cmd : echo "{{1}}"
+        \\
+        \\# Process group with command reference (empty token + reference)
+        \\cmd - a [
+        \\    @browsers : @echo_cmd("hello")
+        \\]
+        \\
+        \\# Process group with regular command containing @
+        \\cmd - b [
+        \\    @browsers : echo @not_a_reference
+        \\]
+        \\
+        \\# Mix of both in same list
+        \\cmd - c [
+        \\    "terminal" : @echo_cmd("term")
+        \\    @browsers : echo @symbol
+        \\    * : @echo_cmd("wildcard")
+        \\]
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    const default_mode = mappings.mode_map.getPtr("default").?;
+
+    // Find cmd-a and verify browsers have expanded command
+    var it = default_mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hk = entry.key_ptr.*;
+        if (hk.key == 0x00 and hk.flags.cmd) { // A key
+            // Check firefox mapping
+            const firefox_cmd = hk.find_command_for_process("firefox").?.command;
+            try std.testing.expectEqualStrings("echo \"hello\"", firefox_cmd);
+            // Check chrome mapping
+            const chrome_cmd = hk.find_command_for_process("chrome").?.command;
+            try std.testing.expectEqualStrings("echo \"hello\"", chrome_cmd);
+        } else if (hk.key == 0x0B and hk.flags.cmd) { // B key
+            // Check that @ symbol is preserved in regular command
+            const firefox_cmd = hk.find_command_for_process("firefox").?.command;
+            try std.testing.expectEqualStrings("echo @not_a_reference", firefox_cmd);
+        }
+    }
+}
+
+test "empty command token with reference" {
+    const allocator = std.testing.allocator;
+
+    // Test the specific case: ": @ref" should parse as command reference
+    // But ": echo @ref" should parse as literal command
+    const config =
+        \\.define test_cmd : echo "test {{1}}"
+        \\# Empty command token followed by reference
+        \\cmd - a : @test_cmd("hello")
+        \\# Non-empty command token with @ symbol  
+        \\cmd - b : echo @not_a_reference
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    const default_mode = mappings.mode_map.getPtr("default").?;
+
+    // Find both hotkeys
+    var cmd_a: ?[:0]const u8 = null;
+    var cmd_b: ?[:0]const u8 = null;
+
+    var it = default_mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hk = entry.key_ptr.*;
+        if (hk.key == 0x00 and hk.flags.cmd) { // A key
+            cmd_a = hk.wildcard_command.?.command;
+        } else if (hk.key == 0x0B and hk.flags.cmd) { // B key
+            cmd_b = hk.wildcard_command.?.command;
+        }
+    }
+
+    // cmd-a should have expanded command reference
+    try std.testing.expect(cmd_a != null);
+    try std.testing.expectEqualStrings("echo \"test hello\"", cmd_a.?);
+
+    // cmd-b should have literal command with @
+    try std.testing.expect(cmd_b != null);
+    try std.testing.expectEqualStrings("echo @not_a_reference", cmd_b.?);
+}
+
+test "mode declaration command references" {
+    const allocator = std.testing.allocator;
+
+    // Test mode declarations with command references vs regular commands
+    const config =
+        \\.define mode_cmd : echo "entering {{1}}"
+        \\
+        \\# Mode with command reference
+        \\:: mode1 : @mode_cmd("mode1")
+        \\
+        \\# Mode with regular command containing @
+        \\:: mode2 : echo @not_a_reference
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    // Verify mode1 has expanded command
+    const mode1 = mappings.mode_map.getPtr("mode1").?;
+    try std.testing.expect(mode1.command != null);
+    try std.testing.expectEqualStrings("echo \"entering mode1\"", mode1.command.?);
+
+    // Verify mode2 has literal command with @
+    const mode2 = mappings.mode_map.getPtr("mode2").?;
+    try std.testing.expect(mode2.command != null);
+    try std.testing.expectEqualStrings("echo @not_a_reference", mode2.command.?);
+}
+
+test "empty command followed by process group" {
+    const allocator = std.testing.allocator;
+
+    // Test case: empty command token followed by process group on next line
+    const config =
+        \\.define browsers ["firefox", "chrome"]
+        \\cmd - a [
+        \\    "firefox" : 
+        \\    @browsers : echo "browser command"
+        \\]
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    // This should produce an error because "firefox" : with nothing after colon is invalid
+    const result = parser.parseWithPath(&mappings, config, "test.conf");
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+
+    // TODO: our syntax design doesn't make this easy: the error is about command, but the @browsers is a process group reference
+    // I don't see a easy way around this besides look ahead infinitely to make sure the next token is indeed a process group
+    const parse_err = parser.getError().?;
+    try std.testing.expectEqualStrings("Command '@browsers' not found. Did you forget to define it with '.define browsers : ...'?", parse_err.message);
+}
+
+test "mode activation with process groups" {
+    const allocator = std.testing.allocator;
+
+    const config =
+        \\.define terminal_apps ["kitty", "wezterm", "terminal"]
+        \\.define browser_apps ["chrome", "safari", "firefox"]
+        \\:: vim_mode
+        \\:: browser_mode
+        \\cmd - m [
+        \\    @terminal_apps ; vim_mode : echo "Vim mode for terminals"
+        \\    @browser_apps ; browser_mode
+        \\    * ; default
+        \\]
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    // Get the default mode and find the hotkey
+    const default_mode = mappings.mode_map.getPtr("default").?;
+    var it = default_mode.hotkey_map.iterator();
+
+    var hotkey: ?*Hotkey = null;
+    while (it.next()) |entry| {
+        const hk = entry.key_ptr.*;
+        if (hk.key == 0x2E) { // m key
+            hotkey = hk;
+            break;
+        }
+    }
+
+    try std.testing.expect(hotkey != null);
+
+    // Check that all terminal apps have vim_mode activation
+    const terminal_apps = [_][]const u8{ "kitty", "wezterm", "terminal" };
+    for (terminal_apps) |app| {
+        const cmd = hotkey.?.find_command_for_process(app);
+        try std.testing.expect(cmd != null);
+        switch (cmd.?) {
+            .activation => |act| {
+                try std.testing.expectEqualStrings("vim_mode", act.mode_name);
+                try std.testing.expect(act.command != null);
+                try std.testing.expectEqualStrings("echo \"Vim mode for terminals\"", act.command.?);
+            },
+            else => return error.WrongCommandType,
+        }
+    }
+
+    // Check that all browser apps have browser_mode activation
+    const browser_apps = [_][]const u8{ "chrome", "safari", "firefox" };
+    for (browser_apps) |app| {
+        const cmd = hotkey.?.find_command_for_process(app);
+        try std.testing.expect(cmd != null);
+        switch (cmd.?) {
+            .activation => |act| {
+                try std.testing.expectEqualStrings("browser_mode", act.mode_name);
+                try std.testing.expect(act.command == null);
+            },
+            else => return error.WrongCommandType,
         }
     }
 }

@@ -163,6 +163,15 @@ pub const ProcessCommand = union(enum) {
     pub const Activation = struct {
         mode_name: []const u8,
         command: ?[:0]const u8 = null,
+
+        fn eql(self: Activation, other: Activation) bool {
+            if (!std.mem.eql(u8, self.mode_name, other.mode_name)) return false;
+            if (self.command == null and other.command == null) return true;
+            if (self.command != null and other.command != null) {
+                return std.mem.eql(u8, self.command.?, other.command.?);
+            }
+            return false;
+        }
     };
 
     /// Create a command variant with a duplicated null-terminated string
@@ -332,12 +341,7 @@ pub fn add_process_activation(self: *Hotkey, process_name: []const u8, mode_name
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
-        if (std.meta.activeTag(existing_cmd) == ProcessCommand.activation and
-            std.mem.eql(u8, existing_cmd.activation.mode_name, owned_cmd.activation.mode_name) and
-            ((existing_cmd.activation.command == null and owned_cmd.activation.command == null) or
-                (existing_cmd.activation.command != null and owned_cmd.activation.command != null and
-                    std.mem.eql(u8, existing_cmd.activation.command.?, owned_cmd.activation.command.?))))
-        {
+        if (std.meta.activeTag(existing_cmd) == ProcessCommand.activation and existing_cmd.activation.eql(owned_cmd.activation)) {
             self.allocator.free(owned_name);
             owned_cmd.deinit(self.allocator);
             return; // No need to replace if it's the same

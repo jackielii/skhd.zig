@@ -6,6 +6,13 @@ const utils = @import("utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const log = std.log.scoped(.hotkey_array_hashmap);
 
+// Error sets for better type safety
+pub const ProcessCommandError = error{
+    ProcessCommandAlreadyExists,
+    WildcardCommandAlreadyExists,
+    OutOfMemory,
+};
+
 allocator: std.mem.Allocator,
 flags: ModifierFlag = .{},
 key: u32 = 0,
@@ -211,13 +218,13 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
     try writer.print("\n}}", .{});
 }
 
-pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []const u8) !void {
+pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []const u8) ProcessCommandError!void {
     const owned_cmd = try ProcessCommand.initCommand(self.allocator, command);
     errdefer owned_cmd.deinit(self.allocator);
 
     if (std.mem.eql(u8, process_name, "*")) {
         if (self.wildcard_command) |_| {
-            return error.@"Wildcard command already exists";
+            return error.WildcardCommandAlreadyExists;
         }
 
         self.wildcard_command = owned_cmd;
@@ -234,7 +241,7 @@ pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []c
             owned_cmd.deinit(self.allocator);
             return;
         }
-        return error.@"Process command already exists";
+        return error.ProcessCommandAlreadyExists;
     }
 
     // Put into hashmap
@@ -249,12 +256,12 @@ fn toLowercaseOwned(self: *Hotkey, process_name: []const u8) ![]const u8 {
     return owned_name;
 }
 
-pub fn add_process_forward(self: *Hotkey, process_name: []const u8, key_press: KeyPress) !void {
+pub fn add_process_forward(self: *Hotkey, process_name: []const u8, key_press: KeyPress) ProcessCommandError!void {
     const owned_cmd = ProcessCommand.initForwarded(key_press);
 
     if (std.mem.eql(u8, process_name, "*")) {
         if (self.wildcard_command) |_| {
-            return error.@"Wildcard command already exists";
+            return error.WildcardCommandAlreadyExists;
         }
 
         self.wildcard_command = owned_cmd;
@@ -272,19 +279,19 @@ pub fn add_process_forward(self: *Hotkey, process_name: []const u8, key_press: K
             self.allocator.free(owned_name);
             return; // No need to replace if it's the same
         }
-        return error.@"Process command already exists";
+        return error.ProcessCommandAlreadyExists;
     }
 
     // Put into hashmap
     try self.mappings.put(self.allocator, owned_name, owned_cmd);
 }
 
-pub fn add_process_unbound(self: *Hotkey, process_name: []const u8) !void {
+pub fn add_process_unbound(self: *Hotkey, process_name: []const u8) ProcessCommandError!void {
     const owned_cmd = ProcessCommand.initUnbound();
 
     if (std.mem.eql(u8, process_name, "*")) {
         if (self.wildcard_command) |_| {
-            return error.@"Wildcard command already exists";
+            return error.WildcardCommandAlreadyExists;
         }
 
         self.wildcard_command = owned_cmd;
@@ -300,20 +307,20 @@ pub fn add_process_unbound(self: *Hotkey, process_name: []const u8) !void {
             self.allocator.free(owned_name);
             return; // No need to replace if it's already unbound
         }
-        return error.@"Process command already exists";
+        return error.ProcessCommandAlreadyExists;
     }
 
     // Put into hashmap
     try self.mappings.put(self.allocator, owned_name, owned_cmd);
 }
 
-pub fn add_process_activation(self: *Hotkey, process_name: []const u8, mode_name: []const u8, cmd: ?[]const u8) !void {
+pub fn add_process_activation(self: *Hotkey, process_name: []const u8, mode_name: []const u8, cmd: ?[]const u8) ProcessCommandError!void {
     const owned_cmd = try ProcessCommand.initActivation(self.allocator, mode_name, cmd);
     errdefer owned_cmd.deinit(self.allocator);
 
     if (std.mem.eql(u8, process_name, "*")) {
         if (self.wildcard_command) |_| {
-            return error.@"Wildcard command already exists";
+            return error.WildcardCommandAlreadyExists;
         }
 
         self.wildcard_command = owned_cmd;
@@ -335,7 +342,7 @@ pub fn add_process_activation(self: *Hotkey, process_name: []const u8, mode_name
             owned_cmd.deinit(self.allocator);
             return; // No need to replace if it's the same
         }
-        return error.@"Process command already exists";
+        return error.ProcessCommandAlreadyExists;
     }
 
     // Put into hashmap
@@ -367,7 +374,7 @@ pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?
 
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
     if (self.mode_list.contains(mode)) {
-        return error.@"Mode already exists in hotkey mode";
+        return error.ModeAlreadyExistsInHotkey;
     }
     try self.mode_list.put(self.allocator, mode, {});
 }
@@ -437,11 +444,11 @@ test "add_process returns error on duplicate" {
 
     // Duplicate mapping should fail
     const result = hotkey.add_process_command("firefox", "echo firefox2");
-    try std.testing.expectError(error.@"Process command already exists", result);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result);
 
     // Case insensitive duplicate should also fail
     const result2 = hotkey.add_process_command("FIREFOX", "echo firefox3");
-    try std.testing.expectError(error.@"Process command already exists", result2);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result2);
 
     // Original command should still be there
     const cmd = hotkey.find_command_for_process("firefox");
@@ -451,7 +458,7 @@ test "add_process returns error on duplicate" {
     // Test wildcard duplicate
     try hotkey.add_process_command("*", "echo wildcard");
     const wildcard_result = hotkey.add_process_command("*", "echo wildcard2");
-    try std.testing.expectError(error.@"Wildcard command already exists", wildcard_result);
+    try std.testing.expectError(error.WildcardCommandAlreadyExists, wildcard_result);
 
     // Original wildcard should still be there
     const wildcard_cmd = hotkey.find_command_for_process("unknown_process");
@@ -531,7 +538,7 @@ test "duplicate commands allowed if identical" {
     try hotkey.add_process_command("firefox", "echo firefox");
     // Adding the exact same command should succeed silently
     try hotkey.add_process_command("firefox", "echo firefox");
-    
+
     // Verify only one entry exists
     try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
     const cmd = hotkey.find_command_for_process("firefox");
@@ -544,7 +551,7 @@ test "duplicate commands allowed if identical" {
 
     // But different command should fail
     const result = hotkey.add_process_command("firefox", "echo different");
-    try std.testing.expectError(error.@"Process command already exists", result);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result);
 }
 
 test "duplicate forwards allowed if identical" {
@@ -569,7 +576,7 @@ test "duplicate forwards allowed if identical" {
     // Different forward should fail
     const different_key = KeyPress{ .flags = .{ .alt = true }, .key = 0x25 };
     const result = hotkey.add_process_forward("terminal", different_key);
-    try std.testing.expectError(error.@"Process command already exists", result);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result);
 }
 
 test "duplicate unbound allowed if identical" {
@@ -594,7 +601,7 @@ test "duplicate unbound allowed if identical" {
 
     // But changing from unbound to command should fail
     const result = hotkey.add_process_command("notepad", "echo notepad");
-    try std.testing.expectError(error.@"Process command already exists", result);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result);
 }
 
 test "duplicate activation allowed if identical" {
@@ -626,11 +633,11 @@ test "duplicate activation allowed if identical" {
 
     // Different mode name should fail
     const result = hotkey.add_process_activation("vscode", "normal", null);
-    try std.testing.expectError(error.@"Process command already exists", result);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result);
 
     // Different command should fail
     const result2 = hotkey.add_process_activation("sublime", "visual", "echo different");
-    try std.testing.expectError(error.@"Process command already exists", result2);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result2);
 }
 
 test "wildcard duplicate handling" {
@@ -642,32 +649,32 @@ test "wildcard duplicate handling" {
     try hotkey.add_process_command("*", "echo wildcard");
     const result = hotkey.add_process_command("*", "echo wildcard");
     // Wildcard doesn't allow duplicates even if identical
-    try std.testing.expectError(error.@"Wildcard command already exists", result);
+    try std.testing.expectError(error.WildcardCommandAlreadyExists, result);
 
     // Test wildcard forward
     var hotkey2 = try Hotkey.create(alloc);
     defer hotkey2.destroy();
-    
+
     const key_press = KeyPress{ .flags = .{}, .key = 0x24 };
     try hotkey2.add_process_forward("*", key_press);
     const result2 = hotkey2.add_process_forward("*", key_press);
-    try std.testing.expectError(error.@"Wildcard command already exists", result2);
+    try std.testing.expectError(error.WildcardCommandAlreadyExists, result2);
 
     // Test wildcard unbound
     var hotkey3 = try Hotkey.create(alloc);
     defer hotkey3.destroy();
-    
+
     try hotkey3.add_process_unbound("*");
     const result3 = hotkey3.add_process_unbound("*");
-    try std.testing.expectError(error.@"Wildcard command already exists", result3);
+    try std.testing.expectError(error.WildcardCommandAlreadyExists, result3);
 
     // Test wildcard activation
     var hotkey4 = try Hotkey.create(alloc);
     defer hotkey4.destroy();
-    
+
     try hotkey4.add_process_activation("*", "mode", "cmd");
     const result4 = hotkey4.add_process_activation("*", "mode", "cmd");
-    try std.testing.expectError(error.@"Wildcard command already exists", result4);
+    try std.testing.expectError(error.WildcardCommandAlreadyExists, result4);
 }
 
 test "mixed duplicate types should fail" {
@@ -681,15 +688,15 @@ test "mixed duplicate types should fail" {
     // Try to add forward for same app - should fail
     const key_press = KeyPress{ .flags = .{}, .key = 0x24 };
     const result1 = hotkey.add_process_forward("app", key_press);
-    try std.testing.expectError(error.@"Process command already exists", result1);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result1);
 
     // Try to add unbound for same app - should fail
     const result2 = hotkey.add_process_unbound("app");
-    try std.testing.expectError(error.@"Process command already exists", result2);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result2);
 
     // Try to add activation for same app - should fail
     const result3 = hotkey.add_process_activation("app", "mode", null);
-    try std.testing.expectError(error.@"Process command already exists", result3);
+    try std.testing.expectError(error.ProcessCommandAlreadyExists, result3);
 
     // Verify original command is still there
     try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());

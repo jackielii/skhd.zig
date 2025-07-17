@@ -215,6 +215,26 @@ fn processStringOwned(self: *Parser, str: []const u8) ![]const u8 {
     return try result.toOwnedSlice();
 }
 
+/// Helper function to handle errors from add_process_* methods with context
+fn handleProcessError(self: *Parser, err: anyerror, process_name: []const u8, operation: []const u8) !void {
+    const msg = switch (err) {
+        error.ProcessCommandAlreadyExists => blk: {
+            if (std.mem.eql(u8, process_name, "*")) {
+                break :blk try std.fmt.allocPrint(self.allocator, "Wildcard binding already has a different {s}. Each hotkey can only have one wildcard action", .{operation});
+            } else {
+                break :blk try std.fmt.allocPrint(self.allocator, "Process '{s}' already has a different {s} for this hotkey. Each process can only have one action per hotkey", .{ process_name, operation });
+            }
+        },
+        error.WildcardCommandAlreadyExists => try std.fmt.allocPrint(self.allocator, "This hotkey already has a wildcard {s}. Only one wildcard action is allowed per hotkey", .{operation}),
+        else => return err,
+    };
+    defer self.allocator.free(msg);
+
+    const token = self.previous();
+    self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+    return error.ParseErrorOccurred;
+}
+
 fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     var hotkey = try Hotkey.create(self.allocator);
     errdefer hotkey.destroy();
@@ -230,8 +250,20 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             return error.ParseErrorOccurred;
         }
     } else {
-        const default_mode = try mappings.get_mode_or_create_default("default") orelse unreachable;
-        try hotkey.add_mode(default_mode);
+        const default_mode = mappings.get_mode_or_create_default("default") catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed to get or create default mode: {s}", .{@errorName(err)});
+            defer self.allocator.free(msg);
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        } orelse unreachable;
+        hotkey.add_mode(default_mode) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed to add default mode to hotkey: {s}", .{@errorName(err)});
+            defer self.allocator.free(msg);
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        };
     }
 
     const found_modifier = self.match(.Token_Modifier);
@@ -272,19 +304,30 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         if (self.match(.Token_Command)) {
             const result = try self.parse_command();
             defer if (result.owns_memory) self.allocator.free(result.command);
-            try hotkey.add_process_activation("*", mode_name, result.command);
+            hotkey.add_process_activation("*", mode_name, result.command) catch |err| {
+                try self.handleProcessError(err, "*", "mode activation");
+            };
         } else {
-            try hotkey.add_process_activation("*", mode_name, null);
+            hotkey.add_process_activation("*", mode_name, null) catch |err| {
+                try self.handleProcessError(err, "*", "mode activation");
+            };
         }
     } else if (self.match(.Token_Forward)) {
-        try hotkey.add_process_forward("*", try self.parse_keypress());
+        const keypress = try self.parse_keypress();
+        hotkey.add_process_forward("*", keypress) catch |err| {
+            try self.handleProcessError(err, "*", "key forward");
+        };
     } else if (self.match(.Token_Command)) {
         const result = try self.parse_command();
         defer if (result.owns_memory) self.allocator.free(result.command);
-        try hotkey.add_process_command("*", result.command);
+        hotkey.add_process_command("*", result.command) catch |err| {
+            try self.handleProcessError(err, "*", "command");
+        };
     } else if (self.match(.Token_Unbound)) {
         // Simple unbound action: <keysym> ~
-        try hotkey.add_process_unbound("*");
+        hotkey.add_process_unbound("*") catch |err| {
+            try self.handleProcessError(err, "*", "unbound action");
+        };
     } else if (self.match(.Token_BeginList)) {
         try self.parse_proc_list(mappings, hotkey);
     }
@@ -325,13 +368,23 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
     assert(token.type == .Token_Identifier);
 
     const name = token.text;
-    const mode = try mappings.get_mode_or_create_default(name) orelse {
+    const mode = mappings.get_mode_or_create_default(name) catch |err| {
+        const msg = try std.fmt.allocPrint(self.allocator, "Failed to get or create mode '{s}': {s}", .{ name, @errorName(err) });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    } orelse {
         const msg = try std.fmt.allocPrint(self.allocator, "Mode '{s}' not found. Did you forget to declare it with '::{s}'?", .{ name, name });
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
         return error.ParseErrorOccurred;
     };
-    try hotkey.add_mode(mode);
+    hotkey.add_mode(mode) catch |err| {
+        const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ name, @errorName(err) });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
     if (self.match(.Token_Comma)) {
         if (self.match(.Token_Identifier)) {
             try self.parse_mode(mappings, hotkey);
@@ -387,7 +440,12 @@ fn parse_key_hex(self: *Parser) !u32 {
     const token = self.previous();
     const key = token.text;
 
-    const code = try std.fmt.parseInt(u32, key, 16);
+    const code = std.fmt.parseInt(u32, key, 16) catch {
+        const msg = try std.fmt.allocPrint(self.allocator, "Invalid hex keycode '0x{s}'. Expected a valid hexadecimal number (e.g., '0x24' for return key)", .{token.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
     return code;
 }
 
@@ -464,20 +522,31 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         if (self.match(.Token_Command)) {
             const result = try self.parse_command();
             defer if (result.owns_memory) self.allocator.free(result.command);
-            try hotkey.add_process_command(process_name, result.command);
+            hotkey.add_process_command(process_name, result.command) catch |err| {
+                try self.handleProcessError(err, process_name, "command");
+            };
         } else if (self.match(.Token_Forward)) {
-            try hotkey.add_process_forward(process_name, try self.parse_keypress());
+            const keypress = try self.parse_keypress();
+            hotkey.add_process_forward(process_name, keypress) catch |err| {
+                try self.handleProcessError(err, process_name, "key forward");
+            };
         } else if (self.match(.Token_Unbound)) {
-            try hotkey.add_process_unbound(process_name);
+            hotkey.add_process_unbound(process_name) catch |err| {
+                try self.handleProcessError(err, process_name, "unbound action");
+            };
         } else if (self.match(.Token_Activate)) {
             // Process-specific mode activation
             const mode_name = self.previous().text;
             if (self.match(.Token_Command)) {
                 const result = try self.parse_command();
                 defer if (result.owns_memory) self.allocator.free(result.command);
-                try hotkey.add_process_activation(process_name, mode_name, result.command);
+                hotkey.add_process_activation(process_name, mode_name, result.command) catch |err| {
+                    try self.handleProcessError(err, process_name, "mode activation");
+                };
             } else {
-                try hotkey.add_process_activation(process_name, mode_name, null);
+                hotkey.add_process_activation(process_name, mode_name, null) catch |err| {
+                    try self.handleProcessError(err, process_name, "mode activation");
+                };
             }
         } else {
             const token = self.peek() orelse self.previous();
@@ -507,16 +576,22 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
                 const result = try self.parse_command();
                 defer if (result.owns_memory) self.allocator.free(result.command);
                 for (processes) |process_name| {
-                    try hotkey.add_process_command(process_name, result.command);
+                    hotkey.add_process_command(process_name, result.command) catch |err| {
+                        try self.handleProcessError(err, process_name, "command");
+                    };
                 }
             } else if (self.match(.Token_Forward)) {
                 const forward_key = try self.parse_keypress();
                 for (processes) |process_name| {
-                    try hotkey.add_process_forward(process_name, forward_key);
+                    hotkey.add_process_forward(process_name, forward_key) catch |err| {
+                        try self.handleProcessError(err, process_name, "key forward");
+                    };
                 }
             } else if (self.match(.Token_Unbound)) {
                 for (processes) |process_name| {
-                    try hotkey.add_process_unbound(process_name);
+                    hotkey.add_process_unbound(process_name) catch |err| {
+                        try self.handleProcessError(err, process_name, "unbound action");
+                    };
                 }
             } else if (self.match(.Token_Activate)) {
                 // Process group mode activation
@@ -536,7 +611,9 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
 
                 // Apply activation to all processes in the group
                 for (processes) |process_name| {
-                    try hotkey.add_process_activation(process_name, mode_name, activation_command);
+                    hotkey.add_process_activation(process_name, mode_name, activation_command) catch |err| {
+                        try self.handleProcessError(err, process_name, "mode activation");
+                    };
                 }
             } else {
                 const err_token = self.peek() orelse self.previous();
@@ -554,20 +631,31 @@ fn parse_proc_list(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         if (self.match(.Token_Command)) {
             const result = try self.parse_command();
             defer if (result.owns_memory) self.allocator.free(result.command);
-            try hotkey.add_process_command("*", result.command);
+            hotkey.add_process_command("*", result.command) catch |err| {
+                try self.handleProcessError(err, "*", "command");
+            };
         } else if (self.match(.Token_Forward)) {
-            try hotkey.add_process_forward("*", try self.parse_keypress());
+            const keypress = try self.parse_keypress();
+            hotkey.add_process_forward("*", keypress) catch |err| {
+                try self.handleProcessError(err, "*", "key forward");
+            };
         } else if (self.match(.Token_Unbound)) {
-            try hotkey.add_process_unbound("*");
+            hotkey.add_process_unbound("*") catch |err| {
+                try self.handleProcessError(err, "*", "unbound action");
+            };
         } else if (self.match(.Token_Activate)) {
             // Wildcard mode activation
             const mode_name = self.previous().text;
             if (self.match(.Token_Command)) {
                 const result = try self.parse_command();
                 defer if (result.owns_memory) self.allocator.free(result.command);
-                try hotkey.add_process_activation("*", mode_name, result.command);
+                hotkey.add_process_activation("*", mode_name, result.command) catch |err| {
+                    try self.handleProcessError(err, "*", "mode activation");
+                };
             } else {
-                try hotkey.add_process_activation("*", mode_name, null);
+                hotkey.add_process_activation("*", mode_name, null) catch |err| {
+                    try self.handleProcessError(err, "*", "mode activation");
+                };
             }
         } else {
             const token = self.peek() orelse self.previous();
@@ -610,7 +698,12 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
         try mode.set_command(result.command);
     }
 
-    if (try mappings.get_mode_or_create_default(mode_name)) |existing_mode| {
+    if (mappings.get_mode_or_create_default(mode_name) catch |err| {
+        const msg = try std.fmt.allocPrint(self.allocator, "Failed to get or create mode '{s}': {s}", .{ mode_name, @errorName(err) });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    }) |existing_mode| {
         if (std.mem.eql(u8, existing_mode.name, "default")) {
             existing_mode.initialized = false;
             existing_mode.capture = mode.capture;
@@ -623,7 +716,12 @@ fn parse_mode_decl(self: *Parser, mappings: *Mappings) !void {
             return error.ParseErrorOccurred;
         }
     } else {
-        try mappings.put_mode(mode);
+        mappings.put_mode(mode) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed to create mode '{s}': {s}", .{ mode_name, @errorName(err) });
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        };
     }
 }
 
@@ -918,7 +1016,12 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
                 const token = self.previous();
                 const app_name = try self.processStringOwned(token.text);
                 defer self.allocator.free(app_name);
-                try mappings.add_blacklist(app_name);
+                mappings.add_blacklist(app_name) catch |err| {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Failed to add '{s}' to blacklist: {s}", .{ app_name, @errorName(err) });
+                    defer self.allocator.free(msg);
+                    self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+                    return error.ParseErrorOccurred;
+                };
             }
             if (!self.match(.Token_EndList)) {
                 const token = self.peek() orelse self.previous();
@@ -934,7 +1037,12 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         if (self.match(.Token_String)) {
             const shell_path = try self.processStringOwned(self.previous().text);
             defer self.allocator.free(shell_path);
-            try mappings.set_shell(shell_path);
+            mappings.set_shell(shell_path) catch |err| {
+                const msg = try std.fmt.allocPrint(self.allocator, "Failed to set shell to '{s}': {s}", .{ shell_path, @errorName(err) });
+                defer self.allocator.free(msg);
+                self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
+                return error.ParseErrorOccurred;
+            };
         } else {
             const token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected shell path after 'shell'", self.current_file_path);
@@ -967,7 +1075,12 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         // Add the resolved path to the loaded files list
         // Resolve to absolute path for hotloader
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const abs_path = try std.fs.cwd().realpath(resolved_path, &path_buf);
+        const abs_path = std.fs.cwd().realpath(resolved_path, &path_buf) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed to resolve path '{s}': {s}", .{ resolved_path, @errorName(err) });
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, directive.token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        };
         const duped_path = try self.allocator.dupe(u8, abs_path);
         try mappings.loaded_files.append(self.allocator, duped_path);
 

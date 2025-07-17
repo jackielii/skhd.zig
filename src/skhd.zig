@@ -53,12 +53,8 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     defer gpa.free(content);
 
     parser.parseWithPath(&mappings, content, config_file) catch |err| {
-        if (err == error.ParseErrorOccurred) {
-            // Log the parse error with proper formatting
-            if (parser.getError()) |parse_err| {
-                log.err("skhd: {}", .{parse_err});
-            }
-            return err;
+        if (parser.error_info) |parse_err| {
+            log.err("skhd: {}", .{parse_err});
         }
         return err;
     };
@@ -620,12 +616,9 @@ pub fn reloadConfig(self: *Skhd) !void {
     defer self.allocator.free(content);
 
     parser.parseWithPath(&new_mappings, content, self.config_file) catch |err| {
-        if (err == error.ParseErrorOccurred) {
-            // Log the parse error with proper formatting
-            if (parser.getError()) |parse_err| {
-                log.err("skhd: {}", .{parse_err});
-            }
-            return err;
+        // Log the parse error with proper formatting
+        if (parser.error_info) |parse_err| {
+            log.err("skhd: {}", .{parse_err});
         }
         return err;
     };

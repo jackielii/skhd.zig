@@ -90,10 +90,6 @@ pub fn deinit(self: *Parser) void {
     self.* = undefined;
 }
 
-pub fn getError(self: *const Parser) ?ParseError {
-    return self.error_info;
-}
-
 pub fn clearError(self: *Parser) void {
     if (self.error_info) |*error_info| {
         error_info.deinit();
@@ -134,13 +130,28 @@ pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, fi
     while (self.peek()) |token| {
         switch (token.type) {
             .Token_Identifier, .Token_Modifier, .Token_Literal, .Token_Key_Hex, .Token_Key, .Token_Activate => {
-                try self.parse_hotkey(mappings);
+                self.parse_hotkey(mappings) catch |err| {
+                    if (self.error_info == null) {
+                        self.error_info = try ParseError.fromToken(self.allocator, token, "Failed to parse hotkey", self.current_file_path);
+                    }
+                    return err;
+                };
             },
             .Token_Decl => {
-                try self.parse_mode_decl(mappings);
+                self.parse_mode_decl(mappings) catch |err| {
+                    if (self.error_info == null) {
+                        self.error_info = try ParseError.fromToken(self.allocator, token, "Failed to parse mode declaration", self.current_file_path);
+                    }
+                    return err;
+                };
             },
             .Token_Option => {
-                try self.parse_option(mappings);
+                self.parse_option(mappings) catch |err| {
+                    if (self.error_info == null) {
+                        self.error_info = try ParseError.fromToken(self.allocator, token, "Failed to parse option", self.current_file_path);
+                    }
+                    return err;
+                };
             },
             else => {
                 const msg = try std.fmt.allocPrint(self.allocator, "Unexpected token type: {s}, text: '{s}'", .{ @tagName(token.type), token.text });
@@ -847,6 +858,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             errdefer parsed.deinit(self.allocator);
 
             if (self.command_defs.contains(name)) {
+                self.error_info = try ParseError.fromToken(self.allocator, command_token, "Command already defined", self.current_file_path);
                 return error.CommandAlreadyDefined;
             }
 
@@ -875,6 +887,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             }
 
             if (self.process_groups.contains(name)) {
+                self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Process group already defined", self.current_file_path);
                 return error.ProcessGroupAlreadyDefined;
             }
 
@@ -1343,7 +1356,7 @@ test "command definition error: wrong argument count" {
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
     // Verify error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "expects 2 arguments but only 1 provided"));
 }
 
@@ -1364,7 +1377,7 @@ test "command definition error: missing arguments" {
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
     // Verify error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "expects 1 arguments but none provided"));
 }
 
@@ -1386,7 +1399,7 @@ test "command definition error: too many arguments" {
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
     // Verify error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "expects 1 arguments but 2 provided"));
 }
 
@@ -1407,7 +1420,7 @@ test "command definition error: undefined command" {
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
     // Verify error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Command '@undefined_command' not found"));
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, ".define undefined_command"));
 }
@@ -1430,7 +1443,7 @@ test "command definition error: unquoted arguments" {
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
     // Verify error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "must be enclosed in double quotes"));
 }
 
@@ -1603,7 +1616,7 @@ test "error on command invocation in process list" {
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
     // Verify error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Command invocation"));
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "not allowed here"));
 }
@@ -1628,7 +1641,7 @@ test "error on undefined process group in process list" {
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
 
     // Verify error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Undefined process group"));
     try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "@toggle"));
 }
@@ -1698,7 +1711,7 @@ test "invalid placeholder in command definition" {
         try std.testing.expectError(error.ParseErrorOccurred, result);
 
         // Verify error message contains expected text
-        const error_info = parser.getError().?;
+        const error_info = parser.error_info.?;
         try std.testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, test_case.expected_error));
     }
 }

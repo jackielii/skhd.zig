@@ -229,7 +229,11 @@ pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []c
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
-        _ = existing_cmd;
+        if (std.meta.activeTag(existing_cmd) == ProcessCommand.command and std.mem.eql(u8, existing_cmd.command, owned_cmd.command)) {
+            self.allocator.free(owned_name);
+            owned_cmd.deinit(self.allocator);
+            return;
+        }
         return error.@"Process command already exists";
     }
 
@@ -262,7 +266,12 @@ pub fn add_process_forward(self: *Hotkey, process_name: []const u8, key_press: K
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
-        _ = existing_cmd;
+        if (std.meta.activeTag(existing_cmd) == ProcessCommand.forwarded and
+            std.meta.eql(existing_cmd.forwarded, owned_cmd.forwarded))
+        {
+            self.allocator.free(owned_name);
+            return; // No need to replace if it's the same
+        }
         return error.@"Process command already exists";
     }
 
@@ -287,7 +296,10 @@ pub fn add_process_unbound(self: *Hotkey, process_name: []const u8) !void {
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
-        _ = existing_cmd;
+        if (std.meta.activeTag(existing_cmd) == ProcessCommand.unbound) {
+            self.allocator.free(owned_name);
+            return; // No need to replace if it's already unbound
+        }
         return error.@"Process command already exists";
     }
 
@@ -313,7 +325,16 @@ pub fn add_process_activation(self: *Hotkey, process_name: []const u8, mode_name
 
     // Check if we're replacing an existing mapping
     if (self.mappings.get(owned_name)) |existing_cmd| {
-        _ = existing_cmd;
+        if (std.meta.activeTag(existing_cmd) == ProcessCommand.activation and
+            std.mem.eql(u8, existing_cmd.activation.mode_name, owned_cmd.activation.mode_name) and
+            ((existing_cmd.activation.command == null and owned_cmd.activation.command == null) or
+                (existing_cmd.activation.command != null and owned_cmd.activation.command != null and
+                    std.mem.eql(u8, existing_cmd.activation.command.?, owned_cmd.activation.command.?))))
+        {
+            self.allocator.free(owned_name);
+            owned_cmd.deinit(self.allocator);
+            return; // No need to replace if it's the same
+        }
         return error.@"Process command already exists";
     }
 
@@ -499,4 +520,181 @@ test "hotkeyFlagsMatch behavior" {
         try testing.expect(hotkeyFlagsMatch(config, kb_match));
         try testing.expect(!hotkeyFlagsMatch(config, kb_no_match));
     }
+}
+
+test "duplicate commands allowed if identical" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // Test duplicate command with same content is allowed
+    try hotkey.add_process_command("firefox", "echo firefox");
+    // Adding the exact same command should succeed silently
+    try hotkey.add_process_command("firefox", "echo firefox");
+    
+    // Verify only one entry exists
+    try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
+    const cmd = hotkey.find_command_for_process("firefox");
+    try std.testing.expect(cmd != null);
+    try std.testing.expectEqualStrings("echo firefox", cmd.?.command);
+
+    // Test with case-insensitive duplicate
+    try hotkey.add_process_command("FIREFOX", "echo firefox");
+    try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
+
+    // But different command should fail
+    const result = hotkey.add_process_command("firefox", "echo different");
+    try std.testing.expectError(error.@"Process command already exists", result);
+}
+
+test "duplicate forwards allowed if identical" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    const key_press = KeyPress{ .flags = .{ .cmd = true }, .key = 0x24 };
+
+    // First forward should succeed
+    try hotkey.add_process_forward("terminal", key_press);
+    // Adding the exact same forward should succeed silently
+    try hotkey.add_process_forward("terminal", key_press);
+
+    // Verify only one entry exists
+    try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
+    const cmd = hotkey.find_command_for_process("terminal");
+    try std.testing.expect(cmd != null);
+    try std.testing.expect(cmd.? == .forwarded);
+    try std.testing.expect(std.meta.eql(cmd.?.forwarded, key_press));
+
+    // Different forward should fail
+    const different_key = KeyPress{ .flags = .{ .alt = true }, .key = 0x25 };
+    const result = hotkey.add_process_forward("terminal", different_key);
+    try std.testing.expectError(error.@"Process command already exists", result);
+}
+
+test "duplicate unbound allowed if identical" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // First unbound should succeed
+    try hotkey.add_process_unbound("notepad");
+    // Adding the same unbound should succeed silently
+    try hotkey.add_process_unbound("notepad");
+
+    // Verify only one entry exists
+    try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
+    const cmd = hotkey.find_command_for_process("notepad");
+    try std.testing.expect(cmd != null);
+    try std.testing.expect(cmd.? == .unbound);
+
+    // Case insensitive duplicate should also work
+    try hotkey.add_process_unbound("NOTEPAD");
+    try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
+
+    // But changing from unbound to command should fail
+    const result = hotkey.add_process_command("notepad", "echo notepad");
+    try std.testing.expectError(error.@"Process command already exists", result);
+}
+
+test "duplicate activation allowed if identical" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // Test activation without command
+    try hotkey.add_process_activation("vscode", "insert", null);
+    try hotkey.add_process_activation("vscode", "insert", null);
+
+    try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
+    const cmd = hotkey.find_command_for_process("vscode");
+    try std.testing.expect(cmd != null);
+    try std.testing.expect(cmd.? == .activation);
+    try std.testing.expectEqualStrings("insert", cmd.?.activation.mode_name);
+    try std.testing.expect(cmd.?.activation.command == null);
+
+    // Test activation with command
+    try hotkey.add_process_activation("sublime", "visual", "echo visual mode");
+    try hotkey.add_process_activation("sublime", "visual", "echo visual mode");
+
+    try std.testing.expectEqual(@as(usize, 2), hotkey.getProcessCount());
+    const cmd2 = hotkey.find_command_for_process("sublime");
+    try std.testing.expect(cmd2 != null);
+    try std.testing.expect(cmd2.? == .activation);
+    try std.testing.expectEqualStrings("visual", cmd2.?.activation.mode_name);
+    try std.testing.expectEqualStrings("echo visual mode", cmd2.?.activation.command.?);
+
+    // Different mode name should fail
+    const result = hotkey.add_process_activation("vscode", "normal", null);
+    try std.testing.expectError(error.@"Process command already exists", result);
+
+    // Different command should fail
+    const result2 = hotkey.add_process_activation("sublime", "visual", "echo different");
+    try std.testing.expectError(error.@"Process command already exists", result2);
+}
+
+test "wildcard duplicate handling" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // Test wildcard command duplicate
+    try hotkey.add_process_command("*", "echo wildcard");
+    const result = hotkey.add_process_command("*", "echo wildcard");
+    // Wildcard doesn't allow duplicates even if identical
+    try std.testing.expectError(error.@"Wildcard command already exists", result);
+
+    // Test wildcard forward
+    var hotkey2 = try Hotkey.create(alloc);
+    defer hotkey2.destroy();
+    
+    const key_press = KeyPress{ .flags = .{}, .key = 0x24 };
+    try hotkey2.add_process_forward("*", key_press);
+    const result2 = hotkey2.add_process_forward("*", key_press);
+    try std.testing.expectError(error.@"Wildcard command already exists", result2);
+
+    // Test wildcard unbound
+    var hotkey3 = try Hotkey.create(alloc);
+    defer hotkey3.destroy();
+    
+    try hotkey3.add_process_unbound("*");
+    const result3 = hotkey3.add_process_unbound("*");
+    try std.testing.expectError(error.@"Wildcard command already exists", result3);
+
+    // Test wildcard activation
+    var hotkey4 = try Hotkey.create(alloc);
+    defer hotkey4.destroy();
+    
+    try hotkey4.add_process_activation("*", "mode", "cmd");
+    const result4 = hotkey4.add_process_activation("*", "mode", "cmd");
+    try std.testing.expectError(error.@"Wildcard command already exists", result4);
+}
+
+test "mixed duplicate types should fail" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc);
+    defer hotkey.destroy();
+
+    // Add a command first
+    try hotkey.add_process_command("app", "echo app");
+
+    // Try to add forward for same app - should fail
+    const key_press = KeyPress{ .flags = .{}, .key = 0x24 };
+    const result1 = hotkey.add_process_forward("app", key_press);
+    try std.testing.expectError(error.@"Process command already exists", result1);
+
+    // Try to add unbound for same app - should fail
+    const result2 = hotkey.add_process_unbound("app");
+    try std.testing.expectError(error.@"Process command already exists", result2);
+
+    // Try to add activation for same app - should fail
+    const result3 = hotkey.add_process_activation("app", "mode", null);
+    try std.testing.expectError(error.@"Process command already exists", result3);
+
+    // Verify original command is still there
+    try std.testing.expectEqual(@as(usize, 1), hotkey.getProcessCount());
+    const cmd = hotkey.find_command_for_process("app");
+    try std.testing.expect(cmd != null);
+    try std.testing.expect(cmd.? == .command);
+    try std.testing.expectEqualStrings("echo app", cmd.?.command);
 }

@@ -477,8 +477,8 @@ test "Parser error messages" {
     parser.clearError();
     const err1 = parser.parse(&mappings, "mymode cmd - a : echo test");
     try testing.expectError(error.ParseErrorOccurred, err1);
-    try testing.expect(parser.getError() != null);
-    const parse_err1 = parser.getError().?;
+    try testing.expect(parser.error_info != null);
+    const parse_err1 = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, parse_err1.message, 1, "Mode 'mymode' not found"));
     try testing.expect(parse_err1.line == 1);
 
@@ -487,47 +487,47 @@ test "Parser error messages" {
     parser.clearError();
     const err1b = parser.parse(&mappings, "mymode cmd - a : echo test");
     try testing.expectError(error.ParseErrorOccurred, err1b);
-    const parse_err1b = parser.getError().?;
+    const parse_err1b = parser.error_info.?;
     try testing.expectEqualStrings("Expected '<' after mode identifier", parse_err1b.message);
 
     // Test unknown mode
     parser.clearError();
     const err2 = parser.parse(&mappings, "foo - b : echo test");
     try testing.expectError(error.ParseErrorOccurred, err2);
-    try testing.expect(parser.getError() != null);
-    const parse_err2 = parser.getError().?;
+    try testing.expect(parser.error_info != null);
+    const parse_err2 = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, parse_err2.message, 1, "Mode 'foo' not found"));
 
     // Test missing '-' after modifier
     parser.clearError();
     const err3 = parser.parse(&mappings, "cmd b : echo test");
     try testing.expectError(error.ParseErrorOccurred, err3);
-    try testing.expect(parser.getError() != null);
-    const parse_err3 = parser.getError().?;
+    try testing.expect(parser.error_info != null);
+    const parse_err3 = parser.error_info.?;
     try testing.expectEqualStrings("Expected '-' after modifier", parse_err3.message);
 
     // Test unknown key
     parser.clearError();
     const err4 = parser.parse(&mappings, "cmd - unknown_key : echo test");
     try testing.expectError(error.ParseErrorOccurred, err4);
-    try testing.expect(parser.getError() != null);
-    const parse_err4 = parser.getError().?;
+    try testing.expect(parser.error_info != null);
+    const parse_err4 = parser.error_info.?;
     try testing.expectEqualStrings("Expected key, key hex, or literal", parse_err4.message);
 
     // Test empty process list
     parser.clearError();
     const err5 = parser.parse(&mappings, "cmd - d []");
     try testing.expectError(error.ParseErrorOccurred, err5);
-    try testing.expect(parser.getError() != null);
-    const parse_err5 = parser.getError().?;
+    try testing.expect(parser.error_info != null);
+    const parse_err5 = parser.error_info.?;
     try testing.expectEqualStrings("Empty process list", parse_err5.message);
 
     // Test duplicate mode declaration
     parser.clearError();
     const err6 = parser.parse(&mappings, ":: test_mode\n:: test_mode");
     try testing.expectError(error.ParseErrorOccurred, err6);
-    try testing.expect(parser.getError() != null);
-    const parse_err6 = parser.getError().?;
+    try testing.expect(parser.error_info != null);
+    const parse_err6 = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, parse_err6.message, 1, "Mode 'test_mode' already exists"));
     try testing.expect(parse_err6.line == 2);
 
@@ -535,8 +535,8 @@ test "Parser error messages" {
     parser.clearError();
     const err7 = parser.parse(&mappings, ".unknown_option");
     try testing.expectError(error.ParseErrorOccurred, err7);
-    try testing.expect(parser.getError() != null);
-    const parse_err7 = parser.getError().?;
+    try testing.expect(parser.error_info != null);
+    const parse_err7 = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, parse_err7.message, 1, "Unknown option 'unknown_option'"));
 }
 
@@ -589,7 +589,7 @@ test "Parser error with multiline input" {
     const err = parser.parse(&mappings, multiline_config);
     try testing.expectError(error.ParseErrorOccurred, err);
 
-    const parse_err = parser.getError().?;
+    const parse_err = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, parse_err.message, 1, "Mode 'bad' not found"));
     try testing.expect(parse_err.line == 3);
     try testing.expectEqualStrings("bad", parse_err.token_text.?);
@@ -1082,7 +1082,7 @@ test "Duplicate hotkey detection - same mode same hotkey" {
     try testing.expectError(error.ParseErrorOccurred, result);
 
     // Check error message
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "cmd - a"));
     try testing.expect(error_info.line == 2);
@@ -1106,7 +1106,7 @@ test "Duplicate hotkey detection - specific modifiers" {
     const result = parser.parse(&mappings, config);
     try testing.expectError(error.ParseErrorOccurred, result);
 
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "lcmd - a"));
 }
@@ -1181,7 +1181,7 @@ test "Duplicate hotkey detection - multi mode assignment" {
     const result = parser.parse(&mappings, config);
     try testing.expectError(error.ParseErrorOccurred, result);
 
-    const error_info = parser.getError().?;
+    const error_info = parser.error_info.?;
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "Duplicate hotkey"));
     try testing.expect(std.mem.containsAtLeast(u8, error_info.message, 1, "mode1"));
     try testing.expect(error_info.line == 4);
@@ -1715,7 +1715,7 @@ test "empty command followed by process group" {
 
     // TODO: our syntax design doesn't make this easy: the error is about command, but the @browsers is a process group reference
     // I don't see a easy way around this besides look ahead infinitely to make sure the next token is indeed a process group
-    const parse_err = parser.getError().?;
+    const parse_err = parser.error_info.?;
     try std.testing.expectEqualStrings("Command '@browsers' not found. Did you forget to define it with '.define browsers : ...'?", parse_err.message);
 }
 

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Improved error messages** - Enhanced parser error reporting with contextual information
+  - Added helpful error messages for invalid hex keycodes with examples
+  - Improved duplicate command detection with specific context about conflicts
+  - Added suggestions for common mistakes (e.g., "Did you forget to declare it with '::mode'?")
+  - Better error reporting for file loading, blacklist, and shell configuration failures
+
+### Changed
+- **Duplicate command handling** - Allow identical duplicate commands in process groups
+  - This enables more flexible configuration with overlapping process groups
+  - Duplicate detection still prevents conflicting commands for the same process
+- Added error sets for type safety in Hotkey methods
+
 ## [0.0.12] - 2025-07-15
 
 ### Added

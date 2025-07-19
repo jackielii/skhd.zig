@@ -4,6 +4,7 @@ fn linkFrameworks(exe: *std.Build.Step.Compile) void {
     exe.linkFramework("Cocoa");
     exe.linkFramework("Carbon");
     exe.linkFramework("CoreServices");
+    exe.linkFramework("IOKit");
 }
 
 fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {

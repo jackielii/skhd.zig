@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const c = @import("c.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
+const DeviceManager = @import("DeviceManager.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
 const Hotkey = @import("Hotkey.zig");
@@ -38,6 +39,7 @@ hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
+device_manager: *DeviceManager,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -86,6 +88,10 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     log.info("Initial process: {s}", .{carbon_event.getProcessName()});
 
+    // Initialize Device Manager for device-specific hotkeys
+    const device_manager = try DeviceManager.create(gpa);
+    errdefer device_manager.destroy();
+
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
 
@@ -98,6 +104,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         .verbose = verbose,
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
+        .device_manager = device_manager,
     };
 }
 

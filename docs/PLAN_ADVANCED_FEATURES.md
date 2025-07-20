@@ -124,25 +124,55 @@ Based on research at https://claude.ai/public/artifacts/91107587-c58a-46df-8d38-
 1. **macOS Caps Lock Behavior**:
    - Has built-in delay (~300ms) to prevent accidental activation
    - Sends special HID usage codes (0x38 and 0x39)
-   - Can be remapped at IOKit level
+   - Can be remapped at IOKit level using hidutil
+   - The delay is handled at the HID driver level
 
-2. **Implementation Options**:
-   - **Option A**: Intercept at HID level (like Karabiner)
-   - **Option B**: Work with macOS delay (simpler)
+2. **Implementation Strategy: Remap to Unused Key**
+   
+   Use `hidutil` to remap Caps Lock to an unused key (e.g., F13-F24), then handle that key in skhd:
+   
+   ```bash
+   # Remap Caps Lock (0x39) to F13 (0x68) at system level
+   hidutil property --set '{"UserKeyMapping":[{
+       "HIDKeyboardModifierMappingSrc":0x700000039,
+       "HIDKeyboardModifierMappingDst":0x700000068
+   }]}'
+   ```
+   
+   Valid destination keys for remapping:
+   - **F13-F24** (0x68-0x73): Ideal - recognized by macOS but unused
+   - **International keys** (0x64, 0x65, 0x87-0x8B): Keys not on US keyboards
+   - **Media keys**: Different HID usage page (0xFF01000000XX)
 
-3. **Proposed Syntax**:
-```bash
-# Remap caps lock entirely
-caps_lock : escape
+3. **Benefits of This Approach**:
+   - Bypasses macOS Caps Lock delay entirely
+   - Works at HID driver level (affects all apps)
+   - No Caps Lock LED toggle
+   - CGEventTap sees the remapped key (e.g., F13)
+   - Enables tap/hold functionality
 
-# Dual function caps lock
-caps_lock : ctrl
-caps_lock [alone] : escape
+4. **Proposed Implementation**:
+   
+   ```bash
+   # In skhd config after remapping Caps Lock to F13
+   # Tap F13 = Escape, Hold F13 = Control
+   f13 : escape
+   f13 [held] : ctrl
+   
+   # Or use F13 as a hyper key
+   f13 - a : open -a "Terminal"
+   f13 - s : open -a "Safari"
+   ```
 
-# Preserve caps lock with modifier
-caps_lock : caps_lock
-cmd - caps_lock : escape
-```
+5. **Device-Specific Remapping**:
+   
+   ```bash
+   # Only remap on specific keyboard
+   hidutil property --matching '{"ProductID":0x0021}' --set '{"UserKeyMapping":[{
+       "HIDKeyboardModifierMappingSrc":0x700000039,
+       "HIDKeyboardModifierMappingDst":0x700000068
+   }]}'
+   ```
 
 ## Architecture Notes
 
@@ -160,6 +190,19 @@ processHotkey (device + process matching)
 Timing logic (for LT/OSL)
     ↓
 Execute command/forward key
+```
+
+### Caps Lock Implementation Flow
+
+```
+System Level (hidutil):
+  Caps Lock (0x39) → F13 (0x68)
+        ↓
+skhd Level:
+  F13 events → Timing detection
+        ↓
+  Tap (<200ms) → Send Escape
+  Hold (>200ms) → Act as Control
 ```
 
 ### State Management

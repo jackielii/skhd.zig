@@ -194,6 +194,41 @@ Create `src/timing_test.zig` with:
 3. Event injection testing
 4. Performance measurements
 
+## Key Implementation Insights
+
+### 1. Dual-Layer Approach
+The test implementation uses both HID and CGEventTap:
+- **HID Layer**: Precise timing via `IOHIDValueGetTimeStamp()` (nanosecond precision)
+- **CGEventTap**: Event suppression and injection
+
+### 2. Critical Implementation Details
+
+#### Event Source Identification
+To prevent feedback loops when injecting events:
+```zig
+const source = c.CGEventSourceCreate(c.kCGEventSourceStateHIDSystemState);
+c.CGEventSetSource(event, source);
+```
+
+#### Timing State Machine
+- Track key down timestamp
+- On key up, calculate duration
+- Make tap/hold decision
+- Handle modifier interactions
+
+#### F13 Keycode Mapping
+- HID Usage: 0x68 (F13)
+- CGEvent Keycode: 105 (kVK_F13)
+- Escape: HID 0x29, Keycode 53
+- Control: HID 0xE0, Modifier flag
+
+### 3. Edge Cases Handled
+
+1. **Modified Hold**: If F13 is held and another key is pressed, mark as "modified"
+2. **Double Tap**: Track tap count and timestamps
+3. **Rapid Press**: Reset state properly
+4. **Event Loop Integration**: Both HID and CGEventTap in same runloop
+
 ## Configuration Syntax Proposal
 
 ```bash
@@ -223,6 +258,44 @@ rshift [held] : rshift
 1. **Latency**: Tap detection adds inherent latency (tap threshold)
 2. **CPU Usage**: Minimal with efficient state management
 3. **Memory**: O(n) where n = number of timing-enabled keys
+
+## Real-World Implementation Requirements
+
+### 1. Timer-Based Hold Detection
+The test implementation only detects hold on key release. Production needs:
+```zig
+// Dispatch timer after tap threshold
+fn scheduleHoldTimer(state: *KeyTimingState) void {
+    const timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, ...);
+    dispatch_source_set_timer(timer, 
+        dispatch_time(DISPATCH_TIME_NOW, tap_threshold_ns), 
+        0, 10_000_000); // 10ms leeway
+    
+    dispatch_source_set_event_handler(timer, ^{
+        if (state.is_pressed and !state.has_been_modified) {
+            // Trigger hold action (e.g., press Control)
+            injectModifierDown(kCGEventFlagMaskControl);
+            state.hold_triggered = true;
+        }
+    });
+}
+```
+
+### 2. Modifier State Tracking
+Need to track when we've injected modifiers:
+```zig
+const ModifierState = struct {
+    control_injected: bool = false,
+    shift_injected: bool = false,
+    // etc.
+};
+```
+
+### 3. Integration with skhd
+- Add `timing_manager.zig` module
+- Extend Hotkey struct with timing options
+- Parse timing syntax in Parser.zig
+- Hook into main event loop
 
 ## Security Considerations
 

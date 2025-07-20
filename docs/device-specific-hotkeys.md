@@ -99,9 +99,9 @@ cmd - a <device "External Keyboard"> [
 ]
 
 # Device aliases using .device directive
-.device hhkb = "HHKB-Hybrid"
-.device external = ["Keychron K2", "HHKB-Hybrid", "MX Master 2S"]
-.device logitech = <vendor:0x046d>
+.device hhkb "HHKB-Hybrid"
+.device external ["Keychron K2", "HHKB-Hybrid", "MX Master 2S"]
+.device logitech <vendor 0x046d>
 
 # Using device aliases
 cmd - a <@hhkb> : echo "HHKB keyboard"
@@ -125,7 +125,7 @@ device_spec := 'device' <string>
 
 process_constraint := '[' (<process_list> | <process_wildcard>) ']'
 
-.device directive := '.device' <identifier> '=' (<string> | <device_constraint> | '[' <device_list> ']')
+.device directive := '.device' <identifier> (<string> | <device_constraint> | '[' <device_list> ']')
 ```
 
 ## Current Status
@@ -231,24 +231,24 @@ skhd -O
 ### 1. Different Layouts for Different Keyboards
 ```bash
 # Vim navigation on external keyboard only
-cmd - h <device:"HHKB*"> : yabai -m window --focus west
-cmd - j <device:"HHKB*"> : yabai -m window --focus south
-cmd - k <device:"HHKB*"> : yabai -m window --focus north
-cmd - l <device:"HHKB*"> : yabai -m window --focus east
+cmd - h <device "HHKB*"> : yabai -m window --focus west
+cmd - j <device "HHKB*"> : yabai -m window --focus south
+cmd - k <device "HHKB*"> : yabai -m window --focus north
+cmd - l <device "HHKB*"> : yabai -m window --focus east
 
 # Or using device alias
-.device external = ["HHKB-Hybrid", "Keychron K2"]
+.device external ["HHKB-Hybrid", "Keychron K2"]
 cmd - h <@external> : yabai -m window --focus west
 ```
 
 ### 2. Device-Specific Modifiers
 ```bash
 # Use caps lock as hyper on specific keyboard
-caps <device:"HHKB*"> : echo "hyper pressed"
+caps <device "HHKB*"> : echo "hyper pressed"
 
 # Different behavior per device
-caps <vendor:0x04fe,product:0x0021> : echo "HHKB caps"
-caps <device:"Convolution*"> : echo "Convolution caps"
+caps <vendor 0x04fe product 0x0021> : echo "HHKB caps"
+caps <device "Convolution*"> : echo "Convolution caps"
 ```
 
 ### 3. Testing with Multiple Keyboards

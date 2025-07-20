@@ -2,214 +2,225 @@
 
 ## Executive Summary
 
-This document outlines the plan to implement advanced Karabiner-Elements features in skhd.zig, specifically:
-1. Device-specific hotkey filtering (e.g., different behavior for built-in keyboard vs external HHKB)
-2. Dual-function keys with `to_if_alone` functionality (e.g., Caps Lock → Escape when tapped, Control when held)
+This document outlines the advanced features for skhd.zig, building on top of the core hotkey functionality:
 
-## Feature 1: Device Filtering
+1. **Device-specific hotkey filtering** ✅ (Parser completed, runtime integration pending)
+2. **Mouse key detection** 🔄 (Planned)
+3. **Timing-based features (LT, OSL)** 🔄 (Planned - inspired by QMK)
+4. **Caps Lock special handling** 🔄 (Research completed)
 
-### How Karabiner-Elements Implements Device Filtering
+## Feature 1: Device-Specific Hotkey Filtering ✅
 
-Based on research of the Karabiner-Elements codebase:
+### Status: Parser Complete, Runtime Integration Pending
 
-1. **Device Identification**:
-   - Uses vendor_id and product_id to identify devices
-   - Maintains a device_properties_manager that tracks all connected devices
-   - Device information is queried from IOKit
+Device filtering allows different behavior based on which keyboard/mouse is used (e.g., built-in keyboard vs external HHKB).
 
-2. **Condition System**:
-   - Four condition types: `device_if`, `device_unless`, `device_exists_if`, `device_exists_unless`
-   - Conditions are evaluated before executing manipulators
-   - Located in `src/share/manipulator/conditions/device.hpp`
+### Finalized Syntax
 
-3. **Configuration Format**:
-   ```json
-   "conditions": [{
-       "type": "device_if",
-       "identifiers": [{
-           "vendor_id": 1452,
-           "product_id": 834,
-           "description": "Apple Internal Keyboard"
-       }]
-   }]
-   ```
+```bash
+# Device constraint using device name (space syntax, no colon)
+cmd - a <device "HHKB-Hybrid"> : echo "HHKB keyboard"
+cmd - a <device "Keychron*"> : echo "any Keychron keyboard"
 
-### Proposed skhd.zig Implementation
+# Device aliases using .device directive
+.device hhkb "HHKB-Hybrid"
+.device external ["Keychron K2", "HHKB-Hybrid", "Convolution Rev. 1"]
 
-1. **Add Device Detection**:
-   - Create a new `DeviceManager.zig` module
-   - Use IOKit APIs to enumerate HID devices
-   - Track vendor_id, product_id for each device
+# Using device aliases
+cmd - a <@hhkb> : echo "HHKB keyboard"
+cmd - b <@external> : echo "any external keyboard"
 
-2. **Extend Configuration Syntax**:
-   ```
-   # Device-specific binding
-   ctrl - h [device:1452,834] : echo "Built-in keyboard"
-   ctrl - h [device:1278,33] : echo "HHKB keyboard"
-   ```
+# Combined with process constraints
+cmd - c <device "External Keyboard"> [
+    "Terminal" : echo "external in terminal"
+    *          : echo "external elsewhere"
+]
+```
 
-3. **Modify Parser**:
-   - Add device condition parsing in `Parser.zig`
-   - Store device conditions in `Hotkey` structure
+### Implementation Status
 
-4. **Event Processing**:
-   - In `EventTap.zig`, identify source device for each event
-   - Match against device conditions before executing commands
+#### ✅ Completed:
+- Device detection infrastructure (DeviceManager.zig)
+- Parser support for device constraints
+- Device alias support with `.device` directive
+- Tokenizer support for `<` and `>` brackets
+- HID observe mode (`-O` flag) showing exact device per keypress
 
-## Feature 2: to_if_alone (Dual-Function Keys)
+#### 🔄 Pending:
+- Integration with main event loop in skhd.zig
+- Device matching logic in processHotkey
+- Vendor/product ID syntax support
 
-### How Karabiner-Elements Implements to_if_alone
+### Technical Details
 
-Based on analysis of `src/share/manipulator/manipulators/basic/`:
+- Uses IOHIDManager for device enumeration
+- CGEvent field 87 contains device registry ID (with ~22 offset)
+- Device matching uses proximity matching (±100 range)
 
-1. **State Tracking**:
-   - `manipulated_original_event` tracks "alone" state
-   - Records key down timestamp
-   - `alone_` flag set to true on key down
+## Feature 2: Mouse Key Detection 🔄
 
-2. **Alone State Interruption**:
-   - Flag set to false when:
-     - Another key is pressed
-     - Mouse wheel is scrolled
-   - Handled by `unset_alone_if_needed()` method
+### Planned Implementation
 
-3. **Timeout Logic**:
-   - Default timeout: 1000ms (configurable)
-   - Stored in `basic_to_if_alone_timeout_milliseconds`
+Enable hotkeys to work with mouse buttons:
 
-4. **Event Processing**:
-   - Key down: Send normal `to` events
-   - Key up (if alone and within timeout): Send `to_if_alone` events
+```bash
+# Mouse button hotkeys
+mouse1 : echo "left click"
+mouse2 : echo "right click"
+cmd - mouse1 : echo "cmd + left click"
 
-### Proposed skhd.zig Implementation
+# Mouse with device constraints
+mouse1 <device "MX Master 3"> : echo "MX Master left click"
+```
 
-1. **Configuration Syntax**:
-   ```
-   # Caps Lock → Escape (tap) / Control (hold)
-   caps_lock : ctrl
-   caps_lock [alone] : escape
-   
-   # Alternative syntax
-   caps_lock -> ctrl | escape
-   ```
+### Technical Approach
+- Extend CGEventTap mask to include mouse events
+- Add mouse button tokens to Tokenizer
+- Map mouse events to hotkey system
 
-2. **State Management**:
-   - Create `DualFunctionKeyManager.zig`
-   - Track key press timestamps
-   - Monitor for interrupting events
+## Feature 3: Timing-Based Features (QMK-inspired) 🔄
 
-3. **Integration Points**:
-   - Modify `EventTap.zig` to track alone state
-   - Add timeout handling (use dispatch timers)
-   - Inject synthetic events for alone actions
+### Layer Tap (LT)
 
-## Architecture Comparison: Virtual Driver vs Event Tap
+Tap for one key, hold for layer activation:
 
-### Karabiner-Elements: Virtual HID Driver Approach
+```bash
+# Caps Lock: Tap = Escape, Hold = Control
+caps_lock : escape
+caps_lock [held] : ctrl
 
-**Pros**:
-- Complete control over event flow
-- Can suppress original events reliably
-- Lower-level access allows complex manipulations
-- Better for system-wide modifications
-- Can handle all input types (keyboard, mouse, etc.)
+# Space: Tap = Space, Hold = Fn layer
+space : space
+space [held] -> fn_layer
+```
 
-**Cons**:
-- Requires kernel extension (security implications)
-- More complex installation/permissions
-- Higher development complexity
-- Potential system stability risks
+### One Shot Layer (OSL)
 
-**Implementation**:
-- Uses `pqrs::karabiner::driverkit::virtual_hid_device`
-- Intercepts events at driver level
-- Posts modified events to virtual device
+Tap to activate layer for next keypress only:
 
-### skhd: Event Tap Approach
+```bash
+# Tap F key to activate symbol layer for one key
+f [tap] -> symbols [oneshot]
 
-**Pros**:
-- Simpler implementation
-- No kernel extensions required
-- Easier to debug and maintain
-- Less invasive to system
-- Good enough for most hotkey use cases
+# In symbols mode
+:: symbols
+a : echo "!"
+s : echo "@"
+d : echo "#"
+```
 
-**Cons**:
-- Limited to CGEventTap capabilities
-- Can't suppress all events reliably
-- Higher latency than driver approach
-- Some edge cases with event ordering
+### Technical Requirements
+- Key press/release timing tracking
+- State machine for layer management
+- Timeout configuration support
+- Integration with existing mode system
 
-**Current Implementation**:
-- Uses CGEventTapCreate
-- Processes events at user-space level
-- Limited to keyboard events
+## Feature 4: Caps Lock Special Handling 🔄
 
-### Recommendation
+### Research Findings
 
-For skhd.zig, continue with the Event Tap approach because:
-1. Maintains simplicity and compatibility with original skhd
-2. Sufficient for hotkey daemon functionality
-3. Avoids kernel extension complexity
-4. Device filtering and to_if_alone can be implemented with event taps
+Based on research at https://claude.ai/public/artifacts/91107587-c58a-46df-8d38-861b5ee9908b:
 
-However, we need to enhance the current implementation:
-- Add mouse event monitoring for alone state interruption
-- Implement proper event suppression for dual-function keys
-- Add timing mechanisms for alone detection
+1. **macOS Caps Lock Behavior**:
+   - Has built-in delay (~300ms) to prevent accidental activation
+   - Sends special HID usage codes (0x38 and 0x39)
+   - Can be remapped at IOKit level
+
+2. **Implementation Options**:
+   - **Option A**: Intercept at HID level (like Karabiner)
+   - **Option B**: Work with macOS delay (simpler)
+
+3. **Proposed Syntax**:
+```bash
+# Remap caps lock entirely
+caps_lock : escape
+
+# Dual function caps lock
+caps_lock : ctrl
+caps_lock [alone] : escape
+
+# Preserve caps lock with modifier
+caps_lock : caps_lock
+cmd - caps_lock : escape
+```
+
+## Architecture Notes
+
+### Event Processing Flow
+
+```
+CGEventTap + IOHIDManager
+    ↓
+Device Identification (field 87)
+    ↓
+keyHandler with device info
+    ↓
+processHotkey (device + process matching)
+    ↓
+Timing logic (for LT/OSL)
+    ↓
+Execute command/forward key
+```
+
+### State Management
+
+For timing-based features, we need:
+- KeyStateManager to track press/release times
+- Timer system for timeouts
+- State machine for layer management
 
 ## Implementation Roadmap
 
-### Phase 1: Device Filtering (Foundation)
-1. Create DeviceManager module
-2. Implement IOKit device enumeration
-3. Add device tracking to EventTap
-4. Extend Parser for device conditions
-5. Update Hotkey structure
-6. Add device matching logic
-7. Write comprehensive tests
+### Phase 1: Complete Device Filtering ✅ (90% done)
+- [x] Parser and data structures
+- [x] Device detection
+- [ ] Runtime integration
+- [ ] Vendor/product ID support
 
-### Phase 2: Basic to_if_alone
-1. Create DualFunctionKeyManager
-2. Add state tracking for key presses
-3. Implement timeout handling
-4. Add alone state interruption logic
-5. Integrate with EventTap
-6. Test with simple use cases
+### Phase 2: Mouse Support 🔄
+- [ ] Extend event tap for mouse events
+- [ ] Add mouse button parsing
+- [ ] Test with various mice
 
-### Phase 3: Advanced Features
-1. Add configuration for timeout values
-2. Support multiple alone actions
-3. Add to_if_held_down support
-4. Optimize performance
-5. Handle edge cases
+### Phase 3: Basic Timing Features 🔄
+- [ ] Key state tracking
+- [ ] Simple tap/hold detection
+- [ ] Basic LT implementation
 
-### Phase 4: Testing & Polish
-1. Comprehensive test suite
-2. Performance benchmarking
-3. Documentation updates
-4. Example configurations
+### Phase 4: Advanced Layers 🔄
+- [ ] OSL implementation
+- [ ] Layer state management
+- [ ] Timeout configuration
+
+### Phase 5: Caps Lock Special 🔄
+- [ ] Investigate IOKit remapping
+- [ ] Implement chosen approach
+- [ ] Handle edge cases
+
+## Testing Strategy
+
+1. **Device Filtering**: Test with multiple keyboards/mice
+2. **Timing Features**: Automated tests with simulated delays
+3. **Layer Management**: State machine testing
+4. **Integration**: Full config file testing
 
 ## Open Questions
 
-1. **Configuration Syntax**: Should we maintain compatibility with skhd syntax or adopt Karabiner-style JSON?
-   - Proposal: Extend skhd syntax to maintain backwards compatibility
+1. **Timing Precision**: What's acceptable latency for tap/hold detection?
+   - Proposal: 200ms default, configurable
 
-2. **Event Suppression**: How to reliably suppress original events in dual-function scenarios?
-   - May need to explore CGEventTapProxy options
+2. **Layer Syntax**: Stay close to skhd modes or adopt QMK-style?
+   - Proposal: Extend mode system with timing modifiers
 
-3. **Mouse Integration**: Should we monitor mouse events for alone interruption?
-   - Yes, for feature parity with Karabiner
+3. **Mouse Integration**: Full mouse gesture support or just buttons?
+   - Proposal: Start with buttons, consider gestures later
 
-4. **Performance**: Will state tracking impact hotkey responsiveness?
-   - Need benchmarking, but likely minimal impact
+4. **Caps Lock**: Deep remap or work with macOS behavior?
+   - Proposal: Start with macOS-compatible approach
 
-5. **Persistence**: Should device configurations persist across disconnections?
-   - Yes, match devices by vendor/product ID
+## References
 
-## Next Steps
-
-1. Review and approve this plan
-2. Begin Phase 1 implementation with DeviceManager
-3. Create test harness for device simulation
-4. Iterate based on testing results
+- [QMK Layers Documentation](https://docs.qmk.fm/feature_layers)
+- [Karabiner-Elements Source](https://github.com/pqrs-org/Karabiner-Elements)
+- [IOKit HID Documentation](https://developer.apple.com/documentation/iokit)
+- [CGEventTap Reference](https://developer.apple.com/documentation/coregraphics/cgeventref)

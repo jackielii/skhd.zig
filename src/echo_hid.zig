@@ -44,24 +44,33 @@ fn keyboardInputCallback(context: ?*anyopaque, result: c.IOReturn, sender: ?*any
 
     // We're interested in keyboard usage page
     if (usage_page == c.kHIDPage_KeyboardOrKeypad) {
-        const pressed = c.IOHIDValueGetIntegerValue(value) != 0;
-        const key_name = getKeyName(usage);
+        // Filter out invalid usage codes
+        if (usage == 0xffffffff or usage > 0xFF) {
+            return; // Invalid usage code, skip
+        }
         
-        if (key_name) |name| {
-            const event_type = if (pressed) "DOWN" else "UP  ";
-            std.debug.print("[{s} (0x{x:0>4}:0x{x:0>4})] {s} {s}\n", .{ 
-                device_info.name, 
-                device_info.vendor_id, 
-                device_info.product_id, 
-                event_type,
-                name 
-            });
+        // Skip error conditions
+        if (usage == 0x01) { // ErrorRollOver
+            return;
+        }
+        
+        const pressed = c.IOHIDValueGetIntegerValue(value) != 0;
+        const key_name = getKeyName(usage) orelse "unknown";
+        
+        const event_type = if (pressed) "DOWN" else "UP  ";
+        std.debug.print("[{s} (0x{x:0>4}:0x{x:0>4})] {s} {s} (usage: 0x{x:0>2})\n", .{ 
+            device_info.name, 
+            device_info.vendor_id, 
+            device_info.product_id, 
+            event_type,
+            key_name,
+            usage
+        });
 
-            // Check for Ctrl+C
-            if (usage == 0x06 and ctrl_pressed and pressed) { // 'c' key in HID usage
-                std.debug.print("\nCtrl+C pressed - exiting\n", .{});
-                std.posix.exit(0);
-            }
+        // Check for Ctrl+C
+        if (usage == 0x06 and ctrl_pressed and pressed) { // 'c' key in HID usage
+            std.debug.print("\nCtrl+C pressed - exiting\n", .{});
+            std.posix.exit(0);
         }
 
         // Track ctrl state
@@ -133,6 +142,7 @@ fn getKeyName(usage: u32) ?[]const u8 {
         0x36 => "period",        // . >
         0x37 => "slash",         // / ?
         0x38 => "capslock",
+        0x39 => "capslock",      // Caps Lock (actual toggle)
         
         // Function keys
         0x3A => "f1",

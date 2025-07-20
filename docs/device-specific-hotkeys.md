@@ -80,44 +80,52 @@ Execute command/forward key
 
 ## Proposed Configuration Syntax
 
-### Option 1: Device as Additional Constraint (Recommended)
+### Device Constraint Syntax
+Using angle brackets `<>` to distinguish from process constraints `[]`:
+
 ```bash
-# Device constraint in square brackets before process constraint
-cmd - a [device:"Apple Internal Keyboard"] : echo "internal keyboard"
-cmd - a [vendor:0x05ac,product:0x027e] : echo "specific device by ID"
-cmd - a [device:"Keychron*"] : echo "any Keychron keyboard"
+# Device constraint using device name
+cmd - a <device "HHKB-Hybrid"> : echo "HHKB keyboard"
+cmd - a <device "Keychron*"> : echo "any Keychron keyboard"
+
+# Device constraint using vendor/product ID (planned)
+cmd - a <vendor 0x04fe product 0x0021> : echo "HHKB by ID"
+cmd - a <vendor 0x046d> : echo "any Logitech device"
 
 # Combined with process constraints
-cmd - a [device:"External Keyboard"] [
+cmd - a <device "External Keyboard"> [
     "Terminal" : echo "external keyboard in terminal"
     *          : echo "external keyboard elsewhere"
 ]
 
-# Device groups (similar to process groups)
-.define keyboards ["Apple Internal Keyboard", "Keychron K2"]
-cmd - a [@keyboards] : echo "from defined keyboards"
+# Device aliases using .device directive
+.device hhkb = "HHKB-Hybrid"
+.device external = ["Keychron K2", "HHKB-Hybrid", "MX Master 2S"]
+.device logitech = <vendor:0x046d>
+
+# Using device aliases
+cmd - a <@hhkb> : echo "HHKB keyboard"
+cmd - a <@external> : echo "any external keyboard"
+cmd - a <@logitech> : echo "Logitech device"
 ```
 
-### Option 2: Device in Process List Syntax
-```bash
-# Extend existing process list syntax
-cmd - a [
-    device:"Apple Internal Keyboard" : echo "internal"
-    device:"External Keyboard"       : echo "external"
-    "Terminal"                       : echo "any keyboard in terminal"
-    *                               : echo "fallback"
-]
+### Grammar Extension
+
+The grammar for hotkey definitions extends to:
 ```
+hotkey := <modifier>* '-' <key> <device_constraint>? <process_constraint>? ':' <command>
+        | <modifier>* '-' <key> <device_constraint>? <process_constraint>? '->' ':' <command>
+        | <modifier>* '-' <key> <device_constraint>? <process_constraint>? '~'
+        | <modifier>* '-' <key> <device_constraint>? <process_constraint>? '|' <forward_key>
 
-### Option 3: Separate Device Modes
-```bash
-# Define device-specific modes
-:: default [device:"Apple Internal Keyboard"]
-:: external [device:"External Keyboard"]
+device_constraint := '<' device_spec '>'
+device_spec := 'device' <string>
+             | 'vendor' <hex> ('product' <hex>)?
+             | '@' <identifier>
 
-# Switch between them
-cmd - 1 ; default
-cmd - 2 ; external
+process_constraint := '[' (<process_list> | <process_wildcard>) ']'
+
+.device directive := '.device' <identifier> '=' (<string> | <device_constraint> | '[' <device_list> ']')
 ```
 
 ## Current Status
@@ -145,58 +153,57 @@ skhd -O
 
 ## Implementation Plan
 
-### Phase 1: Device Detection Infrastructure
+### Phase 1: Device Detection Infrastructure ✅
 
-1. **Create `DeviceManager.zig`**
-   - Initialize IOHIDManager
-   - Enumerate connected keyboards
-   - Cache device information (vendor ID, product ID, name)
-   - Provide device lookup by IOHIDDeviceRef
+1. **DeviceManager.zig** - COMPLETED
+   - IOHIDManager for device enumeration
+   - Track devices by registry ID
+   - Store vendor ID, product ID, device name
+   - Support device connection/disconnection events
+   - Match CGEvent to IOHIDDevice using field 87 with proximity matching
 
-2. **Extend `EventTap.zig`**
-   - Add parallel IOHIDManager monitoring
-   - Map CGEvents to source device
-   - Store device info in event processing
+### Phase 2: Parser Support (NEXT)
 
-### Phase 2: Data Structure Updates
+1. **Update Tokenizer.zig**
+   - Add `TokenType.angle_open` for `<`
+   - Add `TokenType.angle_close` for `>`
+   - Handle device constraint syntax within angle brackets
 
-1. **Update `Hotkey.zig`**
-   - Add device constraints to ProcessCommand
-   - Support device matching patterns (exact, wildcard, vendor/product)
-
-2. **Update `Mappings.zig`**
-   - Add device groups support (like process groups)
-   - Store device-specific configuration
-
-### Phase 3: Parser Extensions
-
-1. **Extend `Parser.zig`**
+2. **Update Parser.zig**
+   - Add `.device` directive support
    - Parse device constraints in hotkey definitions
-   - Support device groups with `.define`
-   - Validate device syntax
+   - Support device aliases similar to process groups
+   - Store device constraints in hotkey structures
 
-2. **Update `Tokenizer.zig`**
-   - Add tokens for device-specific syntax
-   - Handle device: prefix parsing
+### Phase 3: Data Structure Updates
+
+1. **Update Hotkey.zig**
+   - Add device constraint field
+   - Support device name patterns with wildcards
+   - Support vendor/product ID matching
+
+2. **Update Mappings.zig**
+   - Add device_aliases storage
+   - Handle device alias resolution
 
 ### Phase 4: Runtime Integration
 
-1. **Update `skhd.zig`**
-   - Pass device info through event processing
+1. **Update skhd.zig**
+   - Integrate DeviceManager into main event loop
+   - Pass device info to processHotkey
    - Match hotkeys based on device constraints
-   - Handle device connection/disconnection
+   - Handle device hot-plug events
 
-### Phase 5: Testing & Documentation
+### Phase 5: Testing & Cleanup
 
-1. **Add comprehensive tests**
+1. **Clean up DeviceManager**
+   - Remove excessive debug logging
+   - Optimize device lookup performance
+
+2. **Add comprehensive tests**
    - Device matching logic
    - Parser support for device syntax
-   - Integration tests with mock devices
-
-2. **Update documentation**
-   - Add device syntax to CLAUDE.md
-   - Create examples in README
-   - Document device identification methods
+   - Integration tests with device constraints
 
 ## Technical Considerations
 
@@ -224,23 +231,32 @@ skhd -O
 ### 1. Different Layouts for Different Keyboards
 ```bash
 # Vim navigation on external keyboard only
-cmd - h [device:"External*"] : yabai -m window --focus west
-cmd - j [device:"External*"] : yabai -m window --focus south
-cmd - k [device:"External*"] : yabai -m window --focus north
-cmd - l [device:"External*"] : yabai -m window --focus east
+cmd - h <device:"HHKB*"> : yabai -m window --focus west
+cmd - j <device:"HHKB*"> : yabai -m window --focus south
+cmd - k <device:"HHKB*"> : yabai -m window --focus north
+cmd - l <device:"HHKB*"> : yabai -m window --focus east
+
+# Or using device alias
+.device external = ["HHKB-Hybrid", "Keychron K2"]
+cmd - h <@external> : yabai -m window --focus west
 ```
 
 ### 2. Device-Specific Modifiers
 ```bash
 # Use caps lock as hyper on specific keyboard
-caps [device:"HHKB*"] : echo "hyper pressed"
+caps <device:"HHKB*"> : echo "hyper pressed"
+
+# Different behavior per device
+caps <vendor:0x04fe,product:0x0021> : echo "HHKB caps"
+caps <device:"Convolution*"> : echo "Convolution caps"
 ```
 
 ### 3. Testing with Multiple Keyboards
 ```bash
 # Different actions for testing
-f1 [device:"Keyboard 1"] : echo "Test from keyboard 1"
-f1 [device:"Keyboard 2"] : echo "Test from keyboard 2"
+f1 <device:"HHKB-Hybrid"> : echo "Test from HHKB"
+f1 <device:"Convolution Rev. 1"> : echo "Test from Convolution"
+f1 <device:"MX Master 2S"> : echo "Test from MX Master"
 ```
 
 ## Open Questions

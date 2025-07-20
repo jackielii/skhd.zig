@@ -32,7 +32,7 @@ pub fn echoHID() !void {
         (1 << c.kCGEventOtherMouseDown);
     var event_tap = EventTap{ .mask = mask };
     defer event_tap.deinit();
-    
+
     try event_tap.begin(interceptCallback, null);
 
     // Run the event loop
@@ -302,4 +302,3 @@ fn interceptCallback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventR
 test "HID echo mode" {
     // This would block, so we don't run it in tests
 }
-

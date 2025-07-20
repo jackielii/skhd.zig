@@ -126,7 +126,7 @@ pub fn main() !void {
         try echo();
         return;
     }
-    
+
     if (hid_observe_mode) {
         const echoHID = @import("echo_hid.zig").echoHID;
         try echoHID();

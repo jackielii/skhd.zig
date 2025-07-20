@@ -71,7 +71,6 @@ fn printKeydown(event: c.CGEventRef, device_manager: *DeviceManager) !c.CGEventR
         std.debug.print("[Unknown Device, KbType: {}] ", .{keyboard_type});
     }
 
-
     // Print modifiers
     if (flags & c.kCGEventFlagMaskShift != 0) {
         std.debug.print("Shift ", .{});

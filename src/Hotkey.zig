@@ -6,6 +6,9 @@ const utils = @import("utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const log = std.log.scoped(.hotkey_array_hashmap);
 
+// Import DeviceConstraint from Parser
+pub const DeviceConstraint = @import("Parser.zig").DeviceConstraint;
+
 // Error sets for better type safety
 pub const ProcessCommandError = error{
     ProcessCommandAlreadyExists,
@@ -20,6 +23,7 @@ wildcard_command: ?ProcessCommand = null,
 // Use ArrayHashMap for process name -> command mapping
 mappings: std.StringArrayHashMapUnmanaged(ProcessCommand) = .empty,
 mode_list: std.AutoArrayHashMapUnmanaged(*Mode, void) = .empty,
+device_constraint: ?DeviceConstraint = null,
 
 pub fn destroy(self: *Hotkey) void {
     var it = self.mappings.iterator();
@@ -32,6 +36,12 @@ pub fn destroy(self: *Hotkey) void {
     // Free wildcard command if any
     if (self.wildcard_command) |cmd| {
         cmd.deinit(self.allocator);
+    }
+
+    // Free device constraint if any
+    if (self.device_constraint) |*device| {
+        var mutable_device = device;
+        mutable_device.deinit(self.allocator);
     }
 
     self.mode_list.deinit(self.allocator);
@@ -381,6 +391,14 @@ pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
         return error.ModeAlreadyExistsInHotkey;
     }
     try self.mode_list.put(self.allocator, mode, {});
+}
+
+pub fn set_device_constraint(self: *Hotkey, constraint: DeviceConstraint) !void {
+    if (self.device_constraint) |*existing| {
+        var mutable_existing = existing;
+        mutable_existing.deinit(self.allocator);
+    }
+    self.device_constraint = constraint;
 }
 
 // Additional utility methods

@@ -282,39 +282,39 @@ pub fn findDeviceByRegistryId(self: *DeviceManager, registry_id: u64) ?DeviceInf
 pub fn getDeviceFromEvent(self: *DeviceManager, event: c.CGEventRef) ?DeviceInfo {
     // Try multiple fields that might contain device information
     const fields_to_try = [_]c.CGEventField{
-        87,  // Known to contain device registry ID in some cases
-        88,  // Adjacent field that might have related info
-        89,  // Another adjacent field
+        87, // Known to contain device registry ID in some cases
+        88, // Adjacent field that might have related info
+        89, // Another adjacent field
         120, // Another potential field mentioned in some sources
-        96,  // Another undocumented field
-        97,  // Adjacent to 96
-        17,  // kCGKeyboardEventKeyboardType
+        96, // Another undocumented field
+        97, // Adjacent to 96
+        17, // kCGKeyboardEventKeyboardType
     };
-    
+
     for (fields_to_try) |field| {
         const value = c.CGEventGetIntegerValueField(event, field);
         if (value != 0) {
             log.debug("CGEvent field {} value: {}", .{ field, value });
-            
+
             // Try exact match first
             const found_device = self.findDeviceByRegistryId(@intCast(value));
             if (found_device != null) {
                 log.debug("Found matching device using field {}: {s}", .{ field, found_device.?.name });
                 return found_device;
             }
-            
+
             // If field 87, also try to find device within a small range (±100)
             if (field == 87) {
                 var best_match: ?DeviceInfo = null;
                 var best_diff: i64 = 101;
-                
+
                 var iter = self.devices.iterator();
                 while (iter.next()) |entry| {
                     const device_reg_id = @as(i64, @intCast(entry.value_ptr.registry_id));
                     const diff = if (value > device_reg_id) value - device_reg_id else device_reg_id - value;
                     if (diff <= 100) {
                         log.debug("Found device within range (diff={}): {s} ({s})", .{ diff, entry.value_ptr.name, @tagName(entry.value_ptr.device_type) });
-                        
+
                         // Prefer keyboard devices for key events
                         if (diff < best_diff) {
                             best_match = entry.value_ptr.*;
@@ -325,7 +325,7 @@ pub fn getDeviceFromEvent(self: *DeviceManager, event: c.CGEventRef) ?DeviceInfo
                         }
                     }
                 }
-                
+
                 if (best_match) |device| {
                     log.debug("Selected best match: {s} (diff={})", .{ device.name, best_diff });
                     return device;
@@ -333,14 +333,14 @@ pub fn getDeviceFromEvent(self: *DeviceManager, event: c.CGEventRef) ?DeviceInfo
             }
         }
     }
-    
+
     // If no match found, log all our known devices
     log.debug("No device match found. Known devices:", .{});
     var iter = self.devices.iterator();
     while (iter.next()) |entry| {
         log.debug("  Device: {s} has registry_id: {}", .{ entry.value_ptr.name, entry.value_ptr.registry_id });
     }
-    
+
     return null;
 }
 

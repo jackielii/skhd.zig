@@ -118,6 +118,7 @@ pub fn deinit(self: *Skhd) void {
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
     }
+    self.device_manager.destroy();
     self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
@@ -741,6 +742,10 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
     const carbon_event = try CarbonEvent.init(allocator);
     errdefer carbon_event.deinit();
 
+    // Create device manager mock
+    const device_manager = try DeviceManager.create(allocator);
+    errdefer device_manager.destroy();
+
     return Skhd{
         .allocator = allocator,
         .mappings = mappings,
@@ -750,6 +755,7 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
         .verbose = false,
         .tracer = Tracer.init(false),
         .carbon_event = carbon_event,
+        .device_manager = device_manager,
     };
 }
 

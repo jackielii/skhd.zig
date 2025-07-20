@@ -1,13 +1,11 @@
 const std = @import("std");
 const DeviceManager = @import("DeviceManager.zig");
-const Keycodes = @import("Keycodes.zig");
 const c = @import("c.zig");
 
 // Track modifier state
 var ctrl_pressed = false;
 
 // Alternative echo mode using HID input callbacks to show device-specific input
-// This uses BOTH CGEventTap (to intercept) and IOHIDManager (to identify devices)
 pub fn echoHID() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -18,23 +16,11 @@ pub fn echoHID() !void {
     defer device_manager.destroy();
 
     std.debug.print("Ctrl+C to exit\n", .{});
-    std.debug.print("Monitoring and INTERCEPTING keyboard devices with HID input...\n\n", .{});
+    std.debug.print("Monitoring keyboard devices with HID input...\n\n", .{});
 
     // Register input callbacks for all keyboard devices
     try device_manager.registerInputCallbacks(keyboardInputCallback, device_manager);
-
-    // ALSO create an event tap to intercept events
-    const EventTap = @import("EventTap.zig");
-    const mask: u32 = (1 << c.kCGEventKeyDown) |
-        (1 << c.kCGEventFlagsChanged) |
-        (1 << c.kCGEventLeftMouseDown) |
-        (1 << c.kCGEventRightMouseDown) |
-        (1 << c.kCGEventOtherMouseDown);
-    var event_tap = EventTap{ .mask = mask };
-    defer event_tap.deinit();
-
-    try event_tap.begin(interceptCallback, null);
-
+    
     // Run the event loop
     c.CFRunLoopRun();
 }
@@ -59,244 +45,205 @@ fn keyboardInputCallback(context: ?*anyopaque, result: c.IOReturn, sender: ?*any
     // We're interested in keyboard usage page
     if (usage_page == c.kHIDPage_KeyboardOrKeypad) {
         const pressed = c.IOHIDValueGetIntegerValue(value) != 0;
-
-        // Only show key press events, not releases
-        if (pressed) {
-            // HID usage codes need to be converted to keycodes
-            // For keyboard page, usage codes map differently than Carbon keycodes
-            var key_name: []const u8 = "unknown";
-            var keycode: u32 = 0;
-
-            // Convert HID usage to a readable name
-            switch (usage) {
-                // Letters
-                0x04 => {
-                    key_name = "a";
-                    keycode = 0x00;
-                },
-                0x05 => {
-                    key_name = "b";
-                    keycode = 0x0B;
-                },
-                0x06 => {
-                    key_name = "c";
-                    keycode = 0x08;
-                },
-                0x07 => {
-                    key_name = "d";
-                    keycode = 0x02;
-                },
-                0x08 => {
-                    key_name = "e";
-                    keycode = 0x0E;
-                },
-                0x09 => {
-                    key_name = "f";
-                    keycode = 0x03;
-                },
-                0x0A => {
-                    key_name = "g";
-                    keycode = 0x05;
-                },
-                0x0B => {
-                    key_name = "h";
-                    keycode = 0x04;
-                },
-                0x0C => {
-                    key_name = "i";
-                    keycode = 0x22;
-                },
-                0x0D => {
-                    key_name = "j";
-                    keycode = 0x26;
-                },
-                0x0E => {
-                    key_name = "k";
-                    keycode = 0x28;
-                },
-                0x0F => {
-                    key_name = "l";
-                    keycode = 0x25;
-                },
-                0x10 => {
-                    key_name = "m";
-                    keycode = 0x2E;
-                },
-                0x11 => {
-                    key_name = "n";
-                    keycode = 0x2D;
-                },
-                0x12 => {
-                    key_name = "o";
-                    keycode = 0x1F;
-                },
-                0x13 => {
-                    key_name = "p";
-                    keycode = 0x23;
-                },
-                0x14 => {
-                    key_name = "q";
-                    keycode = 0x0C;
-                },
-                0x15 => {
-                    key_name = "r";
-                    keycode = 0x0F;
-                },
-                0x16 => {
-                    key_name = "s";
-                    keycode = 0x01;
-                },
-                0x17 => {
-                    key_name = "t";
-                    keycode = 0x11;
-                },
-                0x18 => {
-                    key_name = "u";
-                    keycode = 0x20;
-                },
-                0x19 => {
-                    key_name = "v";
-                    keycode = 0x09;
-                },
-                0x1A => {
-                    key_name = "w";
-                    keycode = 0x0D;
-                },
-                0x1B => {
-                    key_name = "x";
-                    keycode = 0x07;
-                },
-                0x1C => {
-                    key_name = "y";
-                    keycode = 0x10;
-                },
-                0x1D => {
-                    key_name = "z";
-                    keycode = 0x06;
-                },
-                // Numbers
-                0x1E => {
-                    key_name = "1";
-                    keycode = 0x12;
-                },
-                0x1F => {
-                    key_name = "2";
-                    keycode = 0x13;
-                },
-                0x20 => {
-                    key_name = "3";
-                    keycode = 0x14;
-                },
-                0x21 => {
-                    key_name = "4";
-                    keycode = 0x15;
-                },
-                0x22 => {
-                    key_name = "5";
-                    keycode = 0x17;
-                },
-                0x23 => {
-                    key_name = "6";
-                    keycode = 0x16;
-                },
-                0x24 => {
-                    key_name = "7";
-                    keycode = 0x1A;
-                },
-                0x25 => {
-                    key_name = "8";
-                    keycode = 0x1C;
-                },
-                0x26 => {
-                    key_name = "9";
-                    keycode = 0x19;
-                },
-                0x27 => {
-                    key_name = "0";
-                    keycode = 0x1D;
-                },
-                0x28 => {
-                    key_name = "return";
-                    keycode = 0x24;
-                },
-                0x29 => {
-                    key_name = "escape";
-                    keycode = 0x35;
-                },
-                0x2A => {
-                    key_name = "delete";
-                    keycode = 0x33;
-                },
-                0x2B => {
-                    key_name = "tab";
-                    keycode = 0x30;
-                },
-                0x2C => {
-                    key_name = "space";
-                    keycode = 0x31;
-                },
-                // Modifiers
-                0xE0 => {
-                    key_name = "ctrl";
-                    keycode = 0x3B;
-                    ctrl_pressed = true;
-                },
-                0xE1 => {
-                    key_name = "shift";
-                    keycode = 0x38;
-                },
-                0xE2 => {
-                    key_name = "alt";
-                    keycode = 0x3A;
-                },
-                0xE3 => {
-                    key_name = "cmd";
-                    keycode = 0x37;
-                },
-                else => {
-                    if (usage < 0x100) {
-                        key_name = "unknown";
-                    } else {
-                        // Likely a key release or invalid usage
-                        return;
-                    }
-                },
-            }
-
-            std.debug.print("[{s} (0x{x:0>4}:0x{x:0>4})] \t{s}\tHID usage: 0x{x:0>2}\n", .{ device_info.name, device_info.vendor_id, device_info.product_id, key_name, usage });
+        const key_name = getKeyName(usage);
+        
+        if (key_name) |name| {
+            const event_type = if (pressed) "DOWN" else "UP  ";
+            std.debug.print("[{s} (0x{x:0>4}:0x{x:0>4})] {s} {s}\n", .{ 
+                device_info.name, 
+                device_info.vendor_id, 
+                device_info.product_id, 
+                event_type,
+                name 
+            });
 
             // Check for Ctrl+C
-            if (usage == 0x06 and ctrl_pressed) { // 'c' key in HID usage
+            if (usage == 0x06 and ctrl_pressed and pressed) { // 'c' key in HID usage
                 std.debug.print("\nCtrl+C pressed - exiting\n", .{});
                 std.posix.exit(0);
             }
-        } else {
-            // Key release - check if it's ctrl
-            if (usage == 0xE0) {
-                ctrl_pressed = false;
-            }
+        }
+
+        // Track ctrl state
+        if (usage == 0xE0) { // Left Control
+            ctrl_pressed = pressed;
+        } else if (usage == 0xE4) { // Right Control
+            ctrl_pressed = pressed;
         }
     }
 }
 
-// CGEventTap callback that just intercepts (consumes) all events
-fn interceptCallback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {
-    switch (typ) {
-        c.kCGEventKeyDown => {
-            // Check for Ctrl+C to exit
-            const keycode = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode);
-            const flags = c.CGEventGetFlags(event);
-            if (keycode == c.kVK_ANSI_C and flags & c.kCGEventFlagMaskControl != 0) {
-                std.debug.print("\nCtrl+C pressed - exiting\n", .{});
-                std.posix.exit(0);
-            }
-            return @ptrFromInt(0); // Consume the event
-        },
-        c.kCGEventLeftMouseDown, c.kCGEventRightMouseDown, c.kCGEventOtherMouseDown => {
-            return @ptrFromInt(0); // Consume mouse events
-        },
-        else => return event,
-    }
+fn getKeyName(usage: u32) ?[]const u8 {
+    return switch (usage) {
+        // Letters A-Z
+        0x04 => "a",
+        0x05 => "b",
+        0x06 => "c",
+        0x07 => "d",
+        0x08 => "e",
+        0x09 => "f",
+        0x0A => "g",
+        0x0B => "h",
+        0x0C => "i",
+        0x0D => "j",
+        0x0E => "k",
+        0x0F => "l",
+        0x10 => "m",
+        0x11 => "n",
+        0x12 => "o",
+        0x13 => "p",
+        0x14 => "q",
+        0x15 => "r",
+        0x16 => "s",
+        0x17 => "t",
+        0x18 => "u",
+        0x19 => "v",
+        0x1A => "w",
+        0x1B => "x",
+        0x1C => "y",
+        0x1D => "z",
+        
+        // Numbers
+        0x1E => "1",
+        0x1F => "2",
+        0x20 => "3",
+        0x21 => "4",
+        0x22 => "5",
+        0x23 => "6",
+        0x24 => "7",
+        0x25 => "8",
+        0x26 => "9",
+        0x27 => "0",
+        
+        // Special keys
+        0x28 => "return",
+        0x29 => "escape",
+        0x2A => "delete",
+        0x2B => "tab",
+        0x2C => "space",
+        0x2D => "hyphen",        // - _
+        0x2E => "equal",         // = +
+        0x2F => "lbracket",      // [ {
+        0x30 => "rbracket",      // ] }
+        0x31 => "backslash",     // \ |
+        0x32 => "semicolon",     // ; :
+        0x33 => "apostrophe",    // ' "
+        0x34 => "grave",         // ` ~
+        0x35 => "comma",         // , <
+        0x36 => "period",        // . >
+        0x37 => "slash",         // / ?
+        0x38 => "capslock",
+        
+        // Function keys
+        0x3A => "f1",
+        0x3B => "f2",
+        0x3C => "f3",
+        0x3D => "f4",
+        0x3E => "f5",
+        0x3F => "f6",
+        0x40 => "f7",
+        0x41 => "f8",
+        0x42 => "f9",
+        0x43 => "f10",
+        0x44 => "f11",
+        0x45 => "f12",
+        0x68 => "f13",
+        0x69 => "f14",
+        0x6A => "f15",
+        0x6B => "f16",
+        0x6C => "f17",
+        0x6D => "f18",
+        0x6E => "f19",
+        0x6F => "f20",
+        
+        // Control keys
+        0x46 => "printscreen",
+        0x47 => "scrolllock",
+        0x48 => "pause",
+        0x49 => "insert",
+        0x4A => "home",
+        0x4B => "pageup",
+        0x4C => "forwarddelete",
+        0x4D => "end",
+        0x4E => "pagedown",
+        0x4F => "right",
+        0x50 => "left",
+        0x51 => "down",
+        0x52 => "up",
+        
+        // Keypad
+        0x53 => "numlock",
+        0x54 => "keypad/",
+        0x55 => "keypad*",
+        0x56 => "keypad-",
+        0x57 => "keypad+",
+        0x58 => "keypadenter",
+        0x59 => "keypad1",
+        0x5A => "keypad2",
+        0x5B => "keypad3",
+        0x5C => "keypad4",
+        0x5D => "keypad5",
+        0x5E => "keypad6",
+        0x5F => "keypad7",
+        0x60 => "keypad8",
+        0x61 => "keypad9",
+        0x62 => "keypad0",
+        0x63 => "keypad.",
+        0x67 => "keypad=",
+        0x85 => "keypad,",
+        
+        // Modifiers
+        0xE0 => "lctrl",
+        0xE1 => "lshift",
+        0xE2 => "lalt",
+        0xE3 => "lcmd",
+        0xE4 => "rctrl",
+        0xE5 => "rshift",
+        0xE6 => "ralt",
+        0xE7 => "rcmd",
+        
+        // Media keys
+        0x7F => "mute",
+        0x80 => "volumeup",
+        0x81 => "volumedown",
+        0x9B => "mediastop",
+        0x9C => "mediaprevious",
+        0x9D => "mediaplay",
+        0x9E => "medianext",
+        
+        // Additional keys
+        0x64 => "nonus_backslash",  // Non-US \ and |
+        0x65 => "application",       // Windows menu key
+        0x66 => "power",
+        0x75 => "help",
+        0x76 => "menu",
+        0x77 => "select",
+        0x78 => "stop",
+        0x79 => "again",
+        0x7A => "undo",
+        0x7B => "cut",
+        0x7C => "copy",
+        0x7D => "paste",
+        0x7E => "find",
+        
+        // International keys
+        0x87 => "international1",    // JIS _ and |
+        0x88 => "international2",    // JIS Katakana/Hiragana
+        0x89 => "international3",    // JIS Yen
+        0x8A => "international4",    // JIS Henkan
+        0x8B => "international5",    // JIS Muhenkan
+        0x8C => "international6",    // JIS ,
+        0x8D => "international7",
+        0x8E => "international8",
+        0x8F => "international9",
+        0x90 => "lang1",            // Korean Hangul/English
+        0x91 => "lang2",            // Korean Hanja
+        0x92 => "lang3",            // Japanese Katakana
+        0x93 => "lang4",            // Japanese Hiragana
+        0x94 => "lang5",            // Japanese Zenkaku/Hankaku
+        
+        else => null,
+    };
 }
 
 test "HID echo mode" {

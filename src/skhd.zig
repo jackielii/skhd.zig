@@ -93,7 +93,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     errdefer device_manager.destroy();
 
     // Create event tap with keyboard and system defined events
-    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
+    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.kCGEventKeyUp) | (1 << c.NX_SYSDEFINED);
 
     return Skhd{
         .allocator = gpa,

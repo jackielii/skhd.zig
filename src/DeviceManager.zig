@@ -283,12 +283,12 @@ pub fn getDeviceFromEvent(self: *DeviceManager, event: c.CGEventRef) ?DeviceInfo
     // Try multiple fields that might contain device information
     const fields_to_try = [_]c.CGEventField{
         87, // Known to contain device registry ID in some cases
-        88, // Adjacent field that might have related info
-        89, // Another adjacent field
-        120, // Another potential field mentioned in some sources
-        96, // Another undocumented field
-        97, // Adjacent to 96
-        17, // kCGKeyboardEventKeyboardType
+        // 88, // Adjacent field that might have related info
+        // 89, // Another adjacent field
+        // 120, // Another potential field mentioned in some sources
+        // 96, // Another undocumented field
+        // 97, // Adjacent to 96
+        // 17, // kCGKeyboardEventKeyboardType
     };
 
     for (fields_to_try) |field| {

@@ -78,23 +78,119 @@ mouse1 <device "MX Master 3"> : echo "MX Master left click"
 - Add mouse button tokens to Tokenizer
 - Map mouse events to hotkey system
 
-## Feature 3: Timing-Based Features (QMK-inspired) 🔄
+## Feature 3: Timing-Based Features (QMK-inspired) ✅
 
-### Layer Tap (LT)
+### Status: Complete Working Implementation
 
-Tap for one key, hold for layer activation:
+We've successfully implemented a **fully functional** timing-based key remapping system in `src/timing_test.zig`.
+
+### Working Features
+- **Tap Caps Lock** (< 200ms) = Escape
+- **Hold Caps Lock** (> 200ms) = Control modifier
+- **Double tap Caps Lock** = Original Caps Lock
+- **Caps Lock + other key** = Control + that key
+
+### Technical Implementation
+
+#### System Architecture
+```
+System Level (hidutil):
+  Caps Lock (0x39) → F13 (0x68)
+        ↓
+HID Layer (IOHIDManager):
+  Precise timestamps (nanosecond)
+  Device identification
+        ↓
+CGEventTap:
+  Event suppression
+  Event injection
+        ↓
+Timing Logic:
+  Tap/Hold/Double-tap detection
+```
+
+#### Key Components
+
+**KeyRemapper.zig** - Programmatic remapping via hidutil:
+```zig
+const key_remapper = try KeyRemapper.create(allocator);
+defer key_remapper.destroy();
+
+// Automatic setup
+if (!try key_remapper.isCapsLockRemapped()) {
+    try key_remapper.setKeyMapping(KeyRemapper.KeyMapping.CAPS_TO_F13);
+}
+```
+
+**Timer-Based Hold Detection**:
+```zig
+// CFRunLoopTimer fires after 200ms to inject Control
+fn holdTimerCallback(timer: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const state = @as(*KeyTimingState, @ptrCast(@alignCast(info)));
+    
+    if (state.is_pressed and !state.has_been_modified and !state.control_injected) {
+        // Inject Control down
+        const ctrl_down = c.CGEventCreateKeyboardEvent(null, 0x3B, true);
+        defer c.CFRelease(ctrl_down);
+        c.CGEventSetFlags(ctrl_down, c.kCGEventFlagMaskControl);
+        c.CGEventPost(c.kCGHIDEventTap, ctrl_down);
+        
+        state.control_injected = true;
+    }
+}
+```
+
+### Running the Test
+```bash
+# Automatic setup and test
+zig build timing
+```
+
+### Timing Configuration
+- **Tap threshold**: 200ms
+- **Hold threshold**: > 200ms
+- **Double-tap window**: 300ms
+
+### Benefits
+- **Bypasses macOS Caps Lock delay** completely
+- **Works at system level** - affects all applications
+- **No LED issues** - F13 has no LED to toggle
+- **Zero latency on hold** - Control injected exactly at 200ms
+
+### Production Integration Path
+
+1. **Create `timing_manager.zig` module**
+   - Extract timing logic from test implementation
+   - Make it configurable per key
+   - Support multiple timing-enabled keys
+
+2. **Extend Parser.zig**
+   ```bash
+   # Proposed syntax
+   caps_lock : escape                # Default tap behavior
+   caps_lock [held] : ctrl          # Hold behavior
+   caps_lock [double_tap] : caps_lock # Double tap
+   
+   # Custom timing thresholds
+   .timing tap_threshold 250ms
+   .timing double_tap_window 300ms
+   ```
+
+3. **Integration with Hotkey.zig**
+   - Add timing configuration to Hotkey struct
+   - Support timing modifiers in hotkey matching
+
+### Layer Tap (LT) - Planned Extension
+
+Extend the timing system for layer activation:
 
 ```bash
-# Caps Lock: Tap = Escape, Hold = Control
-caps_lock : escape
-caps_lock [held] : ctrl
-
 # Space: Tap = Space, Hold = Fn layer
 space : space
 space [held] -> fn_layer
 ```
 
-### One Shot Layer (OSL)
+### One Shot Layer (OSL) - Future Work
 
 Tap to activate layer for next keypress only:
 
@@ -109,63 +205,66 @@ s : echo "@"
 d : echo "#"
 ```
 
-### Technical Requirements
-- Key press/release timing tracking
-- State machine for layer management
-- Timeout configuration support
-- Integration with existing mode system
+## Feature 4: Caps Lock Special Handling ✅
 
-## Feature 4: Caps Lock Special Handling 🔄
+### Status: Implemented as Part of Timing System
 
-### Research Findings
+Caps Lock remapping is fully implemented in our timing system, providing tap/hold functionality.
 
-Based on research at https://claude.ai/public/artifacts/91107587-c58a-46df-8d38-861b5ee9908b:
+### Implementation Details
 
-1. **macOS Caps Lock Behavior**:
-   - Has built-in delay (~300ms) to prevent accidental activation
+1. **macOS Caps Lock Challenge**:
+   - Has built-in ~300ms delay to prevent accidental activation
    - Sends special HID usage codes (0x38 and 0x39)
-   - Can be remapped at IOKit level using hidutil
    - The delay is handled at the HID driver level
 
-2. **Implementation Strategy: Remap to Unused Key**
+2. **Solution: Automatic Remapping**
    
-   Use `hidutil` to remap Caps Lock to an unused key (e.g., F13-F24), then handle that key in skhd:
+   `KeyRemapper.zig` programmatically remaps Caps Lock → F13:
    
+   ```zig
+   pub const KeyMapping = struct {
+       from: u64, // HID usage (0x700000000 | usage)
+       to: u64,   // HID usage (0x700000000 | usage)
+       
+       pub const CAPS_TO_F13 = KeyMapping{
+           .from = 0x700000039, // Caps Lock
+           .to = 0x700000068,   // F13
+       };
+   };
+   ```
+   
+   Manual setup (if needed):
    ```bash
-   # Remap Caps Lock (0x39) to F13 (0x68) at system level
+   # Enable remapping
    hidutil property --set '{"UserKeyMapping":[{
        "HIDKeyboardModifierMappingSrc":0x700000039,
        "HIDKeyboardModifierMappingDst":0x700000068
    }]}'
+   
+   # Check current mapping
+   hidutil property --get UserKeyMapping
+   
+   # Remove mapping (to restore default)
+   hidutil property --set '{"UserKeyMapping":[]}'
    ```
-   
-   Valid destination keys for remapping:
-   - **F13-F24** (0x68-0x73): Ideal - recognized by macOS but unused
-   - **International keys** (0x64, 0x65, 0x87-0x8B): Keys not on US keyboards
-   - **Media keys**: Different HID usage page (0xFF01000000XX)
 
-3. **Benefits of This Approach**:
-   - Bypasses macOS Caps Lock delay entirely
-   - Works at HID driver level (affects all apps)
-   - No Caps Lock LED toggle
-   - CGEventTap sees the remapped key (e.g., F13)
-   - Enables tap/hold functionality
+3. **Benefits Achieved**:
+   - ✅ Bypasses macOS Caps Lock delay entirely
+   - ✅ Works at HID driver level (affects all apps)
+   - ✅ No Caps Lock LED toggle issues
+   - ✅ CGEventTap sees F13 events
+   - ✅ Full tap/hold functionality
 
-4. **Proposed Implementation**:
-   
+4. **Working Implementation**:
    ```bash
-   # In skhd config after remapping Caps Lock to F13
-   # Tap F13 = Escape, Hold F13 = Control
-   f13 : escape
-   f13 [held] : ctrl
-   
-   # Or use F13 as a hyper key
-   f13 - a : open -a "Terminal"
-   f13 - s : open -a "Safari"
+   # Current behavior in timing_test.zig
+   # Tap Caps Lock = Escape
+   # Hold Caps Lock = Control
+   # Double tap = Original Caps Lock
    ```
 
-5. **Device-Specific Remapping**:
-   
+5. **Device-Specific Remapping** (Future Enhancement):
    ```bash
    # Only remap on specific keyboard
    hidutil property --matching '{"ProductID":0x0021}' --set '{"UserKeyMapping":[{
@@ -181,85 +280,162 @@ Based on research at https://claude.ai/public/artifacts/91107587-c58a-46df-8d38-
 ```
 CGEventTap + IOHIDManager
     ↓
-Device Identification (field 87)
+Device Identification (field 87 with caching)
     ↓
 keyHandler with device info
     ↓
 processHotkey (device + process matching)
     ↓
-Timing logic (for LT/OSL)
+Timing logic (CFRunLoopTimer)
     ↓
 Execute command/forward key
 ```
 
-### Caps Lock Implementation Flow
+### DeviceManager Optimizations
+
+#### Field 87 Caching
+- CGEvent field 87 contains device registry ID with ~22 offset
+- First lookup: O(n) proximity search
+- Subsequent lookups: O(1) via HashMap cache
+- Automatic offset discovery and recording
+
+```zig
+// Optimized lookup
+if (self.devices_by_field87.get(field87_value)) |device| {
+    return device;  // O(1) lookup
+}
+// ... learn and cache on first encounter
+```
+
+### Timing Implementation Architecture
 
 ```
-System Level (hidutil):
-  Caps Lock (0x39) → F13 (0x68)
-        ↓
-skhd Level:
-  F13 events → Timing detection
-        ↓
-  Tap (<200ms) → Send Escape
-  Hold (>200ms) → Act as Control
+HID Events (IOHIDManager)
+    ↓
+Precise timestamps (nanosecond)
+    ↓
+CGEventTap (suppression + injection)
+    ↓
+CFRunLoopTimer (200ms hold detection)
+    ↓
+State machine (tap/hold/double-tap)
 ```
 
 ### State Management
 
-For timing-based features, we need:
-- KeyStateManager to track press/release times
-- Timer system for timeouts
-- State machine for layer management
+**KeyTimingState** - Tracks individual key timing:
+```zig
+const KeyTimingState = struct {
+    is_pressed: bool = false,
+    control_injected: bool = false,
+    has_been_modified: bool = false,
+    timer: ?*c.struct___CFRunLoopTimer = null,
+    down_timestamp: i64 = 0,
+    tap_count: u32 = 0,
+    // ...
+};
+```
+
+**Key Features**:
+- Timer-based hold detection (fires at 200ms)
+- Key repeat prevention
+- Modifier tracking
+- Double-tap detection
 
 ## Implementation Roadmap
 
-### Phase 1: Complete Device Filtering ✅ (90% done)
+### Phase 1: Device Filtering ✅ (90% done)
 - [x] Parser and data structures
-- [x] Device detection
-- [ ] Runtime integration
+- [x] Device detection with DeviceManager
+- [x] Optimize field 87 lookup with caching
+- [x] HID observe mode (`-O` flag)
+- [ ] Runtime integration in skhd.zig
 - [ ] Vendor/product ID support
 
-### Phase 2: Mouse Support 🔄
+### Phase 2: Timing Features ✅ (Complete)
+- [x] Key state tracking
+- [x] Timer-based hold detection (CFRunLoopTimer)
+- [x] Tap/hold/double-tap detection
+- [x] Programmatic key remapping (KeyRemapper)
+- [x] Key repeat prevention
+- [x] Automatic cleanup on exit
+- [ ] Extract to timing_manager.zig module
+- [ ] Parser syntax integration
+
+### Phase 3: Caps Lock Special ✅ (Complete)
+- [x] Research macOS behavior
+- [x] Implement hidutil remapping
+- [x] Full tap/hold functionality
+- [x] Bypass macOS delay
+
+### Phase 4: Mouse Support 🔄 (Planned)
 - [ ] Extend event tap for mouse events
 - [ ] Add mouse button parsing
 - [ ] Test with various mice
 
-### Phase 3: Basic Timing Features 🔄
-- [ ] Key state tracking
-- [ ] Simple tap/hold detection
-- [ ] Basic LT implementation
-
-### Phase 4: Advanced Layers 🔄
-- [ ] OSL implementation
+### Phase 5: Advanced Layers 🔄 (Future)
+- [ ] Layer tap (LT) for mode switching
+- [ ] One shot layer (OSL)
 - [ ] Layer state management
-- [ ] Timeout configuration
-
-### Phase 5: Caps Lock Special 🔄
-- [ ] Investigate IOKit remapping
-- [ ] Implement chosen approach
-- [ ] Handle edge cases
 
 ## Testing Strategy
 
-1. **Device Filtering**: Test with multiple keyboards/mice
-2. **Timing Features**: Automated tests with simulated delays
-3. **Layer Management**: State machine testing
-4. **Integration**: Full config file testing
+### Completed Testing
 
-## Open Questions
+1. **Device Filtering**: 
+   - ✅ Multiple keyboards detected and identified
+   - ✅ CGEvent field 87 mapping verified
+   - ✅ HID observe mode shows per-device keypresses
 
-1. **Timing Precision**: What's acceptable latency for tap/hold detection?
-   - Proposal: 200ms default, configurable
+2. **Timing Features**:
+   - ✅ Tap/hold detection working at 200ms threshold
+   - ✅ Double-tap detection within 300ms window
+   - ✅ Key repeat prevention implemented
+   - ✅ Timer-based Control injection verified
 
-2. **Layer Syntax**: Stay close to skhd modes or adopt QMK-style?
-   - Proposal: Extend mode system with timing modifiers
+3. **Caps Lock Remapping**:
+   - ✅ Automatic remapping via KeyRemapper
+   - ✅ Bypass of macOS delay confirmed
+   - ✅ Signal handler cleanup tested
 
-3. **Mouse Integration**: Full mouse gesture support or just buttons?
+### Pending Testing
+
+1. **Integration Testing**:
+   - [ ] Full config file with device constraints
+   - [ ] Performance with multiple timing keys
+   - [ ] Layer management state machine
+
+2. **Edge Cases**:
+   - [ ] Rapid key switching
+   - [ ] Multiple devices simultaneously
+   - [ ] System sleep/wake behavior
+
+## Resolved Design Decisions
+
+1. **Timing Precision**: 
+   - ✅ 200ms tap/hold threshold (configurable)
+   - ✅ 300ms double-tap window
+   - ✅ Timer-based hold detection for zero latency
+
+2. **Device Syntax**:
+   - ✅ Space syntax: `<device "name">` not `<device:"name">`
+   - ✅ Device aliases: `.device name "pattern"`
+
+3. **Caps Lock Solution**:
+   - ✅ Remap to F13 via hidutil
+   - ✅ Full tap/hold functionality achieved
+   - ✅ Automatic setup in KeyRemapper.zig
+
+## Remaining Questions
+
+1. **Layer Syntax**: Extend mode system or new syntax?
+   - Proposal: Use `[held]`, `[tap]`, `[double_tap]` modifiers
+
+2. **Mouse Integration**: Full gesture support or just buttons?
    - Proposal: Start with buttons, consider gestures later
 
-4. **Caps Lock**: Deep remap or work with macOS behavior?
-   - Proposal: Start with macOS-compatible approach
+3. **Performance**: How many timing-enabled keys is reasonable?
+   - Current: One key tested, need to benchmark multiple
 
 ## References
 

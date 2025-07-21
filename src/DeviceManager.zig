@@ -23,12 +23,15 @@ pub const DeviceInfo = struct {
     unique_id: u64, // Session-based unique identifier
     device_type: DeviceType,
     registry_id: u64, // IORegistry entry ID for linking with CGEvent
+    cgevent_field_87: ?i64 = null, // CGEvent field 87 value for this device
 };
 
 allocator: std.mem.Allocator,
 hid_manager: c.IOHIDManagerRef,
 devices: std.AutoHashMap(c.IOHIDDeviceRef, DeviceInfo),
+devices_by_field87: std.AutoHashMap(i64, DeviceInfo),
 next_unique_id: u64 = 1,
+field87_offset: ?i64 = null, // Discovered offset between field 87 and registry_id
 
 pub fn create(allocator: std.mem.Allocator) !*DeviceManager {
     const hid_manager = c.IOHIDManagerCreate(c.kCFAllocatorDefault, c.kIOHIDOptionsTypeNone);
@@ -41,6 +44,7 @@ pub fn create(allocator: std.mem.Allocator) !*DeviceManager {
         .allocator = allocator,
         .hid_manager = hid_manager,
         .devices = std.AutoHashMap(c.IOHIDDeviceRef, DeviceInfo).init(allocator),
+        .devices_by_field87 = std.AutoHashMap(i64, DeviceInfo).init(allocator),
     };
 
     // Set up device matching for all HID devices on the Generic Desktop page
@@ -100,6 +104,7 @@ pub fn destroy(self: *DeviceManager) void {
         self.allocator.free(entry.value_ptr.name);
     }
     self.devices.deinit();
+    self.devices_by_field87.deinit();
 
     // Close and release HID manager
     _ = c.IOHIDManagerClose(self.hid_manager, c.kIOHIDOptionsTypeNone);
@@ -146,7 +151,7 @@ fn addDevice(self: *DeviceManager, device: c.IOHIDDeviceRef) !void {
                             device_type = DeviceType.mouse;
                             is_hid_device = true;
                         }
-                        log.debug("Device usage: {} ({s})", .{ usage, @tagName(device_type) });
+                        // log.debug("Device usage: {} ({s})", .{ usage, @tagName(device_type) });
                     }
                 }
             }
@@ -176,7 +181,7 @@ fn addDevice(self: *DeviceManager, device: c.IOHIDDeviceRef) !void {
     }
 
     if (!is_hid_device) {
-        log.debug("Skipping non-HID device: {s}", .{device_name});
+        // log.debug("Skipping non-HID device: {s}", .{device_name});
         return;
     }
 
@@ -193,7 +198,7 @@ fn addDevice(self: *DeviceManager, device: c.IOHIDDeviceRef) !void {
 
     // Get registry entry ID
     const registry_id = c.IOHIDDeviceGetRegistryEntryID(@ptrCast(device));
-    log.debug("IOHIDDeviceGetRegistryEntryID returned: {} for device: {s}", .{ registry_id, device_name });
+    // log.debug("IOHIDDeviceGetRegistryEntryID returned: {} for device: {s}", .{ registry_id, device_name });
     if (registry_id != 0) {
         info.registry_id = registry_id;
     }
@@ -233,11 +238,23 @@ fn addDevice(self: *DeviceManager, device: c.IOHIDDeviceRef) !void {
 
     try self.devices.put(device, info);
     log.info("Added {s}: {} - {s} (0x{x:0>4}:0x{x:0>4})", .{ @tagName(info.device_type), info.unique_id, info.name, info.vendor_id, info.product_id });
+    
+    // If we have an offset, update the field 87 lookup
+    if (self.field87_offset) |offset| {
+        const field87_value = @as(i64, @intCast(info.registry_id)) + offset;
+        try self.devices_by_field87.put(field87_value, info);
+    }
 }
 
 fn removeDevice(self: *DeviceManager, device: c.IOHIDDeviceRef) void {
     if (self.devices.fetchRemove(device)) |entry| {
         log.info("Removed {s}: {} - {s}", .{ @tagName(entry.value.device_type), entry.value.unique_id, entry.value.name });
+        
+        // Remove from field 87 lookup if present
+        if (entry.value.cgevent_field_87) |field87_value| {
+            _ = self.devices_by_field87.remove(field87_value);
+        }
+        
         self.allocator.free(entry.value.name);
     }
 }
@@ -278,69 +295,55 @@ pub fn findDeviceByRegistryId(self: *DeviceManager, registry_id: u64) ?DeviceInf
     return null;
 }
 
-// Get device from CGEvent using undocumented field 87 which contains registry ID
+// Get device from CGEvent using field 87
 pub fn getDeviceFromEvent(self: *DeviceManager, event: c.CGEventRef) ?DeviceInfo {
-    // Try multiple fields that might contain device information
-    const fields_to_try = [_]c.CGEventField{
-        87, // Known to contain device registry ID in some cases
-        // 88, // Adjacent field that might have related info
-        // 89, // Another adjacent field
-        // 120, // Another potential field mentioned in some sources
-        // 96, // Another undocumented field
-        // 97, // Adjacent to 96
-        // 17, // kCGKeyboardEventKeyboardType
-    };
-
-    for (fields_to_try) |field| {
-        const value = c.CGEventGetIntegerValueField(event, field);
-        if (value != 0) {
-            log.debug("CGEvent field {} value: {}", .{ field, value });
-
-            // Try exact match first
-            const found_device = self.findDeviceByRegistryId(@intCast(value));
-            if (found_device != null) {
-                log.debug("Found matching device using field {}: {s}", .{ field, found_device.?.name });
-                return found_device;
-            }
-
-            // If field 87, also try to find device within a small range (±100)
-            if (field == 87) {
-                var best_match: ?DeviceInfo = null;
-                var best_diff: i64 = 101;
-
-                var iter = self.devices.iterator();
-                while (iter.next()) |entry| {
-                    const device_reg_id = @as(i64, @intCast(entry.value_ptr.registry_id));
-                    const diff = if (value > device_reg_id) value - device_reg_id else device_reg_id - value;
-                    if (diff <= 100) {
-                        log.debug("Found device within range (diff={}): {s} ({s})", .{ diff, entry.value_ptr.name, @tagName(entry.value_ptr.device_type) });
-
-                        // Prefer keyboard devices for key events
-                        if (diff < best_diff) {
-                            best_match = entry.value_ptr.*;
-                            best_diff = diff;
-                        } else if (diff == best_diff and entry.value_ptr.device_type == .keyboard and best_match != null and best_match.?.device_type != .keyboard) {
-                            // If same distance, prefer keyboard over mouse
-                            best_match = entry.value_ptr.*;
-                        }
-                    }
-                }
-
-                if (best_match) |device| {
-                    log.debug("Selected best match: {s} (diff={})", .{ device.name, best_diff });
-                    return device;
-                }
+    const field87_value = c.CGEventGetIntegerValueField(event, 87);
+    if (field87_value == 0) return null;
+    
+    // Try direct lookup first
+    if (self.devices_by_field87.get(field87_value)) |device| {
+        return device;
+    }
+    
+    // Not found in cache, try to find by proximity and record the mapping
+    var best_match: ?*DeviceInfo = null;
+    var best_diff: i64 = 101;
+    
+    var iter = self.devices.iterator();
+    while (iter.next()) |entry| {
+        const device_reg_id = @as(i64, @intCast(entry.value_ptr.registry_id));
+        const diff = if (field87_value > device_reg_id) 
+            field87_value - device_reg_id 
+        else 
+            device_reg_id - field87_value;
+        
+        if (diff <= 100) {
+            // Prefer keyboard devices for key events
+            if (diff < best_diff or 
+                (diff == best_diff and entry.value_ptr.device_type == .keyboard and 
+                 (best_match == null or best_match.?.device_type != .keyboard))) {
+                best_match = entry.value_ptr;
+                best_diff = diff;
             }
         }
     }
-
-    // If no match found, log all our known devices
-    log.debug("No device match found. Known devices:", .{});
-    var iter = self.devices.iterator();
-    while (iter.next()) |entry| {
-        log.debug("  Device: {s} has registry_id: {}", .{ entry.value_ptr.name, entry.value_ptr.registry_id });
+    
+    // If we found a match, record the mapping for future lookups
+    if (best_match) |device| {
+        // Record this field 87 value for this device
+        device.cgevent_field_87 = field87_value;
+        self.devices_by_field87.put(field87_value, device.*) catch {};
+        
+        // Calculate and store the offset if not already known
+        if (self.field87_offset == null) {
+            self.field87_offset = field87_value - @as(i64, @intCast(device.registry_id));
+            // Only log this discovery once
+            log.debug("Discovered CGEvent field 87 offset: {} for device: {s}", .{ self.field87_offset.?, device.name });
+        }
+        
+        return device.*;
     }
-
+    
     return null;
 }
 
@@ -359,6 +362,25 @@ pub fn registerInputCallbacks(self: *DeviceManager, callback: c.IOHIDValueCallba
             if (result != c.kIOReturnSuccess) {
                 log.warn("Failed to open device: {s}", .{info.name});
             }
+        }
+    }
+}
+
+// Debug function to show field 87 mapping statistics
+pub fn logField87Stats(self: *DeviceManager) void {
+    log.info("Field 87 mapping statistics:", .{});
+    log.info("  Offset: {?}", .{self.field87_offset});
+    log.info("  Cached mappings: {}", .{self.devices_by_field87.count()});
+    
+    var iter = self.devices.iterator();
+    while (iter.next()) |entry| {
+        const info = entry.value_ptr.*;
+        if (info.device_type == .keyboard) {
+            log.info("  {s}: registry_id={}, field87={?}", .{ 
+                info.name, 
+                info.registry_id, 
+                info.cgevent_field_87 
+            });
         }
     }
 }

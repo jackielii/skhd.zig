@@ -78,13 +78,130 @@ mouse1 <device "MX Master 3"> : echo "MX Master left click"
 - Add mouse button tokens to Tokenizer
 - Map mouse events to hotkey system
 
-## Feature 3: Timing-Based Features (QMK-inspired) ✅
+## Feature 3: Timing-Based Features (QMK-inspired) 🔄
 
-### Status: Complete Working Implementation
+### Status: Syntax Design Complete, Implementation Pending
 
-We've successfully implemented a **fully functional** timing-based key remapping system in `src/timing_test.zig`.
+We've designed a clear, explicit syntax for tap/hold functionality that avoids operator overloading and uses function-like syntax for clarity.
 
-### Working Features
+### Overview
+
+The tap/hold system enables keys to have dual functionality:
+- **Tap**: Quick press and release triggers one action
+- **Hold**: Pressing and holding triggers a different action
+
+This is particularly useful for:
+- Making Control act as Escape when tapped
+- Creating "Layer Tap" keys (e.g., Space as both space and layer modifier)
+- Optimizing keyboard layouts for ergonomics
+
+### Finalized Syntax
+
+#### Basic Syntax
+```skhd
+tap(key) | action
+hold(key) | action
+```
+
+#### Global Timing Configuration
+```skhd
+# Set global timing defaults
+.timing tap_min=50ms tap_max=200ms
+```
+
+- `tap_min`: Minimum duration to register as a tap (helps avoid accidental triggers)
+- `tap_max`: Maximum duration to still count as a tap (beyond this, it's a hold)
+
+#### Examples
+
+**Control as Escape/Control:**
+```skhd
+# Control acts as Escape when tapped, Control when held
+tap(lctrl) | escape
+hold(lctrl) | lctrl
+```
+
+**Space as Layer Tap:**
+```skhd
+# Space key types space when tapped, activates navigation layer when held
+tap(space) | space
+hold(space) | layer(nav)
+
+.layer nav {
+    h | left
+    j | down
+    k | up
+    l | right
+    y | home
+    u | pagedown
+    i | pageup
+    o | end
+}
+```
+
+**Custom Timing:**
+```skhd
+# Quick tap detection for Control
+tap(lctrl, tap_min=50ms, tap_max=150ms) | escape
+
+# No maximum tap duration for Space
+tap(space, tap_max=∞) | space
+
+# Custom hold threshold
+hold(space, hold_min=200ms) | layer(nav)
+```
+
+**With Modifiers:**
+```skhd
+# Cmd+Space: Return when tapped, symbols layer when held
+cmd + tap(space) | return
+cmd + hold(space) | layer(symbols)
+```
+
+**Device-Specific Bindings:**
+```skhd
+.device 0x04fe:0x0021 {
+    tap(lctrl, tap_max=150ms) | escape
+    hold(lctrl) | lctrl
+    
+    tap(space) | space
+    hold(space) | layer(nav)
+}
+```
+
+### Timing Parameters
+
+#### For `tap()`:
+- `tap_min`: Minimum milliseconds for a valid tap (default: from `.timing`)
+- `tap_max`: Maximum milliseconds to register as tap (default: from `.timing`)
+  - Use `∞` or `inf` for no maximum
+
+#### For `hold()`:
+- `hold_min`: Minimum milliseconds before triggering hold action (default: `tap_max + 1ms`)
+
+### Key Design Decisions
+
+1. **Explicit Functions**: `tap()` and `hold()` are clear function calls
+2. **Named Parameters**: Optional timing parameters are self-documenting
+3. **Consistent Syntax**: Uses `|` for all mappings (like existing key remapping)
+4. **Composable**: Works naturally with modifiers and device constraints
+
+### Implementation Notes
+
+1. **Mutual Exclusivity**: When both `tap()` and `hold()` are defined for the same key, only one action fires per key press
+2. **Timing Precision**: Times are in milliseconds (ms)
+3. **Layer Activation**: `layer()` creates a temporary layer active only while the key is held
+4. **Key Repeat**: Hold actions do not auto-repeat by default
+
+### Future Considerations
+
+Potential extensions to the syntax:
+- `double_tap(key, interval=300ms) | action` for double-tap detection
+- `tap_hold(key) | tap_action | hold_action` as a single-line alternative
+- Repeat configuration for held keys
+
+### Working Prototype
+We have a **fully functional** timing-based key remapping prototype in `src/timing_test.zig` that demonstrates:
 - **Tap Caps Lock** (< 200ms) = Escape
 - **Hold Caps Lock** (> 200ms) = Control modifier
 - **Double tap Caps Lock** = Original Caps Lock
@@ -165,15 +282,15 @@ zig build timing
    - Support multiple timing-enabled keys
 
 2. **Extend Parser.zig**
-   ```bash
-   # Proposed syntax
-   caps_lock : escape                # Default tap behavior
-   caps_lock [held] : ctrl          # Hold behavior
-   caps_lock [double_tap] : caps_lock # Double tap
+   ```skhd
+   # New finalized syntax
+   tap(caps_lock) | escape
+   hold(caps_lock) | lctrl
+   double_tap(caps_lock) | caps_lock
    
    # Custom timing thresholds
-   .timing tap_threshold 250ms
-   .timing double_tap_window 300ms
+   .timing tap_min=50ms tap_max=250ms
+   .timing double_tap_window=300ms
    ```
 
 3. **Integration with Hotkey.zig**
@@ -184,25 +301,30 @@ zig build timing
 
 Extend the timing system for layer activation:
 
-```bash
-# Space: Tap = Space, Hold = Fn layer
-space : space
-space [held] -> fn_layer
+```skhd
+# Space: Tap = Space, Hold = Nav layer
+tap(space) | space
+hold(space) | layer(nav)
+
+# Esc: Tap = Esc, Hold = symbols layer
+tap(escape) | escape
+hold(escape) | layer(symbols)
 ```
 
 ### One Shot Layer (OSL) - Future Work
 
 Tap to activate layer for next keypress only:
 
-```bash
+```skhd
 # Tap F key to activate symbol layer for one key
-f [tap] -> symbols [oneshot]
+tap(f) | oneshot(symbols)
 
-# In symbols mode
-:: symbols
-a : echo "!"
-s : echo "@"
-d : echo "#"
+# Define symbols layer
+.layer symbols {
+    a | exclamation
+    s | at
+    d | hash
+}
 ```
 
 ## Feature 4: Caps Lock Special Handling ✅
@@ -429,7 +551,7 @@ const KeyTimingState = struct {
 ## Remaining Questions
 
 1. **Layer Syntax**: Extend mode system or new syntax?
-   - Proposal: Use `[held]`, `[tap]`, `[double_tap]` modifiers
+   - ✅ Decision: Use function syntax `tap()`, `hold()`, `layer()` for clarity
 
 2. **Mouse Integration**: Full gesture support or just buttons?
    - Proposal: Start with buttons, consider gestures later

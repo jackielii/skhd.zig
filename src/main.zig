@@ -49,6 +49,7 @@ pub fn main() !void {
     var config_file: ?[]const u8 = null;
     var verbose = false;
     var observe_mode = false;
+    var hid_observe_mode = false;
     var no_hotload = false;
     var profile = false;
 
@@ -66,6 +67,8 @@ pub fn main() !void {
             verbose = true;
         } else if (std.mem.eql(u8, args[i], "-o") or std.mem.eql(u8, args[i], "--observe")) {
             observe_mode = true;
+        } else if (std.mem.eql(u8, args[i], "-O") or std.mem.eql(u8, args[i], "--observe-hid")) {
+            hid_observe_mode = true;
         } else if (std.mem.eql(u8, args[i], "-v") or std.mem.eql(u8, args[i], "--version")) {
             std.debug.print("skhd.zig v{s}\n", .{version});
             return;
@@ -121,6 +124,12 @@ pub fn main() !void {
     if (observe_mode) {
         const echo = @import("echo.zig").echo;
         try echo();
+        return;
+    }
+
+    if (hid_observe_mode) {
+        const echoHID = @import("echo_hid.zig").echoHID;
+        try echoHID();
         return;
     }
 
@@ -221,7 +230,8 @@ fn printHelp() void {
         \\  -c, --config <file>    Specify config file (default: skhdrc)
         \\  -V, --verbose          Enable verbose output (interactive mode)
         \\  -P, --profile          Enable profiling/tracing mode
-        \\  -o, --observe          Observe mode - print key events
+        \\  -o, --observe          Observe mode - print key events (intercepts all events)
+        \\  -O, --observe-hid      Observe mode with HID - shows which device sent each key (intercepts all events)
         \\  -h, --no-hotload       Disable system for hotloading config file
         \\  -k, --key <keyspec>    Synthesize a keypress
         \\  -t, --text <text>      Synthesize text input

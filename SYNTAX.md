@@ -136,6 +136,7 @@ command   = command is executed through '$SHELL -c'
 - `backspace` - Delete/Backspace (kVK_Delete)
 - `delete` - Forward Delete (kVK_ForwardDelete)
 - `escape` - Escape key
+- `backtick` - Backtick/Grave Accent key (`)
 
 ### Function Keys
 - `f1` through `f20` - Function keys

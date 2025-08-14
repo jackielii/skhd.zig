@@ -30,6 +30,41 @@ current_file_path: ?[]const u8 = null,
 error_info: ?ParseError = null,
 process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
 command_defs: std.StringHashMapUnmanaged(CommandDef) = .empty,
+device_aliases: std.StringHashMapUnmanaged(DeviceAlias) = .empty,
+verbose: bool = false,
+
+pub const DeviceAlias = union(enum) {
+    single_device: DeviceConstraint,
+    device_list: []const DeviceConstraint,
+
+    pub fn deinit(self: *DeviceAlias, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .single_device => |*device| device.deinit(allocator),
+            .device_list => |list| {
+                for (list) |*device| {
+                    @constCast(device).deinit(allocator);
+                }
+                allocator.free(list);
+            },
+        }
+    }
+};
+
+pub const DeviceConstraint = struct {
+    type: enum {
+        name, // device:"name"
+        vendor_product, // vendor:0x1234,product:0x5678
+    },
+    name: ?[]const u8 = null,
+    vendor_id: ?u32 = null,
+    product_id: ?u32 = null,
+
+    pub fn deinit(self: *DeviceConstraint, allocator: std.mem.Allocator) void {
+        if (self.name) |name| {
+            allocator.free(name);
+        }
+    }
+};
 
 pub const CommandDef = struct {
     pub const Part = union(enum) {
@@ -85,6 +120,16 @@ pub fn deinit(self: *Parser) void {
             kv.value_ptr.*.deinit(self.allocator);
         }
         self.command_defs.deinit(self.allocator);
+    }
+
+    // Free device aliases
+    {
+        var it = self.device_aliases.iterator();
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            kv.value_ptr.*.deinit(self.allocator);
+        }
+        self.device_aliases.deinit(self.allocator);
     }
 
     self.* = undefined;
@@ -244,7 +289,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     }
 
     if (hotkey.mode_list.count() > 0) {
-        if (!self.match(.Token_Insert)) {
+        if (!self.match(.Token_AngleOpen)) {
             const token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '<' after mode identifier", self.current_file_path);
             return error.ParseErrorOccurred;
@@ -295,6 +340,36 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
 
     if (self.match(.Token_Arrow)) {
         hotkey.flags = hotkey.flags.merge(.{ .passthrough = true });
+    }
+
+    // Parse device constraint if present: <device:"name"> or <vendor:0x1234>
+    if (self.match(.Token_AngleOpen)) {
+        // Debug: print tokens after <
+        if (self.verbose) {
+            var i: usize = 0;
+            const saved_next = self.next_token;
+            const saved_tokenizer = self.tokenizer;
+            while (i < 5) : (i += 1) {
+                const tok = self.peek();
+                if (tok) |t| {
+                    std.debug.print("Token {}: type={s}, text=\"{s}\"\n", .{ i, @tagName(t.type), t.text });
+                    _ = self.advance();
+                } else {
+                    break;
+                }
+            }
+            // Restore state
+            self.next_token = saved_next;
+            self.tokenizer = saved_tokenizer;
+        }
+
+        const device_constraint = try self.parseDeviceConstraint();
+        if (!self.match(.Token_AngleClose)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '>' to close device constraint", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        try hotkey.set_device_constraint(device_constraint);
     }
 
     if (self.match(.Token_Activate)) {
@@ -1033,6 +1108,26 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '[' after 'blacklist'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
+    } else if (std.mem.eql(u8, option, "device")) {
+        // Parse device alias definition
+        if (!self.match(.Token_Identifier)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected alias name after 'device'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        const alias_name = self.previous().text;
+
+        // Parse device specification (no = token, just whitespace)
+        const device_alias = try self.parseDeviceAlias();
+
+        // Store the alias
+        if (self.device_aliases.contains(alias_name)) {
+            self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Device alias already defined", self.current_file_path);
+            return error.DeviceAliasAlreadyDefined;
+        }
+
+        const owned_name = try self.allocator.dupe(u8, alias_name);
+        try self.device_aliases.put(self.allocator, owned_name, device_alias);
     } else if (std.mem.eql(u8, option, "shell") or std.mem.eql(u8, option, "SHELL")) {
         if (self.match(.Token_String)) {
             const shell_path = try self.processStringOwned(self.previous().text);
@@ -1049,9 +1144,130 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             return error.ParseErrorOccurred;
         }
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell", .{option});
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, device, load, blacklist, shell", .{option});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+}
+
+fn parseDeviceAlias(self: *Parser) !DeviceAlias {
+    // Device alias can be:
+    // 1. A string: "HHKB-Hybrid"
+    // 2. A list: ["Keychron K2", "HHKB-Hybrid"]
+    // 3. A device constraint: <vendor:0x046d>
+
+    if (self.match(.Token_String)) {
+        // Simple string device name
+        const device_name = try self.processStringOwned(self.previous().text);
+        return DeviceAlias{ .single_device = DeviceConstraint{
+            .type = .name,
+            .name = device_name,
+        } };
+    } else if (self.match(.Token_BeginList)) {
+        // List of device names
+        var device_list = std.ArrayList(DeviceConstraint).init(self.allocator);
+        errdefer {
+            for (device_list.items) |*device| {
+                device.deinit(self.allocator);
+            }
+            device_list.deinit();
+        }
+
+        while (self.match(.Token_String)) {
+            const device_name = try self.processStringOwned(self.previous().text);
+            try device_list.append(DeviceConstraint{
+                .type = .name,
+                .name = device_name,
+            });
+            // Skip optional comma
+            _ = self.match(.Token_Comma);
+        }
+
+        if (!self.match(.Token_EndList)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ']' to close device list", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        return DeviceAlias{ .device_list = try device_list.toOwnedSlice() };
+    } else if (self.match(.Token_AngleOpen)) {
+        // Device constraint like <vendor:0x046d>
+        const constraint = try self.parseDeviceConstraint();
+        if (!self.match(.Token_AngleClose)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '>' to close device constraint", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return DeviceAlias{ .single_device = constraint };
+    } else {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected device name string, list, or constraint after device alias", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+}
+
+fn parseDeviceConstraint(self: *Parser) !DeviceConstraint {
+    // Parse device constraint: device:"name" or vendor:0x1234,product:0x5678 or @alias
+    if (self.match(.Token_Reference)) {
+        // Device alias reference: @hhkb
+        const alias_name = self.previous().text;
+        const device_alias = self.device_aliases.get(alias_name) orelse {
+            const token = self.previous();
+            const msg = try std.fmt.allocPrint(self.allocator, "Device alias '@{s}' not found. Did you forget to define it with '.device {s} = ...'?", .{ alias_name, alias_name });
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        };
+
+        // For now, only support single device constraints from aliases
+        switch (device_alias) {
+            .single_device => |device| {
+                // Create a copy of the device constraint
+                var copied = device;
+                if (device.name) |name| {
+                    copied.name = try self.allocator.dupe(u8, name);
+                }
+                return copied;
+            },
+            .device_list => {
+                const token = self.previous();
+                self.error_info = try ParseError.fromToken(self.allocator, token, "Device lists in hotkey constraints not yet supported", self.current_file_path);
+                return error.NotImplemented;
+            },
+        }
+    }
+
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected 'device', 'vendor', or '@alias' in device constraint", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    const constraint_type = self.previous().text;
+
+    if (std.mem.eql(u8, constraint_type, "device")) {
+        // device "name" (using space instead of colon to avoid tokenizer issues)
+        if (!self.match(.Token_String)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected device name string after 'device'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        const device_name = try self.processStringOwned(self.previous().text);
+        return DeviceConstraint{
+            .type = .name,
+            .name = device_name,
+        };
+    } else if (std.mem.eql(u8, constraint_type, "vendor")) {
+        // vendor:0x1234,product:0x5678
+        // TODO: Implement vendor/product parsing
+        const token = self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "vendor/product constraints not yet implemented", self.current_file_path);
+        return error.NotImplemented;
+    } else {
+        const token = self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Unknown device constraint type. Expected 'device' or 'vendor'", self.current_file_path);
         return error.ParseErrorOccurred;
     }
 }
@@ -1875,4 +2091,137 @@ test "duplicate process group definition returns error" {
 
     // Verify the original is still there
     try std.testing.expect(parser.process_groups.contains("browsers"));
+}
+
+test "device alias definition" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test simple device alias
+    const content =
+        \\.device hhkb "HHKB-Hybrid"
+        \\.device external ["Keychron K2", "HHKB-Hybrid", "MX Master 2S"]
+    ;
+    try parser.parse(&mappings, content);
+
+    // Verify aliases were created
+    try std.testing.expect(parser.device_aliases.contains("hhkb"));
+    try std.testing.expect(parser.device_aliases.contains("external"));
+
+    const hhkb_alias = parser.device_aliases.get("hhkb").?;
+    switch (hhkb_alias) {
+        .single_device => |device| {
+            try std.testing.expectEqual(@as(@TypeOf(device.type), .name), device.type);
+            try std.testing.expectEqualStrings("HHKB-Hybrid", device.name.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const external_alias = parser.device_aliases.get("external").?;
+    switch (external_alias) {
+        .device_list => |list| {
+            try std.testing.expectEqual(@as(usize, 3), list.len);
+            try std.testing.expectEqualStrings("Keychron K2", list[0].name.?);
+            try std.testing.expectEqualStrings("HHKB-Hybrid", list[1].name.?);
+            try std.testing.expectEqualStrings("MX Master 2S", list[2].name.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "device constraint in hotkey" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test direct device constraint (using space instead of colon for now)
+    const content =
+        \\cmd - a <device "HHKB-Hybrid"> : echo "hhkb"
+    ;
+    try parser.parse(&mappings, content);
+
+    // Verify hotkey was created with device constraint
+    const default_mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), default_mode.hotkey_map.count());
+
+    const ctx = Hotkey.KeyboardLookupContext{};
+    const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_A };
+    const hotkey = default_mode.hotkey_map.getKeyAdapted(keypress, ctx).?;
+
+    try std.testing.expect(hotkey.device_constraint != null);
+    const device = hotkey.device_constraint.?;
+    try std.testing.expect(device.type == .name);
+    try std.testing.expectEqualStrings("HHKB-Hybrid", device.name.?);
+}
+
+test "device alias in hotkey" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test device alias reference
+    const content =
+        \\.device hhkb "HHKB-Hybrid"
+        \\cmd - b <@hhkb> : echo "hhkb alias"
+    ;
+    try parser.parse(&mappings, content);
+
+    // Verify hotkey was created with device constraint from alias
+    const default_mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), default_mode.hotkey_map.count());
+
+    const ctx = Hotkey.KeyboardLookupContext{};
+    const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_B };
+    const hotkey = default_mode.hotkey_map.getKeyAdapted(keypress, ctx).?;
+
+    try std.testing.expect(hotkey.device_constraint != null);
+    const device = hotkey.device_constraint.?;
+    try std.testing.expect(device.type == .name);
+    try std.testing.expectEqualStrings("HHKB-Hybrid", device.name.?);
+}
+
+test "device constraint with process list" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test device constraint combined with process list
+    const content =
+        \\cmd - c <device "External Keyboard"> [
+        \\    "Terminal" : echo "external in terminal"
+        \\    *          : echo "external elsewhere"
+        \\]
+    ;
+    try parser.parse(&mappings, content);
+
+    // Verify hotkey was created with both device constraint and process commands
+    const default_mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), default_mode.hotkey_map.count());
+
+    const ctx = Hotkey.KeyboardLookupContext{};
+    const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_C };
+    const hotkey = default_mode.hotkey_map.getKeyAdapted(keypress, ctx).?;
+
+    try std.testing.expect(hotkey.device_constraint != null);
+    const device = hotkey.device_constraint.?;
+    try std.testing.expectEqualStrings("External Keyboard", device.name.?);
+
+    // Check process commands
+    const terminal_cmd = hotkey.find_command_for_process("Terminal").?;
+    try std.testing.expectEqualStrings("echo \"external in terminal\"", terminal_cmd.command);
+
+    const wildcard_cmd = hotkey.find_command_for_process("unknown").?;
+    try std.testing.expectEqualStrings("echo \"external elsewhere\"", wildcard_cmd.command);
 }

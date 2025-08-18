@@ -13,6 +13,7 @@ const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
 const Parser = @import("Parser.zig");
 const Tracer = @import("Tracer.zig");
+const SecureInput = @import("SecureInput.zig");
 
 // Use scoped logging for skhd module
 const log = std.log.scoped(.skhd);
@@ -38,6 +39,7 @@ hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
+secure_input: *SecureInput,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -86,6 +88,10 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     log.info("Initial process: {s}", .{carbon_event.getProcessName()});
 
+    // Initialize secure input monitoring
+    var secure_input = try SecureInput.init(gpa);
+    errdefer secure_input.deinit();
+
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
 
@@ -98,6 +104,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         .verbose = verbose,
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
+        .secure_input = secure_input,
     };
 }
 
@@ -111,6 +118,7 @@ pub fn deinit(self: *Skhd) void {
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
     }
+    self.secure_input.deinit();
     self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
@@ -191,6 +199,9 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Call NSApplicationLoad() like the original skhd
     c.NSApplicationLoad();
 
+    // Start secure input monitoring
+    self.secure_input.startMonitoring();
+
     // Always log successful event tap creation
     log.info("Event tap created successfully. skhd is now running.", .{});
 
@@ -234,6 +245,11 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
 inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     if (self.current_mode == null) {
         self.tracer.traceNoModeExit();
+        return event;
+    }
+
+    // Skip events when secure input is enabled
+    if (self.secure_input.isSecureInputEnabled()) {
         return event;
     }
 
@@ -734,6 +750,10 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
     const carbon_event = try CarbonEvent.init(allocator);
     errdefer carbon_event.deinit();
 
+    // Create secure input mock
+    const secure_input = try SecureInput.init(allocator);
+    errdefer secure_input.deinit();
+
     return Skhd{
         .allocator = allocator,
         .mappings = mappings,
@@ -743,6 +763,7 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
         .verbose = false,
         .tracer = Tracer.init(false),
         .carbon_event = carbon_event,
+        .secure_input = secure_input,
     };
 }
 

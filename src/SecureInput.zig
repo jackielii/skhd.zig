@@ -8,6 +8,7 @@ allocator: std.mem.Allocator,
 is_secure: bool = false,
 notification_ref: ?c.CFUserNotificationRef = null,
 check_timer: ?c.CFRunLoopTimerRef = null,
+check_interval: f64 = 0.5, // Start with 500ms polling
 
 pub extern fn IsSecureEventInputEnabled() c.Boolean;
 
@@ -39,7 +40,16 @@ pub fn startMonitoring(self: *SecureInput) void {
         .copyDescription = null,
     };
 
-    self.check_timer = c.CFRunLoopTimerCreate(c.kCFAllocatorDefault, c.CFAbsoluteTimeGetCurrent() + 1.0, 1.0, 0, 0, timerCallback, &timer_context);
+    // Start with 500ms interval for responsive detection
+    self.check_timer = c.CFRunLoopTimerCreate(
+        c.kCFAllocatorDefault, 
+        c.CFAbsoluteTimeGetCurrent() + self.check_interval, 
+        self.check_interval, 
+        0, 
+        0, 
+        timerCallback, 
+        &timer_context
+    );
 
     if (self.check_timer) |timer| {
         c.CFRunLoopAddTimer(c.CFRunLoopGetMain(), timer, c.kCFRunLoopCommonModes);
@@ -62,7 +72,6 @@ fn timerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
 }
 
 pub fn checkAndUpdateStatus(self: *SecureInput) void {
-    log.debug("Checking secure input status", .{});
     const secure_input_enabled = IsSecureEventInputEnabled() != 0;
 
     if (secure_input_enabled != self.is_secure) {
@@ -71,10 +80,48 @@ pub fn checkAndUpdateStatus(self: *SecureInput) void {
         if (secure_input_enabled) {
             log.warn("Secure keyboard entry is enabled - hotkeys will not work", .{});
             self.showNotification();
+            // Increase check frequency when secure input is active (check every 500ms)
+            self.updateTimerInterval(0.5);
         } else {
             log.info("Secure keyboard entry is disabled - hotkeys resumed", .{});
             self.dismissNotification();
+            // Reduce check frequency when secure input is inactive (check every 2 seconds)
+            self.updateTimerInterval(2.0);
         }
+    }
+}
+
+fn updateTimerInterval(self: *SecureInput, new_interval: f64) void {
+    if (self.check_interval == new_interval) return;
+    
+    self.check_interval = new_interval;
+    
+    // Recreate timer with new interval
+    if (self.check_timer) |timer| {
+        c.CFRunLoopTimerInvalidate(timer);
+        c.CFRelease(timer);
+    }
+    
+    var timer_context = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = self,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    
+    self.check_timer = c.CFRunLoopTimerCreate(
+        c.kCFAllocatorDefault,
+        c.CFAbsoluteTimeGetCurrent() + self.check_interval,
+        self.check_interval,
+        0,
+        0,
+        timerCallback,
+        &timer_context
+    );
+    
+    if (self.check_timer) |timer| {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetMain(), timer, c.kCFRunLoopCommonModes);
     }
 }
 

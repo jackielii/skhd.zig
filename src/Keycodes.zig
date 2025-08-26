@@ -109,8 +109,8 @@ test "is_modifier" {
 }
 
 pub const literal_keycode_str = [_][]const u8{
-    "return",          "tab",           "space",
-    "backspace",       "escape",
+    "return",          "tab",             "space",
+    "backspace",       "escape",          "backtick",
 
     // zig fmt: off
 
@@ -139,7 +139,7 @@ pub const KEY_HAS_IMPLICIT_NX_MOD = 35;
 
 pub const literal_keycode_value = [_]u32{
     c.kVK_Return,                 c.kVK_Tab,                  c.kVK_Space,
-    c.kVK_Delete,                 c.kVK_Escape,
+    c.kVK_Delete,                 c.kVK_Escape,               c.kVK_ANSI_Grave,
 
     // zig fmt: off
 
@@ -202,7 +202,13 @@ pub fn init(alloc: std.mem.Allocator) !Keycodes {
             defer c.CFRelease(key_cfstring);
             const key_string = try copy_cfstring(alloc, key_cfstring);
             errdefer alloc.free(key_string);
-            if (try self.keymap_table.fetchPut(alloc, key_string, keycode)) |_| return error.DuplicateKeycodeMapping;
+            if (self.keymap_table.get(key_string)) |existing_keycode| {
+                // EurKEY and other layouts may have duplicate mappings - keep the first one
+                log.debug("Duplicate keycode mapping for '{s}': keeping {}, ignoring {}", .{ key_string, existing_keycode, keycode });
+                alloc.free(key_string);
+            } else {
+                try self.keymap_table.put(alloc, key_string, keycode);
+            }
         }
     }
 

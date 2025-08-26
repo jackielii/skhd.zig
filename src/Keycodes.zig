@@ -202,7 +202,13 @@ pub fn init(alloc: std.mem.Allocator) !Keycodes {
             defer c.CFRelease(key_cfstring);
             const key_string = try copy_cfstring(alloc, key_cfstring);
             errdefer alloc.free(key_string);
-            if (try self.keymap_table.fetchPut(alloc, key_string, keycode)) |_| return error.DuplicateKeycodeMapping;
+            if (self.keymap_table.get(key_string)) |existing_keycode| {
+                // EurKEY and other layouts may have duplicate mappings - keep the first one
+                log.debug("Duplicate keycode mapping for '{s}': keeping {}, ignoring {}", .{ key_string, existing_keycode, keycode });
+                alloc.free(key_string);
+            } else {
+                try self.keymap_table.put(alloc, key_string, keycode);
+            }
         }
     }
 

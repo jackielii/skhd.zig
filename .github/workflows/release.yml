@@ -14,44 +14,39 @@ jobs:
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history to get tag messages
+    
     - name: Create Release
       id: create_release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        CUSTOM_NOTES: |
-          ## Installation
-          
-          ```bash
-          brew install jackielii/tap/skhd-zig
-          ```
-          
-          or upgrade:
-          
-          ```bash
-          brew upgrade jackielii/tap/skhd-zig
-          ```
-          
-          ## Documentation
-          
-          See [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for detailed changes.
       run: |
-        # Create a draft release with auto-generated notes
+        # Extract release notes from the git tag message
+        TAG_MESSAGE=$(git tag -l --format='%(contents)' ${{ github.ref_name }})
+        
+        # If tag message is empty, fall back to changelog entry
+        if [ -z "$TAG_MESSAGE" ]; then
+          echo "Warning: No tag message found, extracting from CHANGELOG.md"
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"  # Remove 'v' prefix
+          TAG_MESSAGE=$(awk "/## \[$VERSION\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
+        fi
+        
+        # Add installation instructions at the end
+        INSTALLATION_NOTES=$'## Installation\n\nInstall via Homebrew:\n```bash\nbrew install jackielii/tap/skhd-zig\n```\n\nor upgrade:\n```bash\nbrew upgrade jackielii/tap/skhd-zig\n```\n\n## Full Changelog\n\nSee [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for complete version history.'
+        
+        # Combine tag message with installation instructions
+        FULL_NOTES="$TAG_MESSAGE"$'\n\n'"$INSTALLATION_NOTES"
+        
+        # Create release with the extracted notes
         gh release create ${{ github.ref_name }} \
           --repo ${{ github.repository }} \
           --title "${{ github.ref_name }}" \
-          --generate-notes \
+          --notes "$FULL_NOTES" \
           --draft
-        
-        # Get the auto-generated notes
-        AUTO_NOTES=$(gh release view ${{ github.ref_name }} --repo ${{ github.repository }} --json body -q .body)
-        
-        # Combine auto-generated notes with custom notes
-        FULL_NOTES="$AUTO_NOTES"$'\n\n'"$CUSTOM_NOTES"
-        
-        # Update the release with combined notes but keep it as draft
-        gh release edit ${{ github.ref_name }} \
-          --repo ${{ github.repository }} \
-          --notes "$FULL_NOTES"
 
   build-release:
     needs: create-release

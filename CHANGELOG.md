@@ -7,18 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13] - 2025-08-27
+
 ### Added
+- **Support for backtick (`) special character** - Added backtick to the list of recognized special characters in the tokenizer
+  - Enables hotkey bindings with the backtick key
+  - Thanks to @danielfalbo for the contribution (#8)
+
+### Fixed
+- **Duplicate keycode from layout** - Fixed issue where keycodes could be duplicated when retrieved from keyboard layout
+- **ZBench vendor dependency** - Fixed vendor import for zbench benchmarking library
+
+### Changed
 - **Improved error messages** - Enhanced parser error reporting with contextual information
   - Added helpful error messages for invalid hex keycodes with examples
   - Improved duplicate command detection with specific context about conflicts
   - Added suggestions for common mistakes (e.g., "Did you forget to declare it with '::mode'?")
   - Better error reporting for file loading, blacklist, and shell configuration failures
-
-### Changed
 - **Duplicate command handling** - Allow identical duplicate commands in process groups
   - This enables more flexible configuration with overlapping process groups
   - Duplicate detection still prevents conflicting commands for the same process
-- Added error sets for type safety in Hotkey methods
+- **Build optimization** - Only build all targets on main branch to speed up development builds
+- **Code improvements** - Various internal refactoring and simplifications
+  - Simplified activation equality check
+  - Use Zig field syntax for cleaner code
+  - Added error sets for type safety in Hotkey methods
 
 ## [0.0.12] - 2025-07-15
 
@@ -246,7 +259,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.8...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.13...HEAD
+[0.0.13]: https://github.com/jackielii/skhd.zig/compare/v0.0.12...v0.0.13
+[0.0.12]: https://github.com/jackielii/skhd.zig/compare/v0.0.11...v0.0.12
+[0.0.11]: https://github.com/jackielii/skhd.zig/compare/v0.0.10...v0.0.11
+[0.0.10]: https://github.com/jackielii/skhd.zig/compare/v0.0.9...v0.0.10
+[0.0.9]: https://github.com/jackielii/skhd.zig/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/jackielii/skhd.zig/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/jackielii/skhd.zig/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/jackielii/skhd.zig/compare/v0.0.5...v0.0.6

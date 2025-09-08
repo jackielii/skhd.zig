@@ -515,11 +515,7 @@ inline fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
 /// Find a hotkey in the mode that matches the keyboard event
 /// Returns the hotkey pointer if found, null otherwise
 pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-    // Method 1: HashMap lookup with adapted context (O(1) average case)
     return self.findHotkeyHashMap(mode, eventkey);
-
-    // Method 2: Linear array search (O(n) but potentially faster for small sets)
-    // return self.findHotkeyLinear(mode, eventkey);
 }
 
 /// HashMap-based lookup using adapted context

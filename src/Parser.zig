@@ -17,6 +17,7 @@ const log = std.log.scoped(.parser);
 const LoadDirective = struct {
     filename: []const u8,
     token: Token,
+    device_constraint: ?DeviceConstraint = null,
 };
 
 allocator: std.mem.Allocator,
@@ -31,6 +32,7 @@ error_info: ?ParseError = null,
 process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
 command_defs: std.StringHashMapUnmanaged(CommandDef) = .empty,
 device_aliases: std.StringHashMapUnmanaged(DeviceAlias) = .empty,
+default_device_constraint: ?DeviceConstraint = null,
 verbose: bool = false,
 
 pub const DeviceAlias = union(enum) {
@@ -91,12 +93,18 @@ pub const CommandDef = struct {
 
 pub fn deinit(self: *Parser) void {
     self.keycodes.deinit();
-    for (self.load_directives.items) |directive| {
+    for (self.load_directives.items) |*directive| {
         self.allocator.free(directive.filename);
+        if (directive.device_constraint) |*device| {
+            device.deinit(self.allocator);
+        }
     }
     self.load_directives.deinit();
     if (self.error_info) |*error_info| {
         error_info.deinit();
+    }
+    if (self.default_device_constraint) |*device| {
+        device.deinit(self.allocator);
     }
 
     // Free process groups
@@ -405,6 +413,21 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         };
     } else if (self.match(.Token_BeginList)) {
         try self.parse_proc_list(mappings, hotkey);
+    }
+
+    // Apply default device constraint if hotkey doesn't have one
+    if (hotkey.device_constraint == null and self.default_device_constraint != null) {
+        // Clone the default device constraint
+        var cloned_constraint = DeviceConstraint{
+            .type = self.default_device_constraint.?.type,
+            .name = null,
+            .vendor_id = self.default_device_constraint.?.vendor_id,
+            .product_id = self.default_device_constraint.?.product_id,
+        };
+        if (self.default_device_constraint.?.name) |name| {
+            cloned_constraint.name = try self.allocator.dupe(u8, name);
+        }
+        try hotkey.set_device_constraint(cloned_constraint);
     }
 
     mappings.add_hotkey(hotkey) catch |err| {
@@ -1073,12 +1096,24 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             return error.ParseErrorOccurred;
         }
     } else if (std.mem.eql(u8, option, "load")) {
+        // Check for optional device constraint: .load <device "xxx"> "file.skhdrc"
+        var device_constraint: ?DeviceConstraint = null;
+        if (self.match(.Token_AngleOpen)) {
+            device_constraint = try self.parseDeviceConstraint();
+            if (!self.match(.Token_AngleClose)) {
+                const token = self.peek() orelse self.previous();
+                self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '>' to close device constraint", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+        }
+        
         if (self.match(.Token_String)) {
             const filename_token = self.previous();
             const filename = try self.processStringOwned(filename_token.text);
             try self.load_directives.append(LoadDirective{
                 .filename = filename,
                 .token = filename_token,
+                .device_constraint = device_constraint,
             });
         } else {
             const token = self.peek() orelse self.previous();
@@ -1303,6 +1338,21 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         // Create a new parser for the included file
         var included_parser = try Parser.init(self.allocator);
         defer included_parser.deinit();
+
+        // Set the device constraint from the load directive if present
+        if (directive.device_constraint) |device_constraint| {
+            // Clone the device constraint for the included parser
+            var cloned_constraint = DeviceConstraint{
+                .type = device_constraint.type,
+                .name = null,
+                .vendor_id = device_constraint.vendor_id,
+                .product_id = device_constraint.product_id,
+            };
+            if (device_constraint.name) |name| {
+                cloned_constraint.name = try self.allocator.dupe(u8, name);
+            }
+            included_parser.default_device_constraint = cloned_constraint;
+        }
 
         // Parse the included file
         try included_parser.parseWithPath(mappings, content, resolved_path);
@@ -2224,4 +2274,49 @@ test "device constraint with process list" {
 
     const wildcard_cmd = hotkey.find_command_for_process("unknown").?;
     try std.testing.expectEqualStrings("echo \"external elsewhere\"", wildcard_cmd.command);
+}
+
+test "load directive with device constraint" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test .load with device constraint
+    const content =
+        \\.load <device "HHKB-Hybrid"> "testdata/test_device_load.skhdrc"
+        \\cmd - c : echo "from main file"
+    ;
+    
+    try parser.parse(&mappings, content);
+    try parser.processLoadDirectives(&mappings);
+
+    // Verify that all hotkeys from the included file have the device constraint
+    const default_mode = mappings.mode_map.get("default").?;
+    try std.testing.expect(default_mode.hotkey_map.count() >= 3);
+
+    const ctx = Hotkey.KeyboardLookupContext{};
+    
+    // Check hotkey from loaded file has the device constraint
+    const keypress_a = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_A };
+    const hotkey_a = default_mode.hotkey_map.getKeyAdapted(keypress_a, ctx).?;
+    try std.testing.expect(hotkey_a.device_constraint != null);
+    const device_a = hotkey_a.device_constraint.?;
+    try std.testing.expect(device_a.type == .name);
+    try std.testing.expectEqualStrings("HHKB-Hybrid", device_a.name.?);
+
+    // Check another hotkey from loaded file also has the device constraint
+    const keypress_b = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_B };
+    const hotkey_b = default_mode.hotkey_map.getKeyAdapted(keypress_b, ctx).?;
+    try std.testing.expect(hotkey_b.device_constraint != null);
+    const device_b = hotkey_b.device_constraint.?;
+    try std.testing.expect(device_b.type == .name);
+    try std.testing.expectEqualStrings("HHKB-Hybrid", device_b.name.?);
+
+    // Check hotkey from main file has no device constraint
+    const keypress_c = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_C };
+    const hotkey_c = default_mode.hotkey_map.getKeyAdapted(keypress_c, ctx).?;
+    try std.testing.expect(hotkey_c.device_constraint == null);
 }

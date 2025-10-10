@@ -395,6 +395,7 @@ pub fn getKeyString(keyCode: u32) []const u8 {
         52 => "enter",
         53 => "escape",
 
+        64 => "f17",
         65 => ".",
 
         67 => "*",
@@ -407,7 +408,8 @@ pub fn getKeyString(keyCode: u32) []const u8 {
         76 => "enter",
 
         78 => "-",
-
+        79 => "f18",
+        80 => "f19",
         81 => "=",
         82 => "0",
         83 => "1",
@@ -417,7 +419,7 @@ pub fn getKeyString(keyCode: u32) []const u8 {
         87 => "5",
         88 => "6",
         89 => "7",
-
+        90 => "f20",
         91 => "8",
         92 => "9",
 
@@ -432,7 +434,7 @@ pub fn getKeyString(keyCode: u32) []const u8 {
         103 => "f11",
 
         105 => "f13",
-
+        106 => "f16",
         107 => "f14",
 
         109 => "f10",

@@ -181,8 +181,8 @@ jobs:
         sed -i "s/version \".*\"/version \"${{ steps.release.outputs.version }}\"/" Formula/skhd-zig.rb
         
         # Update URLs
-        sed -i "s|download/v[0-9.]\+/skhd-x86_64|download/v${{ steps.release.outputs.version }}/skhd-x86_64|" Formula/skhd-zig.rb
-        sed -i "s|download/v[0-9.]\+/skhd-arm64|download/v${{ steps.release.outputs.version }}/skhd-arm64|" Formula/skhd-zig.rb
+        sed -i "s|download/v[0-9.(-preview)]\+/skhd-x86_64|download/v${{ steps.release.outputs.version }}/skhd-x86_64|" Formula/skhd-zig.rb
+        sed -i "s|download/v[0-9.(-preview)]\+/skhd-arm64|download/v${{ steps.release.outputs.version }}/skhd-arm64|" Formula/skhd-zig.rb
         
         # Update SHA256
         sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${{ steps.release.outputs.x86_64_sha }}\"/" Formula/skhd-zig.rb

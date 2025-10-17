@@ -171,3 +171,13 @@ zig build && ./zig-out/bin/skhd -P
 # Debug memory allocations with real-time tracking
 zig build alloc -- -V
 ```
+
+
+### Code Signing (macOS 15+)
+
+Code signing is required for accessibility permissions to persist on macOS 15+. See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) for detailed setup instructions.
+
+```bash
+zig build sign  # Optional, skipped in CI
+```
+

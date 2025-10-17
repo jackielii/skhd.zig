@@ -79,6 +79,18 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // Code signing step
+    const sign_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/codesign.sh",
+    });
+    const installed_exe = b.getInstallPath(.bin, exe.name);
+    sign_cmd.addArg(installed_exe);
+    sign_cmd.step.dependOn(b.getInstallStep());
+
+    const sign_step = b.step("sign", "Code sign the binary (required for accessibility permissions on macOS 15+)");
+    sign_step.dependOn(&sign_cmd.step);
+
     const test_step = b.step("test", "Run unit tests");
 
     // Benchmark executable

@@ -67,14 +67,60 @@ jobs:
       with:
         version: 0.14.0
     
+    - name: Setup Code Signing Certificate
+      env:
+        CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE }}
+        CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      run: |
+        # Create variables
+        CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+        # Import certificate if available
+        if [ -n "$CERTIFICATE_P12" ]; then
+          echo "Certificate found, setting up code signing..."
+
+          # Decode base64 certificate
+          echo -n "$CERTIFICATE_P12" | base64 --decode -o $CERTIFICATE_PATH
+
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Allow codesign to access the certificate
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          echo "SHOULD_SIGN=true" >> $GITHUB_ENV
+        else
+          echo "No certificate found, skipping code signing (binaries will use adhoc signature)"
+          echo "SHOULD_SIGN=false" >> $GITHUB_ENV
+        fi
+
     - name: Build Release
       run: |
         zig build -Doptimize=ReleaseFast
         mv zig-out/bin/skhd skhd-${{ matrix.arch }}-macos
-    
+
+    - name: Code Sign Binary
+      if: env.SHOULD_SIGN == 'true'
+      run: |
+        codesign -f -s "skhd-cert" -i com.jackielii.skhd skhd-${{ matrix.arch }}-macos
+        codesign -dv skhd-${{ matrix.arch }}-macos
+
     - name: Create tarball
       run: |
         tar -czf skhd-${{ matrix.arch }}-macos.tar.gz skhd-${{ matrix.arch }}-macos
+
+    - name: Cleanup Keychain
+      if: always() && env.SHOULD_SIGN == 'true'
+      run: |
+        security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
     
     - name: Upload Release Asset
       env:

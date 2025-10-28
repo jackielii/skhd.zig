@@ -1876,3 +1876,60 @@ test "duplicate process group definition returns error" {
     // Verify the original is still there
     try std.testing.expect(parser.process_groups.contains("browsers"));
 }
+
+test "parse multiple modifiers - hyperkey style" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // Test ctrl + alt + cmd (hyperkey without shift)
+    const content =
+        \\ctrl + alt + cmd - a : echo "hyperkey without shift"
+        \\hyper - b : echo "standard hyper with shift"
+        \\ctrl + alt - c : echo "ctrl alt"
+        \\alt + cmd - d : echo "alt cmd"
+    ;
+
+    try parser.parse(&mappings, content);
+
+    // Verify the hotkeys were created with correct modifiers
+    const ctx = Hotkey.KeyboardLookupContext{};
+
+    // Check ctrl + alt + cmd - a
+    const keypress_a = Hotkey.KeyPress{
+        .flags = .{ .control = true, .alt = true, .cmd = true },
+        .key = c.kVK_ANSI_A
+    };
+    const hotkey_a = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress_a, ctx);
+    try std.testing.expect(hotkey_a != null);
+    try std.testing.expect(hotkey_a.?.flags.control);
+    try std.testing.expect(hotkey_a.?.flags.alt);
+    try std.testing.expect(hotkey_a.?.flags.cmd);
+    try std.testing.expect(!hotkey_a.?.flags.shift); // No shift
+
+    // Check hyper - b (should have shift)
+    const keypress_b = Hotkey.KeyPress{
+        .flags = .{ .control = true, .alt = true, .cmd = true, .shift = true },
+        .key = c.kVK_ANSI_B
+    };
+    const hotkey_b = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress_b, ctx);
+    try std.testing.expect(hotkey_b != null);
+    try std.testing.expect(hotkey_b.?.flags.control);
+    try std.testing.expect(hotkey_b.?.flags.alt);
+    try std.testing.expect(hotkey_b.?.flags.cmd);
+    try std.testing.expect(hotkey_b.?.flags.shift); // Has shift
+
+    // Check ctrl + alt - c
+    const keypress_c = Hotkey.KeyPress{
+        .flags = .{ .control = true, .alt = true },
+        .key = c.kVK_ANSI_C
+    };
+    const hotkey_c = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress_c, ctx);
+    try std.testing.expect(hotkey_c != null);
+    try std.testing.expect(hotkey_c.?.flags.control);
+    try std.testing.expect(hotkey_c.?.flags.alt);
+    try std.testing.expect(!hotkey_c.?.flags.cmd);
+}

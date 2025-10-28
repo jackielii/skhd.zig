@@ -1,0 +1,12 @@
+# Test hyperkey support (ctrl + alt + cmd without shift)
+
+# Standard hyper (ctrl + alt + shift + cmd)
+hyper - a : echo "hyper with shift"
+
+# Hyperkey.app style (ctrl + alt + cmd without shift)
+ctrl + alt + cmd - b : echo "hyper without shift"
+
+# Also test individual combinations
+ctrl + alt - c : echo "ctrl alt"
+alt + cmd - d : echo "alt cmd"
+ctrl + cmd - e : echo "ctrl cmd"

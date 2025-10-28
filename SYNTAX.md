@@ -122,6 +122,24 @@ command   = command is executed through '$SHELL -c'
 - `hyper` - cmd + shift + alt + ctrl
 - `meh` - shift + alt + ctrl
 
+### Custom Modifier Combinations
+
+You can chain multiple modifiers using `+`:
+
+```bash
+# Two modifiers
+ctrl + alt - a : echo "Ctrl + Alt"
+alt + cmd - b : echo "Alt + Cmd"
+
+# Three modifiers (useful for hyperkey setups without shift)
+ctrl + alt + cmd - c : echo "Hyperkey without shift"
+
+# Four modifiers
+ctrl + alt + shift + cmd - d : echo "Same as hyper"
+```
+
+**Hyperkey Support**: Many users remap Caps Lock to a hyperkey combination. skhd.zig supports both the standard `hyper` (with shift) and custom combinations like `ctrl + alt + cmd` (without shift, commonly used by Hyperkey.app). See [docs/HYPERKEY_SUPPORT.md](docs/HYPERKEY_SUPPORT.md) for detailed setup instructions.
+
 ## Key Literals
 
 ### Navigation Keys

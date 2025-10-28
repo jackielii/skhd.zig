@@ -231,6 +231,11 @@ lshift, rshift # Left/right Shift
 # Special modifier combinations
 hyper   # cmd + shift + alt + ctrl
 meh     # shift + alt + ctrl
+
+# Custom combinations (useful for hyperkey setups)
+ctrl + alt + cmd - a    # Three modifiers without shift
+ctrl + alt + shift - b  # Three modifiers without cmd
+# See docs/HYPERKEY_SUPPORT.md for more details on hyperkey usage
 ```
 
 ### Special Keys

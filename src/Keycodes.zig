@@ -199,8 +199,12 @@ pub fn init(alloc: std.mem.Allocator) !Keycodes {
         );
         if (ret == c.noErr and len > 0) {
             const key_cfstring = c.CFStringCreateWithCharacters(c.kCFAllocatorDefault, &chars, @intCast(len));
+            if (key_cfstring == null) {
+                log.err("Failed to create CFString for keycode {}", .{keycode});
+                continue;
+            }
             defer c.CFRelease(key_cfstring);
-            const key_string = try copy_cfstring(alloc, key_cfstring);
+            const key_string = try copy_cfstring(alloc, key_cfstring.?);
             errdefer alloc.free(key_string);
             if (self.keymap_table.get(key_string)) |existing_keycode| {
                 // EurKEY and other layouts may have duplicate mappings - keep the first one

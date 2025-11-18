@@ -99,6 +99,7 @@ The service will:
 
 ### Additional Features (New in skhd.zig!)
 
+- **Key aliases**: Define reusable aliases for modifiers, keys, and key combinations
 - **Process groups**: Define named groups of applications for cleaner configs
 - **Command definitions**: Define reusable commands with placeholders to reduce repetition
 - **Key Forwarding**: Forward / remap key binding to another key binding
@@ -183,6 +184,12 @@ The configuration syntax is fully compatible with the original skhd. See [SYNTAX
 
 # Load additional config files
 .load "~/.config/skhd/extra.skhdrc"
+
+# Define key aliases for reusable modifier/key combinations (New in skhd.zig!)
+.alias $super cmd + alt
+.alias $mega cmd + alt + shift + ctrl
+.alias $grave 0x32                      # UK keyboard backtick
+.alias $nav_left $super - h
 
 # Define process groups for reuse (New in skhd.zig!)
 .define terminal_apps ["kitty", "wezterm", "terminal"]
@@ -369,23 +376,31 @@ resize < escape ; winmode
 ### Window Management Example
 
 ```bash
-# Focus windows using command definitions (New in skhd.zig!)
-cmd - h : @yabai_focus("west")
-cmd - j : @yabai_focus("south")
-cmd - k : @yabai_focus("north")
-cmd - l : @yabai_focus("east")
+# Define aliases for cleaner config (New in skhd.zig!)
+.alias $super cmd + alt
+.alias $mega $super + shift
 
-# Move/swap windows using command definitions
-cmd + shift - h : @yabai_swap("west")
-cmd + shift - j : @yabai_swap("south")
-cmd + shift - k : @yabai_swap("north")
-cmd + shift - l : @yabai_swap("east")
+# Focus windows using command definitions and aliases
+$super - h : @yabai_focus("west")
+$super - j : @yabai_focus("south")
+$super - k : @yabai_focus("north")
+$super - l : @yabai_focus("east")
 
-# Resize windows using command definitions
-cmd + ctrl - h : @resize_window("left", "-20", "0")
-cmd + ctrl - l : @resize_window("right", "20", "0")
+# Move/swap windows using nested alias
+$mega - h : @yabai_swap("west")
+$mega - j : @yabai_swap("south")
+$mega - k : @yabai_swap("north")
+$mega - l : @yabai_swap("east")
 
-# Switch spaces
+# Define keysym aliases for common operations
+.alias $focus_west $super - h
+.alias $focus_east $super - l
+
+# Use keysym alias standalone or with additional modifiers
+$focus_west : @yabai_focus("west")
+ctrl + $focus_west : @yabai_focus("west")  # With extra modifier
+
+# Traditional syntax still works
 cmd - 1 : yabai -m space --focus 1
 cmd - 2 : yabai -m space --focus 2
 ```

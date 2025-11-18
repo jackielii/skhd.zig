@@ -36,6 +36,7 @@ pub const TokenType = enum {
     Token_String,
     Token_Option,
     Token_Reference,
+    Token_Alias,
 
     Token_BeginList,
     Token_EndList,
@@ -109,6 +110,19 @@ pub fn get_token(self: *Tokenizer) ?Token {
             } else {
                 // It's just @ (used for capture in mode declarations)
                 token.type = .Token_Capture;
+            }
+        },
+        '$' => {
+            // Check if this is followed by an identifier
+            const next = self.peekRune();
+            if (next != null and ascii.isAlphabetic(next.?[0])) {
+                // It's an alias like $hyper or $grave
+                token.type = .Token_Alias;
+                // Don't include the $ in the token text
+                token.text = self.acceptIdentifier();
+            } else {
+                // Standalone $ is unknown/error
+                token.type = .Token_Unknown;
             }
         },
         '~' => token.type = .Token_Unbound,

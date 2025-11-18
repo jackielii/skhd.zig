@@ -30,6 +30,7 @@ current_file_path: ?[]const u8 = null,
 error_info: ?ParseError = null,
 process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
 command_defs: std.StringHashMapUnmanaged(CommandDef) = .empty,
+key_aliases: std.StringHashMapUnmanaged(Alias) = .empty,
 
 pub const CommandDef = struct {
     pub const Part = union(enum) {
@@ -51,6 +52,17 @@ pub const CommandDef = struct {
         for (self.parts) |part| part.deinit(allocator);
         allocator.free(self.parts);
         self.* = undefined;
+    }
+};
+
+pub const Alias = union(enum) {
+    modifier: ModifierFlag,  // .alias $hyper cmd + alt + ctrl
+    key: Hotkey.KeyPress,    // .alias $grave 0x32 or .alias $exclaim shift - 1
+    keysym: Hotkey.KeyPress, // .alias $nav_left cmd - h
+
+    pub fn deinit(self: Alias) void {
+        // No dynamic allocation in these types
+        _ = self;
     }
 };
 
@@ -85,6 +97,16 @@ pub fn deinit(self: *Parser) void {
             kv.value_ptr.*.deinit(self.allocator);
         }
         self.command_defs.deinit(self.allocator);
+    }
+
+    // Free key aliases
+    {
+        var it = self.key_aliases.iterator();
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            kv.value_ptr.*.deinit();
+        }
+        self.key_aliases.deinit(self.allocator);
     }
 
     self.* = undefined;
@@ -400,21 +422,34 @@ fn parse_modifier(self: *Parser) !ModifierFlag {
     const token = self.previous();
     var flags = ModifierFlag{};
 
-    if (ModifierFlag.get(token.text)) |modifier_flags_value| {
+    if (token.type == .Token_Alias) {
+        // Resolve alias
+        var visited = std.ArrayList([]const u8).init(self.allocator);
+        defer visited.deinit();
+        flags = try self.resolve_modifier_alias_internal(token.text, &visited);
+    } else if (ModifierFlag.get(token.text)) |modifier_flags_value| {
         flags = flags.merge(modifier_flags_value);
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown modifier '{s}'", .{token.text});
+        // Check if this looks like it should be an alias (helpful error message)
+        if (self.key_aliases.contains(token.text)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Did you mean '${s}'? Alias references must start with '$'", .{token.text});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown modifier '{s}'. Valid modifiers: cmd, ctrl, alt, shift, fn, hyper, meh, or use an alias with '$' prefix", .{token.text});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
         return error.ParseErrorOccurred;
     }
 
     if (self.match(.Token_Plus)) {
-        if (self.match(.Token_Modifier)) {
+        if (self.match(.Token_Modifier) or self.match(.Token_Alias)) {
             flags = flags.merge(try self.parse_modifier());
         } else {
             const error_token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, error_token, "Expected modifier after '+'", self.current_file_path);
+            self.error_info = try ParseError.fromToken(self.allocator, error_token, "Expected modifier or alias after '+'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
     }
@@ -484,7 +519,56 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
     var flags: ModifierFlag = .{};
     var keycode: u32 = 0;
     var found_modifier = false;
-    if (self.match(.Token_Modifier)) {
+
+    // Check for standalone keysym alias or keysym alias with additional modifiers
+    if (self.peek_check(.Token_Alias)) {
+        // Look ahead to see if it's followed by + or : (standalone) vs - (used as modifier)
+        const saved_pos = self.tokenizer.pos;
+        const saved_line = self.tokenizer.line;
+        const saved_cursor = self.tokenizer.cursor;
+
+        _ = self.match(.Token_Alias);
+        const alias_token = self.previous();
+
+        // Check what comes after the alias
+        const next_is_plus = self.peek_check(.Token_Plus);
+        const next_is_dash = self.peek_check(.Token_Dash);
+        const next_is_command = self.peek_check(.Token_Command);
+        const next_is_forward = self.peek_check(.Token_Forward);
+        const next_is_begin_list = self.peek_check(.Token_BeginList);
+
+        // If followed by : or | or [ or end, it's a standalone keysym alias
+        if (next_is_command or next_is_forward or next_is_begin_list or self.peek() == null) {
+            // Standalone keysym alias: $terminal_key : command
+            var visited = std.ArrayList([]const u8).init(self.allocator);
+            defer visited.deinit();
+            return try self.resolve_keysym_alias_internal(alias_token.text, &visited);
+        } else if (next_is_plus) {
+            // Keysym alias with additional modifiers: ctrl + $terminal_key
+            var visited = std.ArrayList([]const u8).init(self.allocator);
+            defer visited.deinit();
+            const keypress = try self.resolve_keysym_alias_internal(alias_token.text, &visited);
+            // The additional modifiers have already been parsed, just return the keysym
+            return keypress;
+        } else if (next_is_dash) {
+            // This is $alias - something, which means the alias is being used as a modifier
+            // Rewind and let the normal flow handle it
+            self.tokenizer.pos = saved_pos;
+            self.tokenizer.line = saved_line;
+            self.tokenizer.cursor = saved_cursor;
+            self.next_token = null;
+            _ = self.advance(); // Re-read the current token
+        } else {
+            // Unknown context, rewind and continue
+            self.tokenizer.pos = saved_pos;
+            self.tokenizer.line = saved_line;
+            self.tokenizer.cursor = saved_cursor;
+            self.next_token = null;
+            _ = self.advance();
+        }
+    }
+
+    if (self.match(.Token_Modifier) or self.match(.Token_Alias)) {
         flags = try self.parse_modifier();
         found_modifier = true;
     }
@@ -492,11 +576,15 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
     if (found_modifier and !self.match(.Token_Dash)) {
         const token = self.peek() orelse self.previous();
         self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '-' after modifier", self.current_file_path);
-        // Error already set in self.error_info
         return error.ParseErrorOccurred;
     }
 
-    if (self.match(.Token_Key)) {
+    if (self.match(.Token_Alias)) {
+        // Key alias in key position: ctrl - $grave
+        var visited = std.ArrayList([]const u8).init(self.allocator);
+        defer visited.deinit();
+        keycode = try self.resolve_key_alias_internal(self.previous().text, &visited);
+    } else if (self.match(.Token_Key)) {
         keycode = try self.parse_key();
     } else if (self.match(.Token_Key_Hex)) {
         keycode = try self.parse_key_hex();
@@ -506,7 +594,7 @@ fn parse_keypress(self: *Parser) !Hotkey.KeyPress {
         keycode = keypress.key;
     } else {
         const token = self.peek() orelse self.previous();
-        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected key, key hex, or literal", self.current_file_path);
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected key, key hex, literal, or alias", self.current_file_path);
         return error.ParseErrorOccurred;
     }
 
@@ -930,12 +1018,351 @@ fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !Comm
         .max_placeholder = max_placeholder,
     };
 }
+fn parse_alias_value(self: *Parser) !Alias {
+    // Parse alias value and determine its type
+    // Can be: modifier, key, or keysym
 
+    if (self.match(.Token_Modifier) or self.match(.Token_Alias)) {
+        const start_token = self.previous();
+
+        // Parse modifiers (could be nested alias or regular modifier)
+        var flags: ModifierFlag = .{};
+        if (start_token.type == .Token_Alias) {
+            // Nested alias - resolve it recursively
+            var visited = std.ArrayList([]const u8).init(self.allocator);
+            defer visited.deinit();
+            flags = try self.resolve_modifier_alias_internal(start_token.text, &visited);
+        } else {
+            // Regular modifier - parse it
+            self.previous_token = start_token;
+            flags = try self.parse_modifier_no_alias();
+        }
+
+        // Check if there's a dash (making it a keysym)
+        if (self.peek_check(.Token_Dash)) {
+            _ = self.match(.Token_Dash);
+
+            // Must have a key after the dash
+            if (!self.peek_check(.Token_Key) and
+                !self.peek_check(.Token_Key_Hex) and
+                !self.peek_check(.Token_Literal) and
+                !self.peek_check(.Token_Alias)) {
+                const token = self.peek() orelse self.previous();
+                self.error_info = try ParseError.fromToken(
+                    self.allocator,
+                    token,
+                    "Expected key after '-' in alias definition",
+                    self.current_file_path
+                );
+                return error.ParseErrorOccurred;
+            }
+
+            // Parse the key part
+            var keycode: u32 = 0;
+            var key_flags: ModifierFlag = .{};
+
+            if (self.match(.Token_Alias)) {
+                // Nested alias for key part
+                var visited = std.ArrayList([]const u8).init(self.allocator);
+                defer visited.deinit();
+                keycode = try self.resolve_key_alias_internal(self.previous().text, &visited);
+            } else if (self.match(.Token_Key)) {
+                keycode = try self.parse_key();
+            } else if (self.match(.Token_Key_Hex)) {
+                keycode = try self.parse_key_hex();
+            } else if (self.match(.Token_Literal)) {
+                const keypress = try self.parse_key_literal();
+                key_flags = keypress.flags;
+                keycode = keypress.key;
+            }
+
+            // Merge flags from literal keys (e.g., 'delete' has fn flag)
+            flags = flags.merge(key_flags);
+
+            return Alias{ .keysym = .{ .flags = flags, .key = keycode } };
+        } else {
+            // Just a modifier alias
+            return Alias{ .modifier = flags };
+        }
+    } else if (self.match(.Token_Key) or
+               self.match(.Token_Literal) or
+               self.match(.Token_Alias)) {
+        // Key alias (could have modifiers baked in)
+        const token = self.previous();
+
+        // Handle nested alias
+        if (token.type == .Token_Alias) {
+            var visited = std.ArrayList([]const u8).init(self.allocator);
+            defer visited.deinit();
+            const alias = try self.resolve_alias_internal(token.text, &visited);
+
+            // Return whatever type the nested alias is
+            return alias;
+        }
+
+        // Parse as regular key
+        self.previous_token = token;
+        const keypress = try self.parse_keypress_no_alias();
+
+        // If it has modifiers, it's a keysym (key combo), otherwise just a key
+        const has_modifiers = @as(u32, @bitCast(keypress.flags)) != 0;
+        if (has_modifiers) {
+            return Alias{ .keysym = keypress };
+        } else {
+            return Alias{ .key = keypress };
+        }
+    } else if (self.match(.Token_Key_Hex)) {
+        // Hex keycode
+        const keycode = try self.parse_key_hex();
+        return Alias{ .key = .{ .flags = .{}, .key = keycode } };
+    } else {
+        const token = self.peek() orelse self.previous();
+        const msg = try std.fmt.allocPrint(
+            self.allocator,
+            "Invalid alias definition. Expected one of:\n" ++
+            "  Modifier:  .alias $name cmd + alt + ctrl\n" ++
+            "  Keysym:    .alias $name cmd + shift - t\n" ++
+            "  Key combo: .alias $name shift - 1\n" ++
+            "  Key hex:   .alias $name 0x32",
+            .{}
+        );
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            token,
+            msg,
+            self.current_file_path
+        );
+        return error.ParseErrorOccurred;
+    }
+}
+
+// Internal resolution with circular detection
+fn resolve_alias_internal(self: *Parser, alias_name: []const u8, visited: *std.ArrayList([]const u8)) !Alias {
+    // Check for circular reference
+    for (visited.items) |name| {
+        if (std.mem.eql(u8, name, alias_name)) {
+            const msg = try std.fmt.allocPrint(
+                self.allocator,
+                "Circular alias reference detected: ${s}",
+                .{alias_name}
+            );
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(
+                self.allocator,
+                self.previous(),
+                msg,
+                self.current_file_path
+            );
+            return error.CircularAliasReference;
+        }
+    }
+
+    // Check depth limit (safety against complex circular refs)
+    if (visited.items.len >= 10) {
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            self.previous(),
+            "Alias nesting too deep (max 10 levels)",
+            self.current_file_path
+        );
+        return error.AliasTooDeep;
+    }
+
+    // Add to visited list
+    try visited.append(alias_name);
+
+    // Look up the alias
+    const alias = self.key_aliases.get(alias_name) orelse {
+        const msg = try std.fmt.allocPrint(
+            self.allocator,
+            "Undefined alias '${s}'. Did you forget to define it with '.alias ${s} <value>'?",
+            .{alias_name, alias_name}
+        );
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            self.previous(),
+            msg,
+            self.current_file_path
+        );
+        return error.UndefinedAlias;
+    };
+
+    return alias;
+}
+
+fn resolve_modifier_alias_internal(self: *Parser, alias_name: []const u8, visited: *std.ArrayList([]const u8)) !ModifierFlag {
+    const alias = try self.resolve_alias_internal(alias_name, visited);
+
+    return switch (alias) {
+        .modifier => |flags| flags,
+        .keysym => |keypress| keypress.flags,  // Can extract modifiers from keysym
+        .key => |keypress| keypress.flags,     // Can extract modifiers from key combo
+    };
+}
+
+fn resolve_key_alias_internal(self: *Parser, alias_name: []const u8, visited: *std.ArrayList([]const u8)) !u32 {
+    const alias = try self.resolve_alias_internal(alias_name, visited);
+
+    return switch (alias) {
+        .key => |keypress| keypress.key,
+        .keysym => |keypress| keypress.key,
+        .modifier => {
+            const msg = try std.fmt.allocPrint(
+                self.allocator,
+                "Alias '${s}' is a modifier, not a key.\n" ++
+                "  It can only be used as: ${s} - <key>\n" ++
+                "  To bind this modifier, add a key: ${s} - t : <command>",
+                .{alias_name, alias_name, alias_name}
+            );
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(
+                self.allocator,
+                self.previous(),
+                msg,
+                self.current_file_path
+            );
+            return error.AliasTypeMismatch;
+        },
+    };
+}
+
+fn resolve_keysym_alias_internal(self: *Parser, alias_name: []const u8, visited: *std.ArrayList([]const u8)) !Hotkey.KeyPress {
+    const alias = try self.resolve_alias_internal(alias_name, visited);
+
+    return switch (alias) {
+        .keysym => |keypress| keypress,
+        .key => |keypress| keypress,  // Key can be used as keysym (just no modifiers in the alias itself)
+        .modifier => {
+            const msg = try std.fmt.allocPrint(
+                self.allocator,
+                "Alias '${s}' is a modifier, not a complete keysym.\n" ++
+                "  It cannot be used standalone: ${s} : <command>\n" ++
+                "  Add a key: ${s} - t : <command>",
+                .{alias_name, alias_name, alias_name}
+            );
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(
+                self.allocator,
+                self.previous(),
+                msg,
+                self.current_file_path
+            );
+            return error.AliasTypeMismatch;
+        },
+    };
+}
+
+// Versions of parse functions that don't handle aliases (to avoid infinite recursion during definition parsing)
+fn parse_modifier_no_alias(self: *Parser) !ModifierFlag {
+    const token = self.previous();
+    var flags = ModifierFlag{};
+
+    if (ModifierFlag.get(token.text)) |modifier_flags_value| {
+        flags = flags.merge(modifier_flags_value);
+    } else {
+        const msg = try std.fmt.allocPrint(
+            self.allocator,
+            "Unknown modifier '{s}'",
+            .{token.text}
+        );
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            token,
+            msg,
+            self.current_file_path
+        );
+        return error.ParseErrorOccurred;
+    }
+
+    if (self.match(.Token_Plus)) {
+        if (self.match(.Token_Modifier)) {
+            flags = flags.merge(try self.parse_modifier_no_alias());
+        } else {
+            const error_token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(
+                self.allocator,
+                error_token,
+                "Expected modifier after '+'",
+                self.current_file_path
+            );
+            return error.ParseErrorOccurred;
+        }
+    }
+    return flags;
+}
+
+fn parse_keypress_no_alias(self: *Parser) !Hotkey.KeyPress {
+    var flags: ModifierFlag = .{};
+    var keycode: u32 = 0;
+    var found_modifier = false;
+
+    if (self.match(.Token_Modifier)) {
+        flags = try self.parse_modifier_no_alias();
+        found_modifier = true;
+    }
+
+    if (found_modifier and !self.match(.Token_Dash)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            token,
+            "Expected '-' after modifier",
+            self.current_file_path
+        );
+        return error.ParseErrorOccurred;
+    }
+
+    if (self.match(.Token_Key)) {
+        keycode = try self.parse_key();
+    } else if (self.match(.Token_Key_Hex)) {
+        keycode = try self.parse_key_hex();
+    } else if (self.match(.Token_Literal)) {
+        const keypress = try self.parse_key_literal();
+        flags = flags.merge(keypress.flags);
+        keycode = keypress.key;
+    } else {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            token,
+            "Expected key, key hex, or literal",
+            self.current_file_path
+        );
+        return error.ParseErrorOccurred;
+    }
+
+    return Hotkey.KeyPress{ .flags = flags, .key = keycode };
+}
 fn parse_option(self: *Parser, mappings: *Mappings) !void {
     assert(self.match(.Token_Option));
     const option = self.previous().text;
 
-    if (std.mem.eql(u8, option, "define")) {
+    if (std.mem.eql(u8, option, "alias")) {
+        // Parse alias definition: .alias $name <value>
+        if (!self.match(.Token_Alias)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected alias name with '$' prefix after 'alias'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        const alias_name = self.previous().text;
+
+        // Check for redefinition
+        if (self.key_aliases.contains(alias_name)) {
+            self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Alias already defined", self.current_file_path);
+            return error.AliasAlreadyDefined;
+        }
+
+        // Parse the alias value
+        const alias_value = try self.parse_alias_value();
+        errdefer alias_value.deinit();
+
+        const owned_name = try self.allocator.dupe(u8, alias_name);
+        try self.key_aliases.put(self.allocator, owned_name, alias_value);
+    } else if (std.mem.eql(u8, option, "define")) {
         // Parse name after define
         if (!self.match(.Token_Identifier)) {
             const token = self.peek() orelse self.previous();
@@ -1049,7 +1476,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             return error.ParseErrorOccurred;
         }
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell", .{option});
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: alias, define, load, blacklist, shell", .{option});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
         return error.ParseErrorOccurred;
@@ -1875,4 +2302,257 @@ test "duplicate process group definition returns error" {
 
     // Verify the original is still there
     try std.testing.expect(parser.process_groups.contains("browsers"));
+}
+// Tests to be added to the end of Parser.zig
+
+test "parse alias - modifier alias" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $hyper cmd + alt + ctrl + shift
+        \\$hyper - t : echo "test"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
+}
+
+test "parse alias - key hex alias" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $grave 0x32
+        \\ctrl - $grave : echo "test"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
+}
+
+test "parse alias - key combo alias" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $exclaim shift - 1
+        \\ctrl - $exclaim : echo "test"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
+}
+
+test "parse alias - keysym alias standalone" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $terminal_key cmd + shift - t
+        \\$terminal_key : echo "test"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
+}
+
+test "parse alias - keysym alias with additional modifiers" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $nav_left cmd - h
+        \\ctrl + $nav_left : echo "test"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
+}
+
+test "parse alias - nested modifier alias" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $super cmd + alt
+        \\.alias $mega $super + shift + ctrl
+        \\$mega - x : echo "test"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
+}
+
+test "parse alias - nested keysym alias" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $super cmd + alt
+        \\.alias $nav_left $super - h
+        \\$nav_left : echo "test"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
+}
+
+test "parse alias - undefined error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try std.testing.expectError(
+        error.UndefinedAlias,
+        parser.parse(&mappings, "$undefined - x : echo test")
+    );
+
+    try std.testing.expect(parser.error_info != null);
+    const err_msg = parser.error_info.?.message;
+    try std.testing.expect(std.mem.indexOf(u8, err_msg, "Undefined alias") != null);
+}
+
+test "parse alias - redefinition error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try std.testing.expectError(
+        error.AliasAlreadyDefined,
+        parser.parse(&mappings,
+            \\.alias $hyper cmd + alt
+            \\.alias $hyper cmd + shift
+        )
+    );
+}
+
+test "parse alias - circular reference error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    // This should fail during the definition of $b since it tries to resolve $a
+    // which hasn't been fully defined yet
+    try std.testing.expectError(
+        error.UndefinedAlias,  // $a is not defined when we try to define $b
+        parser.parse(&mappings,
+            \\.alias $b $a + shift
+            \\.alias $a $b + ctrl
+        )
+    );
+}
+
+test "parse alias - missing $ prefix suggestion" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings, ".alias $hyper cmd + alt");
+
+    // Now try to use it without $
+    const result = parser.parse(&mappings, "hyper - t : echo test");
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+
+    try std.testing.expect(parser.error_info != null);
+    const err_msg = parser.error_info.?.message;
+    try std.testing.expect(std.mem.indexOf(u8, err_msg, "Did you mean '$hyper'") != null);
+}
+
+test "parse alias - type mismatch modifier as key" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings, ".alias $hyper cmd + alt");
+
+    // Try to use modifier alias in key position
+    const result = parser.parse(&mappings, "ctrl - $hyper : echo test");
+    try std.testing.expectError(error.AliasTypeMismatch, result);
+
+    try std.testing.expect(parser.error_info != null);
+    const err_msg = parser.error_info.?.message;
+    try std.testing.expect(std.mem.indexOf(u8, err_msg, "modifier, not a key") != null);
+}
+
+test "parse alias - type mismatch modifier standalone" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings, ".alias $hyper cmd + alt");
+
+    // Try to use modifier alias standalone (needs a key)
+    const result = parser.parse(&mappings, "$hyper : echo test");
+    try std.testing.expectError(error.AliasTypeMismatch, result);
+
+    try std.testing.expect(parser.error_info != null);
+    const err_msg = parser.error_info.?.message;
+    try std.testing.expect(std.mem.indexOf(u8, err_msg, "not a complete keysym") != null);
+}
+
+test "parse alias - complex nested example" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $super cmd + alt
+        \\.alias $mega $super + shift + ctrl
+        \\.alias $grave 0x32
+        \\.alias $tilde shift - $grave
+        \\.alias $nav_left $mega - h
+        \\
+        \\$mega - t : echo "mega t"
+        \\ctrl - $tilde : echo "ctrl tilde"
+        \\$nav_left : echo "nav left"
+        \\ctrl + $nav_left : echo "ctrl nav left"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 4);
+}
+
+test "parse alias - with literal keys" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.alias $super cmd + alt
+        \\.alias $del_key delete
+        \\
+        \\$super - $del_key : echo "super delete"
+    );
+
+    try std.testing.expect(mappings.default_map.count() == 1);
 }

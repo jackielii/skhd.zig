@@ -204,7 +204,10 @@ pub fn init(alloc: std.mem.Allocator) !Keycodes {
                 continue;
             }
             defer c.CFRelease(key_cfstring);
-            const key_string = try copy_cfstring(alloc, key_cfstring.?);
+            const key_string = copy_cfstring(alloc, key_cfstring.?) catch |err| {
+                log.err("Failed to copy CFString for keycode {}: {}", .{ keycode, err });
+                continue;
+            };
             errdefer alloc.free(key_string);
             if (self.keymap_table.get(key_string)) |existing_keycode| {
                 // EurKEY and other layouts may have duplicate mappings - keep the first one
@@ -233,17 +236,19 @@ pub fn get_keycode(self: *Keycodes, key: []const u8) !u32 {
 }
 
 fn copy_cfstring(alloc: std.mem.Allocator, cfstring: c.CFStringRef) ![]u8 {
-    // const n = c.CFStringGetLength(cfstring);
-    const num_bytes = c.CFStringGetMaximumSizeForEncoding(c.CFStringGetLength(cfstring), c.kCFStringEncodingUTF8);
+    const len = c.CFStringGetLength(cfstring);
+    const num_bytes = c.CFStringGetMaximumSizeForEncoding(len, c.kCFStringEncodingUTF8);
+
     if (num_bytes > 64) {
+        log.err("CFString requires {} bytes (> 64)", .{num_bytes});
         @panic("num_bytes for cfstring > 64");
     }
-    // std.debug.print("n: {}, max_num_bytes: {}\n", .{ n, num_bytes });
-    var buffer: [64]u8 = undefined;
-    // const buffer = try alloc.alloc(u8, @intCast(num_bytes));
-    // defer alloc.free(buffer);
 
-    if (c.CFStringGetCString(cfstring, &buffer, num_bytes, c.kCFStringEncodingUTF8) == c.false) {
+    var buffer: [64]u8 = undefined;
+
+    // Pass the actual buffer size (buffer.len), not num_bytes
+    // CFStringGetCString needs the full buffer size to work correctly
+    if (c.CFStringGetCString(cfstring, &buffer, buffer.len, c.kCFStringEncodingUTF8) == c.false) {
         return error.@"Failed to copy CFString";
     }
 
@@ -268,10 +273,60 @@ test "init_keycode_map" {
 
 test "duplicate keycode mapping returns error" {
     const alloc = std.testing.allocator;
-    
+
     var self = try init(alloc);
     defer self.deinit();
     try std.testing.expect(self.keymap_table.count() > 0);
+}
+
+test "copy_cfstring with Unicode characters" {
+    // Regression test for issue #19
+    // The ergol keyboard layout (https://ergol.org/) uses Unicode characters
+    // like U+2019 (right single quotation mark) for some keys. The bug was that
+    // we passed num_bytes instead of buffer.len to CFStringGetCString, causing
+    // the conversion to fail.
+    const alloc = std.testing.allocator;
+
+    // Test with a simple ASCII character
+    {
+        const chars = [_]c.UniChar{'a'};
+        const cfstring = c.CFStringCreateWithCharacters(c.kCFAllocatorDefault, &chars, 1);
+        try std.testing.expect(cfstring != null);
+        defer c.CFRelease(cfstring);
+
+        const result = try copy_cfstring(alloc, cfstring.?);
+        defer alloc.free(result);
+        try std.testing.expectEqualStrings("a", result);
+    }
+
+    // Test with Unicode character U+2019 (right single quotation mark)
+    // This is the character that caused the crash with ergol keyboard layout
+    {
+        const chars = [_]c.UniChar{0x2019};
+        const cfstring = c.CFStringCreateWithCharacters(c.kCFAllocatorDefault, &chars, 1);
+        try std.testing.expect(cfstring != null);
+        defer c.CFRelease(cfstring);
+
+        const result = try copy_cfstring(alloc, cfstring.?);
+        defer alloc.free(result);
+        // U+2019 in UTF-8 is 0xE2 0x80 0x99 which is the right single quotation mark
+        try std.testing.expect(result.len == 3); // UTF-8 encoding is 3 bytes
+        const expected = [_]u8{ 0xE2, 0x80, 0x99 }; // UTF-8 encoding of U+2019
+        try std.testing.expectEqualSlices(u8, &expected, result);
+    }
+
+    // Test with multi-character string including Unicode
+    {
+        const chars = [_]c.UniChar{ 'a', 0x2019, 'b' };
+        const cfstring = c.CFStringCreateWithCharacters(c.kCFAllocatorDefault, &chars, 3);
+        try std.testing.expect(cfstring != null);
+        defer c.CFRelease(cfstring);
+
+        const result = try copy_cfstring(alloc, cfstring.?);
+        defer alloc.free(result);
+        const expected = [_]u8{ 'a', 0xE2, 0x80, 0x99, 'b' };
+        try std.testing.expectEqualSlices(u8, &expected, result);
+    }
 }
 
 /// Format modifier flags and key into a human-readable string using a stack buffer

@@ -512,7 +512,7 @@ test "Parser error messages" {
     try testing.expectError(error.ParseErrorOccurred, err4);
     try testing.expect(parser.error_info != null);
     const parse_err4 = parser.error_info.?;
-    try testing.expectEqualStrings("Expected key, key hex, or literal", parse_err4.message);
+    try testing.expectEqualStrings("Expected key, key hex, literal, or alias", parse_err4.message);
 
     // Test empty process list
     parser.clearError();

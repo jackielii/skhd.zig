@@ -288,64 +288,60 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         };
     }
 
+    // Create a single visited list for all alias resolution in this hotkey
+    var visited = std.ArrayList([]const u8).init(self.allocator);
+    defer visited.deinit();
+
     // Handle modifier or alias at the start
     var found_modifier = false;
-    var is_standalone_keysym = false;
-    var last_token_before_parse: ?Token = null;
+    var key_parsed = false; // Track if we've already determined the key
 
     if (self.match(.Token_Alias)) {
         // Check what follows the alias to determine how to handle it
         const alias_token = self.previous();
-        const next_is_command = self.peek_check(.Token_Command);
-        const next_is_forward = self.peek_check(.Token_Forward);
-        const next_is_begin_list = self.peek_check(.Token_BeginList);
-        const next_is_unbound = self.peek_check(.Token_Unbound);
-        const next_is_arrow = self.peek_check(.Token_Arrow);
-        const next_is_activate = self.peek_check(.Token_Activate);
+        const next_token = self.peek();
+        
+        // An alias is used as a modifier/keysym with modifiers if followed by - or +
+        // Otherwise it's a standalone keysym
+        const is_modifier_use = if (next_token) |tok| 
+            tok.type == .Token_Dash or tok.type == .Token_Plus
+        else 
+            false;
 
-        // If followed by : | [ ~ -> ; , it's a standalone keysym alias
-        if (next_is_command or next_is_forward or next_is_begin_list or next_is_unbound or next_is_arrow or next_is_activate or self.peek() == null) {
-            // Standalone keysym alias: $terminal_key : command
-            var visited = std.ArrayList([]const u8).init(self.allocator);
-            defer visited.deinit();
-            const keypress = try self.resolve_keysym_alias_internal(alias_token.text, &visited);
-            hotkey.flags = hotkey.flags.merge(keypress.flags);
-            hotkey.key = keypress.key;
-            is_standalone_keysym = true;
-        } else {
+        if (is_modifier_use) {
             // Alias is being used as a modifier: $super - x or $super + alt - x
             // Or keysym with additional modifiers: ctrl + $nav_left
             self.previous_token = alias_token;
-            last_token_before_parse = alias_token;
             hotkey.flags = try self.parse_modifier();
             found_modifier = true;
+            
+            // Check if the modifier chain ended with a keysym alias
+            // e.g., ctrl + $nav_left where $nav_left = cmd - h
+            const prev_tok = self.previous();
+            if (prev_tok.type == .Token_Alias) {
+                if (self.key_aliases.get(prev_tok.text)) |alias| {
+                    if (alias == .keysym) {
+                        // Extract the key from the keysym
+                        visited.clearRetainingCapacity();
+                        const keypress = try self.resolve_keysym_alias_internal(prev_tok.text, &visited);
+                        hotkey.key = keypress.key;
+                        key_parsed = true; // Don't parse key again
+                    }
+                }
+            }
+        } else {
+            // Standalone keysym alias: $terminal_key : command
+            const keypress = try self.resolve_keysym_alias_internal(alias_token.text, &visited);
+            hotkey.flags = hotkey.flags.merge(keypress.flags);
+            hotkey.key = keypress.key;
+            key_parsed = true;
         }
     } else if (self.match(.Token_Modifier)) {
         hotkey.flags = try self.parse_modifier();
         found_modifier = true;
     }
 
-    // Check if the modifier chain ended with a keysym alias
-    // e.g., ctrl + $nav_left where $nav_left = cmd - h
-    if (found_modifier) {
-        // Check the last consumed token to see if it was an alias
-        const prev_tok = self.previous();
-        if (prev_tok.type == .Token_Alias or (last_token_before_parse != null and last_token_before_parse.?.type == .Token_Alias)) {
-            const alias_name = if (prev_tok.type == .Token_Alias) prev_tok.text else last_token_before_parse.?.text;
-            if (self.key_aliases.get(alias_name)) |alias| {
-                if (alias == .keysym) {
-                    // Extract the key from the keysym
-                    var visited = std.ArrayList([]const u8).init(self.allocator);
-                    defer visited.deinit();
-                    const keypress = try self.resolve_keysym_alias_internal(alias_name, &visited);
-                    hotkey.key = keypress.key;
-                    is_standalone_keysym = true; // Don't parse key again
-                }
-            }
-        }
-    }
-
-    if (found_modifier and !is_standalone_keysym) {
+    if (found_modifier and !key_parsed) {
         if (!self.match(.Token_Dash)) {
             const token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '-' after modifier", self.current_file_path);
@@ -353,11 +349,10 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         }
     }
 
-    if (!is_standalone_keysym) {
+    if (!key_parsed) {
         if (self.match(.Token_Alias)) {
             // Key alias in key position: ctrl - $grave
-            var visited = std.ArrayList([]const u8).init(self.allocator);
-            defer visited.deinit();
+            visited.clearRetainingCapacity();
             const key_alias_result = try self.resolve_key_alias_internal(self.previous().text, &visited);
             hotkey.flags = hotkey.flags.merge(key_alias_result.flags);
             hotkey.key = key_alias_result.key;

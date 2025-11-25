@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c.zig").c;
 
 /// File system event monitoring using macOS FSEvents API.
 ///
@@ -36,7 +36,7 @@ pub fn create(allocator: std.mem.Allocator, callback: Callback) !*Hotload {
     self.* = .{
         .allocator = allocator,
         .callback = callback,
-        .watch_list = std.ArrayList(WatchedFile).init(allocator),
+        .watch_list = std.ArrayListUnmanaged(WatchedFile){},
         .enabled = false,
         .stream = null,
         .paths = null,
@@ -53,7 +53,7 @@ pub fn destroy(self: *Hotload) void {
     for (self.watch_list.items) |*entry| {
         self.allocator.free(entry.absolutepath);
     }
-    self.watch_list.deinit();
+    self.watch_list.deinit(self.allocator);
 
     // Free self
     const allocator = self.allocator;
@@ -74,7 +74,7 @@ pub fn addFile(self: *Hotload, file_path: []const u8) !void {
     }
 
     // Add to watch list
-    try self.watch_list.append(.{
+    try self.watch_list.append(self.allocator, .{
         .absolutepath = real_path,
     });
 }
@@ -207,7 +207,7 @@ fn fseventsCallback(
     event_paths: ?*anyopaque,
     event_flags: [*c]const c.FSEventStreamEventFlags,
     event_ids: [*c]const c.FSEventStreamEventId,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = stream;
     _ = event_flags;
     _ = event_ids;

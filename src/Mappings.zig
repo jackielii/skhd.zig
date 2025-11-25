@@ -162,7 +162,7 @@ test "format" {
     defer mappings.deinit();
     const mode = try mappings.get_mode_or_create_default("default");
     // Just verify the formatting doesn't crash
-    const formatted = try std.fmt.allocPrint(alloc, "{}", .{mappings});
+    const formatted = try std.fmt.allocPrint(alloc, "{any}", .{mappings});
     defer alloc.free(formatted);
     try std.testing.expect(formatted.len > 0);
     try std.testing.expect(mode != null);

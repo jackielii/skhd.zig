@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c.zig").c;
 const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
 const Hotkey = @import("Hotkey.zig");
@@ -25,7 +25,7 @@ content: []const u8 = undefined,
 previous_token: ?Token = undefined,
 next_token: ?Token = undefined,
 keycodes: Keycodes = undefined,
-load_directives: std.ArrayList(LoadDirective) = undefined,
+load_directives: std.ArrayListUnmanaged(LoadDirective) = .{},
 current_file_path: ?[]const u8 = null,
 error_info: ?ParseError = null,
 process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
@@ -59,7 +59,7 @@ pub fn deinit(self: *Parser) void {
     for (self.load_directives.items) |directive| {
         self.allocator.free(directive.filename);
     }
-    self.load_directives.deinit();
+    self.load_directives.deinit(self.allocator);
     if (self.error_info) |*error_info| {
         error_info.deinit();
     }
@@ -101,13 +101,7 @@ pub fn init(allocator: std.mem.Allocator) !Parser {
     // const f = try std.fs.cwd().openFile(filename, .{});
     // defer f.close();
     // const content = try f.readToEndAlloc(allocator, 1 << 24); // max size 16MB
-    return Parser{
-        .allocator = allocator,
-        .previous_token = null,
-        .next_token = null,
-        .keycodes = try Keycodes.init(allocator),
-        .load_directives = std.ArrayList(LoadDirective).init(allocator),
-    };
+    return Parser{ .allocator = allocator, .previous_token = null, .next_token = null, .keycodes = try Keycodes.init(allocator), .load_directives = .{} };
 }
 
 pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
@@ -194,25 +188,25 @@ fn match(self: *Parser, typ: Tokenizer.TokenType) bool {
 
 /// Process escape sequences in a string, replacing \\ with \ and \" with "
 fn processStringOwned(self: *Parser, str: []const u8) ![]const u8 {
-    var result = std.ArrayList(u8).init(self.allocator);
-    errdefer result.deinit();
+    var result = std.ArrayListUnmanaged(u8){};
+    errdefer result.deinit(self.allocator);
 
     var i: usize = 0;
     while (i < str.len) {
         if (i + 1 < str.len and str[i] == '\\') {
             if (str[i + 1] == '\\' or str[i + 1] == '"') {
                 // Skip the backslash and append the next character
-                try result.append(str[i + 1]);
+                try result.append(self.allocator, str[i + 1]);
                 i += 2;
                 continue;
             }
         }
-        try result.append(str[i]);
+        try result.append(self.allocator, str[i]);
         i += 1;
     }
 
     // Always return owned slice
-    return try result.toOwnedSlice();
+    return try result.toOwnedSlice(self.allocator);
 }
 
 /// Helper function to handle errors from add_process_* methods with context
@@ -339,14 +333,14 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             const key_str = try Keycodes.formatKeyPressBuffer(&buf, hotkey.flags, hotkey.key);
 
             // Get the mode(s) where we're trying to add this hotkey
-            var mode_names = std.ArrayList(u8).init(self.allocator);
-            defer mode_names.deinit();
+            var mode_names = std.ArrayListUnmanaged(u8){};
+            defer mode_names.deinit(self.allocator);
 
             var it = hotkey.mode_list.iterator();
             var first = true;
             while (it.next()) |entry| {
-                if (!first) try mode_names.appendSlice(", ");
-                try mode_names.appendSlice(entry.key_ptr.*.name);
+                if (!first) try mode_names.appendSlice(self.allocator, ", ");
+                try mode_names.appendSlice(self.allocator, entry.key_ptr.*.name);
                 first = false;
             }
 
@@ -770,8 +764,8 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
     // Check for opening parenthesis
     if (self.match(.Token_BeginTuple)) {
         // Parse arguments
-        var args = std.ArrayList([]const u8).init(self.allocator);
-        defer args.deinit();
+        var args = std.ArrayListUnmanaged([]const u8){};
+        defer args.deinit(self.allocator);
         defer for (args.items) |arg| {
             self.allocator.free(arg);
         };
@@ -784,7 +778,7 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
             if (self.match(.Token_String)) {
                 const arg_token = self.previous();
                 const processed_arg = try self.processStringOwned(arg_token.text);
-                try args.append(processed_arg);
+                try args.append(self.allocator, processed_arg);
 
                 // Check for comma or closing paren
                 if (self.peek_check(.Token_EndTuple)) {
@@ -820,22 +814,22 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
         }
 
         // Expand the template using pre-parsed parts
-        var result = std.ArrayList(u8).init(self.allocator);
-        errdefer result.deinit();
+        var result = std.ArrayListUnmanaged(u8){};
+        errdefer result.deinit(self.allocator);
 
         for (cmd_def.parts) |part| {
             switch (part) {
-                .text => |text| try result.appendSlice(text),
+                .text => |text| try result.appendSlice(self.allocator, text),
                 .placeholder => |num| {
                     if (num <= args.items.len) {
-                        try result.appendSlice(args.items[num - 1]);
+                        try result.appendSlice(self.allocator, args.items[num - 1]);
                     }
                     // Note: placeholders > args.len are silently ignored
                 },
             }
         }
 
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(self.allocator);
     } else if (cmd_def.max_placeholder > 0) {
         // Error: command expects arguments but none provided
         const msg = try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but none provided", .{ command_name, cmd_def.max_placeholder });
@@ -845,27 +839,27 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
         return error.ParseErrorOccurred;
     } else {
         // No arguments needed, build from parts
-        var result = std.ArrayList(u8).init(self.allocator);
-        errdefer result.deinit();
+        var result = std.ArrayListUnmanaged(u8){};
+        errdefer result.deinit(self.allocator);
 
         for (cmd_def.parts) |part| {
             switch (part) {
-                .text => |text| try result.appendSlice(text),
+                .text => |text| try result.appendSlice(self.allocator, text),
                 .placeholder => {}, // Should not have placeholders if max_placeholder is 0
             }
         }
 
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(self.allocator);
     }
 }
 
 fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !CommandDef {
-    var parts = std.ArrayList(CommandDef.Part).init(self.allocator);
+    var parts = std.ArrayListUnmanaged(CommandDef.Part){};
     errdefer {
         for (parts.items) |part| {
             part.deinit(self.allocator);
         }
-        parts.deinit();
+        parts.deinit(self.allocator);
     }
 
     var max_placeholder: u8 = 0;
@@ -902,7 +896,7 @@ fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !Comm
                     return error.ParseErrorOccurred;
                 }
 
-                try parts.append(.{ .placeholder = num });
+                try parts.append(self.allocator, .{ .placeholder = num });
                 if (num > max_placeholder) {
                     max_placeholder = num;
                 }
@@ -921,12 +915,12 @@ fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !Comm
 
         // Add text part
         const text = try self.allocator.dupe(u8, template[pos..end]);
-        try parts.append(.{ .text = text });
+        try parts.append(self.allocator, .{ .text = text });
         pos = end;
     }
 
     return CommandDef{
-        .parts = try parts.toOwnedSlice(),
+        .parts = try parts.toOwnedSlice(self.allocator),
         .max_placeholder = max_placeholder,
     };
 }
@@ -964,15 +958,15 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             try self.command_defs.put(self.allocator, owned_name, parsed);
         } else if (self.match(.Token_BeginList)) {
             // Process group definition: define name ["app1", "app2"]
-            var process_list = std.ArrayList([]const u8).init(self.allocator);
+            var process_list = std.ArrayListUnmanaged([]const u8){};
             errdefer {
                 for (process_list.items) |process| self.allocator.free(process);
-                process_list.deinit();
+                process_list.deinit(self.allocator);
             }
 
             while (self.match(.Token_String)) {
                 const process_name = try self.processStringOwned(self.previous().text);
-                try process_list.append(process_name);
+                try process_list.append(self.allocator, process_name);
 
                 // Skip optional comma
                 _ = self.match(.Token_Comma);
@@ -990,7 +984,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             }
 
             const owned_name = try self.allocator.dupe(u8, name);
-            const owned_processes = try process_list.toOwnedSlice();
+            const owned_processes = try process_list.toOwnedSlice(self.allocator);
             try self.process_groups.put(self.allocator, owned_name, owned_processes);
         } else {
             const token = self.peek() orelse self.previous();
@@ -1001,7 +995,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         if (self.match(.Token_String)) {
             const filename_token = self.previous();
             const filename = try self.processStringOwned(filename_token.text);
-            try self.load_directives.append(LoadDirective{
+            try self.load_directives.append(self.allocator, LoadDirective{
                 .filename = filename,
                 .token = filename_token,
             });

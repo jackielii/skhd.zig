@@ -37,8 +37,8 @@
     // internet connectivity.
     .dependencies = .{
         .zbench = .{
-            .url = "https://github.com/hendriknielaender/zbench/archive/ad7ccbdb06476affc512c12574b54f7d4386622c.tar.gz",
-            .hash = "zbench-0.10.0-YTdc7-cmAQCnYOFNUAy3wZ-Sx9-_r8lW4uwpn87wydTn",
+            .url = "https://github.com/hendriknielaender/zbench/archive/2bdf0c62c5bf761d282e889e34fb33bc41484e6f.tar.gz",
+            .hash = "zbench-0.11.2-YTdc7zolAQDlBF9i0ywXIvDjafL3Kg27S-aFUq6dU5zy",
         },
     },
     .paths = .{

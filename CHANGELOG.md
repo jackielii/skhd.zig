@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16] - 2025-11-30
+
 ### Fixed
 - **CFString null pointer crash** - Fixed crash during keyboard layout initialization on certain keyboard layouts (#19, #20)
   - Added null check for `CFStringCreateWithCharacters` which can return NULL for some keycodes
@@ -283,7 +285,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.15...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.16...HEAD
+[0.0.16]: https://github.com/jackielii/skhd.zig/compare/v0.0.15...v0.0.16
 [0.0.15]: https://github.com/jackielii/skhd.zig/compare/v0.0.13...v0.0.15
 [0.0.13]: https://github.com/jackielii/skhd.zig/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/jackielii/skhd.zig/compare/v0.0.11...v0.0.12

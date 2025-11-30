@@ -41,8 +41,37 @@ done
 CURRENT_VERSION=$(cat VERSION)
 TAG="v$CURRENT_VERSION"
 
-echo "Preparing to release version $CURRENT_VERSION"
+# Determine total steps
+if [ "$BUMP_VERSION" = true ]; then
+    TOTAL_STEPS=8
+else
+    TOTAL_STEPS=7
+fi
+
+# Step-by-step guide
 echo ""
+echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+echo -e "${BLUE}                    Release Process for v$CURRENT_VERSION${NC}"
+echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+echo ""
+echo "Steps to complete:"
+echo "  1. Pre-flight checks (branch, uncommitted changes, tag exists)"
+echo "  2. Pull latest changes from origin"
+echo "  3. Check/update CHANGELOG.md"
+echo "  4. Run tests"
+echo "  5. Build release binaries"
+echo "  6. Generate release notes"
+echo "  7. Create and push tag"
+if [ "$BUMP_VERSION" = true ]; then
+echo "  8. Bump version for next development cycle"
+fi
+echo ""
+echo -e "${YELLOW}Press Enter to start, or Ctrl+C to cancel${NC}"
+read -r
+echo ""
+
+# Step 1: Pre-flight checks
+echo -e "${BLUE}[Step 1/$TOTAL_STEPS] Pre-flight checks...${NC}"
 
 # Check if we're on main branch
 CURRENT_BRANCH=$(git branch --show-current)
@@ -66,17 +95,21 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Pull latest changes
-echo "Pulling latest changes from origin..."
-git pull origin main
-
-# Check if CHANGELOG.md has an entry for this version
+echo -e "${GREEN}✓ Pre-flight checks passed${NC}"
 echo ""
-echo "Checking CHANGELOG.md..."
+
+# Step 2: Pull latest changes
+echo -e "${BLUE}[Step 2/$TOTAL_STEPS] Pulling latest changes from origin...${NC}"
+git pull origin main
+echo -e "${GREEN}✓ Up to date with origin${NC}"
+
+# Step 3: Check/update CHANGELOG.md
+echo ""
+echo -e "${BLUE}[Step 3/$TOTAL_STEPS] Checking CHANGELOG.md...${NC}"
 if ! grep -q "## \[$CURRENT_VERSION\]" CHANGELOG.md; then
     echo -e "${YELLOW}Warning: No changelog entry found for version $CURRENT_VERSION${NC}"
     echo "Using Claude to generate changelog entry..."
-    
+
     # Get git diff since last tag
     LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
     if [ -n "$LAST_TAG" ]; then
@@ -84,37 +117,45 @@ if ! grep -q "## \[$CURRENT_VERSION\]" CHANGELOG.md; then
     else
         GIT_LOG=$(git log --oneline -20)
     fi
-    
+
     # Use Claude to analyze changes and update CHANGELOG.md
-    claude -p "Please analyze these git commits and update CHANGELOG.md with an entry for version $CURRENT_VERSION. Follow the existing format in the file. Here are the commits since the last release:\n\n$GIT_LOG\n\nPlease add the new entry after ## [Unreleased] and before the previous version entry. Use the current date." CHANGELOG.md
-    
+    # --dangerously-skip-permissions allows file edits without prompts
+    claude --dangerously-skip-permissions -p "Please analyze these git commits and update CHANGELOG.md with an entry for version $CURRENT_VERSION. Follow the existing format in the file. Here are the commits since the last release:
+
+$GIT_LOG
+
+Please add the new entry after ## [Unreleased] and before the previous version entry. Use the current date." CHANGELOG.md
+
     echo ""
     echo "CHANGELOG.md has been updated. Please review the changes."
     echo -e "${YELLOW}Press Enter to continue with the updated changelog, or Ctrl+C to cancel${NC}"
     read -r
-    
+
     # Commit the changelog update
     git add CHANGELOG.md
     git commit -m "Update CHANGELOG.md for version $CURRENT_VERSION"
+else
+    echo -e "${GREEN}✓ CHANGELOG.md already has entry for $CURRENT_VERSION${NC}"
 fi
 
-# Run tests
+# Step 4: Run tests
 echo ""
-echo "Running tests..."
+echo -e "${BLUE}[Step 4/$TOTAL_STEPS] Running tests...${NC}"
 if ! zig build test; then
     echo -e "${RED}Error: Tests failed${NC}"
     exit 1
 fi
-echo -e "${GREEN}Tests passed!${NC}"
+echo -e "${GREEN}✓ Tests passed${NC}"
 
-# Build release binaries
+# Step 5: Build release binaries
 echo ""
-echo "Building release binaries..."
+echo -e "${BLUE}[Step 5/$TOTAL_STEPS] Building release binaries...${NC}"
 zig build -Doptimize=ReleaseFast
+echo -e "${GREEN}✓ Release binaries built${NC}"
 
-# Generate release notes using Claude
+# Step 6: Generate release notes using Claude
 echo ""
-echo -e "${BLUE}Generating release notes...${NC}"
+echo -e "${BLUE}[Step 6/$TOTAL_STEPS] Generating release notes...${NC}"
 CHANGELOG_ENTRY=$(awk "/## \[$CURRENT_VERSION\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
 
 RELEASE_NOTES=$(claude -p "Generate concise GitHub release notes for skhd.zig version $CURRENT_VERSION based on this changelog entry. Format it nicely with markdown, highlighting the most important changes first. Keep it user-friendly and avoid technical jargon where possible:\n\n$CHANGELOG_ENTRY")
@@ -133,29 +174,26 @@ if [ "$CONFIRM" != "y" ]; then
     exit 1
 fi
 
-# Create tag with release notes
+# Step 7: Create tag and push
 echo ""
-echo -e "${YELLOW}Creating tag $TAG...${NC}"
+echo -e "${BLUE}[Step 7/$TOTAL_STEPS] Creating and pushing tag...${NC}"
 git tag -a "$TAG" -m "$RELEASE_NOTES"
+echo -e "${GREEN}✓ Tag $TAG created${NC}"
 
-echo ""
-echo -e "${GREEN}Release $TAG created successfully!${NC}"
-
-# Push tag
-echo ""
 echo "Pushing tag to origin..."
 git push origin "$TAG"
+echo -e "${GREEN}✓ Tag pushed to origin${NC}"
 
 echo ""
 echo "GitHub Actions will now automatically:"
-echo "- Build binaries for both architectures"
-echo "- Create a GitHub release"
-echo "- Update the Homebrew formula"
+echo "  - Build binaries for both architectures"
+echo "  - Create a GitHub release"
+echo "  - Update the Homebrew formula"
 
-# Bump version if requested
+# Step 8: Bump version if requested
 if [ "$BUMP_VERSION" = true ]; then
     echo ""
-    echo -e "${YELLOW}Bumping version for next development cycle...${NC}"
+    echo -e "${BLUE}[Step 8/$TOTAL_STEPS] Bumping version for next development cycle...${NC}"
     
     # Parse current version
     IFS='.' read -r -a version_parts <<< "$CURRENT_VERSION"
@@ -193,8 +231,12 @@ if [ "$BUMP_VERSION" = true ]; then
     git add VERSION
     git commit -m "Bump version to $NEW_VERSION for next development cycle"
     git push origin main
-    
-    echo ""
-    echo -e "${GREEN}Version bumped from $CURRENT_VERSION to $NEW_VERSION${NC}"
+
+    echo -e "${GREEN}✓ Version bumped from $CURRENT_VERSION to $NEW_VERSION${NC}"
     echo "Development builds will now show as '$NEW_VERSION-dev-<commit>'"
 fi
+
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}                    Release Complete! 🎉${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"

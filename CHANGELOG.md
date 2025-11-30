@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CFString null pointer crash** - Fixed crash during keyboard layout initialization on certain keyboard layouts (#19, #20)
+  - Added null check for `CFStringCreateWithCharacters` which can return NULL for some keycodes
+  - skhd now gracefully skips problematic keycodes and continues initialization
+
+## [0.0.15] - 2025-10-17
+
+### Added
+- **Code signing support for macOS 15+** - Accessibility permissions now persist across builds (#15)
+  - Added `Info.plist` with bundle identifier for stable TCC identity
+  - Added `zig build sign` command for local development signing
+  - Release binaries are now automatically signed
+  - See `docs/CODE_SIGNING.md` for setup instructions
+
+### Fixed
+- **Missing F16-F20 keycodes** - Added support for F16-F20 function keys in observe mode (#14)
+  - These keys were already usable in configs but showed as "unknown" in `-o` mode
+  - Note: F21-F24 cannot be supported as they are not defined in macOS's HIToolbox framework
+- **Homebrew release artifact URL** - Fixed regex to handle preview tags in release URLs
+  - Thanks to @tdjordan for the contribution (#17)
+
+### Changed
+- Removed unused `Info.plist` file from assets directory
+
 ## [0.0.13] - 2025-08-27
 
 ### Added
@@ -259,7 +283,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.13...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.15...HEAD
+[0.0.15]: https://github.com/jackielii/skhd.zig/compare/v0.0.13...v0.0.15
 [0.0.13]: https://github.com/jackielii/skhd.zig/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/jackielii/skhd.zig/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/jackielii/skhd.zig/compare/v0.0.10...v0.0.11

@@ -54,12 +54,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Main executable
-    const exe = b.addExecutable(.{
-        .name = "skhd",
+    const exe = b.addExecutable(.{ .name = "skhd", .root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-    });
+    }) });
 
     const options = b.addOptions();
     options.addOption(bool, track_alloc_option, false);
@@ -94,12 +93,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
 
     // Benchmark executable
-    const bench_exe = b.addExecutable(.{
-        .name = "benchmark",
+    const bench_exe = b.addExecutable(.{ .name = "benchmark", .root_module = b.createModule(.{
         .root_source_file = b.path("src/benchmark.zig"),
         .target = target,
         .optimize = .ReleaseFast,
-    });
+    }) });
     linkFrameworks(bench_exe);
     addVersionImport(b, bench_exe);
 
@@ -114,12 +112,11 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_cmd.step);
 
     // Allocation tracking executable
-    const alloc_exe = b.addExecutable(.{
-        .name = "skhd-alloc",
+    const alloc_exe = b.addExecutable(.{ .name = "skhd-alloc", .root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-    });
+    }) });
     linkFrameworks(alloc_exe);
     addVersionImport(b, alloc_exe);
 
@@ -134,11 +131,11 @@ pub fn build(b: *std.Build) void {
     alloc_step.dependOn(&alloc_cmd.step);
 
     // Tests for main.zig
-    const exe_unit_tests = b.addTest(.{
+    const exe_unit_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-    });
+    }) });
     linkFrameworks(exe_unit_tests);
     addVersionImport(b, exe_unit_tests);
 
@@ -147,11 +144,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
 
     // Tests for tests.zig
-    const tests_unit_tests = b.addTest(.{
+    const tests_unit_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-    });
+    }) });
     linkFrameworks(tests_unit_tests);
     addVersionImport(b, exe_unit_tests);
     tests_unit_tests.root_module.addOptions("build_options", options);
@@ -170,11 +167,11 @@ pub fn build(b: *std.Build) void {
     };
 
     for (test_files) |test_file| {
-        const module_tests = b.addTest(.{
+        const module_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(test_file),
             .target = target,
             .optimize = optimize,
-        });
+        }) });
         linkFrameworks(module_tests);
         addVersionImport(b, module_tests);
         module_tests.root_module.addOptions("build_options", options);

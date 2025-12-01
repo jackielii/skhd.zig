@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const c = @import("c.zig");
+const c = @import("c.zig").c;
+const NSApplicationLoad = @import("c.zig").NSApplicationLoad;
 const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
@@ -54,7 +55,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     parser.parseWithPath(&mappings, content, config_file) catch |err| {
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {any}", .{parse_err});
         }
         return err;
     };
@@ -69,13 +70,16 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     }
 
     // Log loaded modes
+
     var mode_iter = mappings.mode_map.iterator();
-    var modes_list = std.ArrayList(u8).init(gpa);
-    defer modes_list.deinit();
+
+    var modes_buf = std.ArrayListUnmanaged(u8){};
+    defer modes_buf.deinit(gpa);
+    const writer = modes_buf.writer(gpa);
     while (mode_iter.next()) |entry| {
-        try modes_list.writer().print("'{s}' ", .{entry.key_ptr.*});
+        try writer.print("'{s}' ", .{entry.key_ptr.*});
     }
-    log.info("Loaded modes: {s}", .{modes_list.items});
+    log.info("Loaded modes: {s}", .{modes_buf.items});
 
     // Log shell configuration
     log.info("Using shell: {s}", .{mappings.shell});
@@ -104,7 +108,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 pub fn deinit(self: *Skhd) void {
     // Print tracer summary before cleanup
     if (self.tracer.enabled) {
-        const stderr = std.io.getStdErr().writer();
+        const stderr = std.fs.File.stderr();
         self.tracer.printSummary(stderr) catch {};
     }
 
@@ -121,7 +125,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Set up signal handler for config reload
     const usr1_act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigusr1 },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.USR1, &usr1_act, null);
@@ -129,7 +133,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Set up signal handler for SIGINT (Ctrl+C) to print trace summary
     const int_act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigint },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.INT, &int_act, null);
@@ -139,7 +143,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
 
     // Check if config file is a regular file
     const stat = std.fs.cwd().statFile(self.config_file) catch |err| {
-        log.err("Cannot stat config file {s}: {}", .{ self.config_file, err });
+        log.err("Cannot stat config file {s}: {any}", .{ self.config_file, err });
         return err;
     };
 
@@ -189,7 +193,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     };
 
     // Call NSApplicationLoad() like the original skhd
-    c.NSApplicationLoad();
+    NSApplicationLoad();
 
     // Always log successful event tap creation
     log.info("Event tap created successfully. skhd is now running.", .{});
@@ -216,14 +220,14 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
         c.kCGEventKeyDown => {
             self.tracer.traceKeyDown();
             return self.handleKeyDown(event) catch |err| {
-                log.err("Error handling key down: {}", .{err});
+                log.err("Error handling key down: {any}", .{err});
                 return event;
             };
         },
         c.NX_SYSDEFINED => {
             self.tracer.traceSystemKey();
             return self.handleSystemKey(event) catch |err| {
-                log.err("Error handling system key: {}", .{err});
+                log.err("Error handling system key: {any}", .{err});
                 return event;
             };
         },
@@ -586,17 +590,17 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 }
 
 /// Signal handler for SIGUSR1 - reload configuration
-fn handleSigusr1(_: c_int) callconv(.C) void {
+fn handleSigusr1(_: c_int) callconv(.c) void {
     if (global_skhd) |skhd| {
         log.info("Received SIGUSR1, reloading configuration", .{});
         skhd.reloadConfig() catch |err| {
-            log.err("Failed to reload config: {}", .{err});
+            log.err("Failed to reload config: {any}", .{err});
         };
     }
 }
 
 /// Signal handler for SIGINT - stop the run loop to allow graceful shutdown
-fn handleSigint(_: c_int) callconv(.C) void {
+fn handleSigint(_: c_int) callconv(.c) void {
     // Stop the run loop to allow graceful shutdown with defer statements
     c.CFRunLoopStop(c.CFRunLoopGetCurrent());
 }
@@ -618,7 +622,7 @@ pub fn reloadConfig(self: *Skhd) !void {
     parser.parseWithPath(&new_mappings, content, self.config_file) catch |err| {
         // Log the parse error with proper formatting
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {any}", .{parse_err});
         }
         return err;
     };
@@ -664,7 +668,7 @@ pub fn enableHotReload(self: *Skhd) !void {
     for (self.mappings.loaded_files.items) |loaded_file| {
         log.info("Watching loaded file: {s}", .{loaded_file});
         hotloader.addFile(loaded_file) catch |err| {
-            log.info("Failed to watch loaded file {s}: {}", .{ loaded_file, err });
+            log.info("Failed to watch loaded file {s}: {any}", .{ loaded_file, err });
         };
     }
 
@@ -695,7 +699,7 @@ fn hotloadCallback(path: []const u8) void {
     if (global_skhd) |skhd| {
         log.info("Config file has been modified: {s} .. reloading config", .{path});
         skhd.reloadConfig() catch |err| {
-            log.err("Failed to reload config: {}", .{err});
+            log.err("Failed to reload config: {any}", .{err});
         };
     } else {
         std.debug.print("ERROR: global_skhd is null in hotloadCallback\n", .{});

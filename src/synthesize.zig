@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c.zig").c;
 const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
 const Hotkey = @import("Hotkey.zig");
@@ -96,7 +96,7 @@ pub fn synthesizeText(allocator: std.mem.Allocator, text: []const u8) !void {
         c.CGEventPost(c.kCGAnnotatedSessionEventTap, down_event);
 
         // Small delay between key down and up
-        std.time.sleep(1000 * 1000); // 1ms in nanoseconds
+        std.Thread.sleep(1000 * 1000); // 1ms in nanoseconds
 
         c.CGEventKeyboardSetUnicodeString(up_event, 1, &char);
         c.CGEventPost(c.kCGAnnotatedSessionEventTap, up_event);

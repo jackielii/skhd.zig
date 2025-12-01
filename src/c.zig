@@ -1,5 +1,5 @@
 // Unified C imports for the project
-pub usingnamespace @cImport({
+pub const c = @cImport({
     @cInclude("Carbon/Carbon.h");
     @cInclude("CoreServices/CoreServices.h");
     @cInclude("objc/objc.h");

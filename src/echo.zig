@@ -2,9 +2,8 @@ const std = @import("std");
 const EventTap = @import("EventTap.zig");
 const Keycodes = @import("Keycodes.zig");
 
-const c = @import("c.zig");
-
-extern fn NSApplicationLoad() void;
+const c = @import("c.zig").c;
+const NSApplicationLoad = @import("c.zig").NSApplicationLoad;
 
 pub fn echo() !void {
     // NSApplicationLoad();
@@ -96,7 +95,7 @@ fn translateKey(buffer: *[255]u8, keyCode: u16, modifierState: u32) !void {
     const uchr: c.CFDataRef = @ptrCast(c.TISGetInputSourceProperty(keyboard, c.kTISPropertyUnicodeKeyLayoutData));
     defer c.CFRelease(keyboard);
 
-    const keyboard_layout: ?*c.UCKeyboardLayout = @constCast(@ptrCast(@alignCast(c.CFDataGetBytePtr(uchr))));
+    const keyboard_layout: ?*c.UCKeyboardLayout = @ptrCast(@alignCast(@constCast(c.CFDataGetBytePtr(uchr))));
     if (keyboard_layout == null) {
         return error.@"Failed to get keyboard layout";
     }

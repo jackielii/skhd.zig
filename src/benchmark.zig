@@ -3,7 +3,7 @@ const zbench = @import("zbench");
 const Skhd = @import("skhd.zig");
 const Hotkey = @import("Hotkey.zig");
 const HotkeyOriginal = @import("Hotkey.zig");
-const c = @import("c.zig");
+const c = @import("c.zig").c;
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};

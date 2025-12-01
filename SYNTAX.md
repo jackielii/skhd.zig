@@ -103,6 +103,167 @@ name      = desired name for this mode
 command   = command is executed through '$SHELL -c'
 ```
 
+
+## Key Aliases
+
+Key aliases allow you to define reusable names for modifiers, keys, and key combinations, making configurations more readable and maintainable.
+
+### Syntax
+
+```
+alias_def = '.alias' <alias_name> <alias_value>
+
+alias_name = '$' <identifier>
+
+alias_value = <modifier_combo> |              # Modifier alias
+              <key_spec> |                    # Key alias
+              <modifier_combo> '-' <key_spec> # Keysym alias
+
+modifier_combo = <modifier> | <modifier> '+' <modifier_combo> | <alias_name>
+
+key_spec = <literal> | <keycode> | <alias_name>
+```
+
+### Alias Types
+
+#### 1. Modifier Alias
+Defines a modifier combination that can be reused and combined with other modifiers.
+
+```bash
+.alias $super cmd + alt
+.alias $hyper cmd + alt + ctrl + shift
+
+# Use standalone
+$super - h : echo "Super+H"
+
+# Combine with other modifiers (like built-in hyper/meh)
+$super + shift - h : echo "Super+Shift+H"
+```
+
+#### 2. Key Alias
+Defines a key (with optional modifiers baked in) that can be used in key position.
+
+```bash
+.alias $grave 0x32                    # Hex keycode
+.alias $exclaim shift - 1             # Key with modifier
+
+# Use in key position
+ctrl - $grave : echo "Ctrl+Grave"
+ctrl - $exclaim : echo "Ctrl+Shift+1"  # Modifiers merge!
+```
+
+#### 3. Keysym Alias
+Defines a complete key combination (modifier + key) that can be used standalone or with additional modifiers.
+
+```bash
+.alias $nav_left cmd - h
+.alias $terminal_key cmd + shift - t
+
+# Use standalone (macro expansion)
+$nav_left : yabai -m window --focus west
+
+# Add more modifiers
+ctrl + $nav_left : yabai -m window --focus west  # Becomes: ctrl+cmd - h
+```
+
+### Nesting
+
+Aliases can reference other aliases, and they are fully expanded at parse time:
+
+```bash
+# Nested modifiers
+.alias $super cmd + alt
+.alias $mega $super + shift + ctrl   # Expands to: cmd+alt+shift+ctrl
+
+# Nested keys
+.alias $grave 0x32
+.alias $tilde shift - $grave         # Expands to: shift - 0x32
+
+# Nested keysyms
+.alias $nav_left $super - h          # Expands to: cmd+alt - h
+.alias $special_nav ctrl + $nav_left # Expands to: ctrl+cmd+alt - h
+```
+
+### Valid Usage Contexts
+
+| Alias Type | Standalone | As Modifier | In Key Position | With + Modifier |
+|------------|------------|-------------|-----------------|-----------------|
+| Modifier   | ✗          | ✓           | ✗               | ✓               |
+| Key        | ✗          | ✗           | ✓               | ✗               |
+| Keysym     | ✓          | ✗           | ✗               | ✓               |
+
+### Examples
+
+```bash
+# Define aliases
+.alias $super cmd + alt
+.alias $mega $super + shift + ctrl
+.alias $grave 0x32
+.alias $tilde shift - $grave
+.alias $nav_left $super - h
+
+# Modifier alias - can combine like hyper/meh
+$super - t : open -a Terminal.app
+$super + shift - t : open -a "New Terminal"
+
+# Key alias - only in key position
+ctrl - $grave : open -a Notes.app
+$super - $tilde : open -a "System Settings"
+
+# Keysym alias - standalone or with additional modifiers
+$nav_left : yabai -m window --focus west
+ctrl + $nav_left : yabai -m window --focus west  # Add ctrl
+```
+
+### Common Errors
+
+#### Using Wrong Alias Type
+
+```bash
+# ✗ WRONG: Key alias as modifier
+.alias $grave 0x32
+$grave - t : echo "bad"              # Error: $grave is a key, not a modifier
+
+# ✓ CORRECT: Use in key position
+ctrl - $grave : echo "good"
+
+# ✗ WRONG: Modifier alias in key position
+.alias $hyper cmd + alt
+ctrl - $hyper : echo "bad"           # Error: $hyper is a modifier, not a key
+
+# ✓ CORRECT: Use as modifier
+$hyper - t : echo "good"
+
+# ✗ WRONG: Modifier alias standalone
+.alias $hyper cmd + alt
+$hyper : echo "bad"                  # Error: needs a key
+
+# ✓ CORRECT: Add a key
+$hyper - t : echo "good"
+```
+
+#### Missing $ Prefix
+
+```bash
+.alias $hyper cmd + alt
+hyper - t : echo "bad"               # Error! Did you mean '$hyper'?
+```
+
+#### Circular References
+
+```bash
+.alias $a $b + shift                 # Error: $b not defined yet
+.alias $b $a + ctrl
+```
+
+### Benefits
+
+- **Readability**: Complex modifier combinations get meaningful names
+- **Maintainability**: Change definition once, affects all uses
+- **Keyboard Layouts**: Abstract away layout-specific hex codes
+- **Consistency**: Same modifier combo everywhere
+- **Composability**: Combine aliases like built-in hyper/meh
+
 ## Modifiers
 
 ### Basic Modifiers

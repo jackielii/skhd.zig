@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const c = @import("c.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
+const DeviceManager = @import("DeviceManager.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
 const Hotkey = @import("Hotkey.zig");
@@ -38,6 +39,7 @@ hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
+device_manager: *DeviceManager,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -86,8 +88,12 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     log.info("Initial process: {s}", .{carbon_event.getProcessName()});
 
+    // Initialize Device Manager for device-specific hotkeys
+    const device_manager = try DeviceManager.create(gpa);
+    errdefer device_manager.destroy();
+
     // Create event tap with keyboard and system defined events
-    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
+    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.kCGEventKeyUp) | (1 << c.NX_SYSDEFINED);
 
     return Skhd{
         .allocator = gpa,
@@ -98,6 +104,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         .verbose = verbose,
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
+        .device_manager = device_manager,
     };
 }
 
@@ -111,6 +118,7 @@ pub fn deinit(self: *Skhd) void {
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
     }
+    self.device_manager.destroy();
     self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
@@ -507,11 +515,7 @@ inline fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
 /// Find a hotkey in the mode that matches the keyboard event
 /// Returns the hotkey pointer if found, null otherwise
 pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-    // Method 1: HashMap lookup with adapted context (O(1) average case)
     return self.findHotkeyHashMap(mode, eventkey);
-
-    // Method 2: Linear array search (O(n) but potentially faster for small sets)
-    // return self.findHotkeyLinear(mode, eventkey);
 }
 
 /// HashMap-based lookup using adapted context
@@ -734,6 +738,10 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
     const carbon_event = try CarbonEvent.init(allocator);
     errdefer carbon_event.deinit();
 
+    // Create device manager mock
+    const device_manager = try DeviceManager.create(allocator);
+    errdefer device_manager.destroy();
+
     return Skhd{
         .allocator = allocator,
         .mappings = mappings,
@@ -743,6 +751,7 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
         .verbose = false,
         .tracer = Tracer.init(false),
         .carbon_event = carbon_event,
+        .device_manager = device_manager,
     };
 }
 

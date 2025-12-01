@@ -4,6 +4,7 @@ fn linkFrameworks(exe: *std.Build.Step.Compile) void {
     exe.linkFramework("Cocoa");
     exe.linkFramework("Carbon");
     exe.linkFramework("CoreServices");
+    exe.linkFramework("IOKit");
 }
 
 fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
@@ -133,6 +134,18 @@ pub fn build(b: *std.Build) void {
     const alloc_step = b.step("alloc", "Run skhd with allocation logging");
     alloc_step.dependOn(&alloc_cmd.step);
 
+    // Timing test executable
+    const timing_exe = b.addExecutable(.{
+        .name = "timing-test",
+        .root_source_file = b.path("src/timing_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    linkFrameworks(timing_exe);
+    const timing_cmd = b.addRunArtifact(timing_exe);
+    const timing_step = b.step("timing", "Run timing-based remapping test");
+    timing_step.dependOn(&timing_cmd.step);
+
     // Tests for main.zig
     const exe_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
@@ -166,7 +179,8 @@ pub fn build(b: *std.Build) void {
         "src/Keycodes.zig",
         "src/EventTap.zig",
         "src/synthesize.zig",
-        // "src/Hotload.zig", // Skip hot load test for local test only
+        "src/Hotload.zig",
+        "src/DeviceManager.zig",
     };
 
     for (test_files) |test_file| {

@@ -26,7 +26,7 @@ pub const TokenType = enum {
     Token_Decl,
     Token_Forward,
     Token_Comma,
-    Token_Insert,
+    Token_AngleOpen,
     Token_Plus,
     Token_Dash,
     Token_Arrow,
@@ -41,6 +41,7 @@ pub const TokenType = enum {
     Token_EndList,
     Token_BeginTuple,
     Token_EndTuple,
+    Token_AngleClose,
 
     Token_Unknown,
 };
@@ -97,7 +98,8 @@ pub fn get_token(self: *Tokenizer) ?Token {
     switch (r[0]) {
         '+' => token.type = .Token_Plus,
         ',' => token.type = .Token_Comma,
-        '<' => token.type = .Token_Insert,
+        '<' => token.type = .Token_AngleOpen,
+        '>' => token.type = .Token_AngleClose,
         '@' => {
             // Check if this is followed by an identifier
             const next = self.peekRune();
@@ -522,6 +524,52 @@ test "tokenize command with colon and reference" {
         const final_token = tokenizer.get_token();
         try std.testing.expect(final_token == null);
     }
+}
+
+test "tokenize angle brackets" {
+    const test_content = "<device \"HHKB\"> cmd - a : echo test";
+    var tokenizer = try init(test_content);
+
+    // Verify tokens are parsed correctly
+    const token1 = tokenizer.get_token();
+    try std.testing.expect(token1 != null);
+    try std.testing.expectEqual(TokenType.Token_AngleOpen, token1.?.type);
+    try std.testing.expectEqualStrings("<", token1.?.text);
+
+    const token2 = tokenizer.get_token();
+    try std.testing.expect(token2 != null);
+    try std.testing.expectEqual(TokenType.Token_Identifier, token2.?.type);
+    try std.testing.expectEqualStrings("device", token2.?.text);
+
+    const token3 = tokenizer.get_token();
+    try std.testing.expect(token3 != null);
+    try std.testing.expectEqual(TokenType.Token_String, token3.?.type);
+    try std.testing.expectEqualStrings("HHKB", token3.?.text);
+
+    const token4 = tokenizer.get_token();
+    try std.testing.expect(token4 != null);
+    try std.testing.expectEqual(TokenType.Token_AngleClose, token4.?.type);
+    try std.testing.expectEqualStrings(">", token4.?.text);
+
+    // Continue with the rest of the tokens
+    const token5 = tokenizer.get_token();
+    try std.testing.expect(token5 != null);
+    try std.testing.expectEqual(TokenType.Token_Modifier, token5.?.type);
+    try std.testing.expectEqualStrings("cmd", token5.?.text);
+
+    const token6 = tokenizer.get_token();
+    try std.testing.expect(token6 != null);
+    try std.testing.expectEqual(TokenType.Token_Dash, token6.?.type);
+
+    const token7 = tokenizer.get_token();
+    try std.testing.expect(token7 != null);
+    try std.testing.expectEqual(TokenType.Token_Key, token7.?.type);
+    try std.testing.expectEqualStrings("a", token7.?.text);
+
+    const token8 = tokenizer.get_token();
+    try std.testing.expect(token8 != null);
+    try std.testing.expectEqual(TokenType.Token_Command, token8.?.type);
+    try std.testing.expectEqualStrings("echo test", token8.?.text);
 }
 
 test "tokenize string with escape sequences" {

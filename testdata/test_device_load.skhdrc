@@ -1,0 +1,4 @@
+# Test file for device-constrained .load directive
+# All hotkeys in this file should inherit the device constraint from .load
+cmd - a : echo "from device-specific file"
+cmd - b : echo "another from device-specific"

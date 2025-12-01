@@ -1,6 +1,7 @@
 const std = @import("std");
 const EventTap = @import("EventTap.zig");
 const Keycodes = @import("Keycodes.zig");
+const DeviceManager = @import("DeviceManager.zig");
 
 const c = @import("c.zig");
 
@@ -8,6 +9,14 @@ extern fn NSApplicationLoad() void;
 
 pub fn echo() !void {
     // NSApplicationLoad();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Initialize device manager
+    const device_manager = try DeviceManager.create(allocator);
+    defer device_manager.destroy();
+
     const mask: u32 = (1 << c.kCGEventKeyDown) |
         (1 << c.kCGEventFlagsChanged) |
         (1 << c.kCGEventLeftMouseDown) |
@@ -15,14 +24,19 @@ pub fn echo() !void {
         (1 << c.kCGEventOtherMouseDown);
     var event_tap = EventTap{ .mask = mask };
     defer event_tap.deinit();
+
     std.debug.print("Ctrl+C to exit\n", .{});
-    try event_tap.begin(callback, null);
+    std.debug.print("Monitoring keyboard devices...\n\n", .{});
+
+    try event_tap.begin(callback, device_manager);
     c.CFRunLoopRun();
 }
 
-fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*anyopaque) callconv(.c) c.CGEventRef {
+fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, user_info: ?*anyopaque) callconv(.c) c.CGEventRef {
+    const device_manager = @as(*DeviceManager, @ptrCast(@alignCast(user_info)));
+
     switch (typ) {
-        c.kCGEventKeyDown => return printKeydown(event) catch |err| {
+        c.kCGEventKeyDown => return printKeydown(event, device_manager) catch |err| {
             std.debug.print("Error: {}\n", .{err});
             return @ptrFromInt(0);
         },
@@ -30,7 +44,7 @@ fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*
         c.kCGEventLeftMouseDown, c.kCGEventRightMouseDown, c.kCGEventOtherMouseDown => {
             const button = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
             std.debug.print("Mouse button: {d}\n", .{button});
-            return @ptrFromInt(0);
+            return @ptrFromInt(0); // Consume mouse events
         },
         else => {
             // std.debug.print("Event type: {any}\n", .{typ});
@@ -39,7 +53,7 @@ fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*
     }
 }
 
-fn printKeydown(event: c.CGEventRef) !c.CGEventRef {
+fn printKeydown(event: c.CGEventRef, device_manager: *DeviceManager) !c.CGEventRef {
     const keycode = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode);
 
     const flags: c.CGEventFlags = c.CGEventGetFlags(event);
@@ -47,6 +61,17 @@ fn printKeydown(event: c.CGEventRef) !c.CGEventRef {
         std.debug.print("Ctrl+C pressed\n", .{});
         std.posix.exit(0);
     }
+
+    // Try to get device info from CGEvent
+    if (device_manager.getDeviceFromEvent(event)) |device_info| {
+        std.debug.print("[{s} (0x{x:0>4}:0x{x:0>4})] ", .{ device_info.name, device_info.vendor_id, device_info.product_id });
+    } else {
+        // Fallback to keyboard type from event
+        const keyboard_type = c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeyboardType);
+        std.debug.print("[Unknown Device, KbType: {}] ", .{keyboard_type});
+    }
+
+    // Print modifiers
     if (flags & c.kCGEventFlagMaskShift != 0) {
         std.debug.print("Shift ", .{});
     }
@@ -68,26 +93,14 @@ fn printKeydown(event: c.CGEventRef) !c.CGEventRef {
     if (flags & c.kCGEventFlagMaskHelp != 0) {
         std.debug.print("Help ", .{});
     }
-    // if (flags & c.kCGEventFlagMaskNonCoalesced != 0) {
-    //     std.debug.print("NonCoalesced ", .{});
-    // }
     if (flags & c.kCGEventFlagMaskAlphaShift != 0) {
         std.debug.print("AlphaShift ", .{});
     }
 
-    // const chars = createStringForKey(@intCast(u16, keycode), gpa_allocator) catch @panic("createStringForKey failed");
-    // defer gpa_allocator.free(chars);
-    // std.debug.print("typeof chars: {}, length: {}\n", .{ @TypeOf(chars), chars.len });
-    // std.debug.print("key: {s}", .{chars});
     const chars = Keycodes.getKeyString(@intCast(keycode));
     std.debug.print("\t{s}\tkeycode: 0x{x:0>2}\n", .{ chars, keycode });
-    // print("\tkey: '{s}' (0x{x:0>2})\n", .{ key, keycode });
 
-    // var buffer: [255]u8 = undefined;
-    // try translateKey(&buffer, @intCast(keycode), @intCast(flags));
-    // const s = std.mem.sliceTo(buffer[0..], 0);
-    // std.debug.print("\t{s}\tkeycode: 0x{x:0<2}\n", .{ s, keycode });
-
+    // Always consume the event in observe mode
     return @ptrFromInt(0);
 }
 

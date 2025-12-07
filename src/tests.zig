@@ -1786,3 +1786,71 @@ test "mode activation with process groups" {
         }
     }
 }
+
+test "NX media key forwarding" {
+    const allocator = std.testing.allocator;
+    const c = @import("c.zig");
+
+    // Test forwarding regular key to NX media key
+    const config =
+        \\# Forward delete to next media key
+        \\delete | next
+        \\# Forward backslash to previous media key
+        \\0x2A | previous
+        \\# Forward with modifiers to play
+        \\cmd - p | play
+    ;
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, config, "test.conf");
+
+    const default_mode = mappings.mode_map.getPtr("default").?;
+    var it = default_mode.hotkey_map.iterator();
+
+    var found_delete = false;
+    var found_backslash = false;
+    var found_cmd_p = false;
+
+    while (it.next()) |entry| {
+        const hotkey = entry.key_ptr.*;
+
+        // delete in skhd config maps to kVK_ForwardDelete = 117 (0x75)
+        if (hotkey.key == 0x75) {
+            // delete | next
+            const cmd = hotkey.find_command_for_process("*");
+            try std.testing.expect(cmd != null);
+            try std.testing.expect(cmd.? == .forwarded);
+            // next is NX_KEYTYPE_NEXT = 17
+            try std.testing.expect(cmd.?.forwarded.key == c.NX_KEYTYPE_NEXT);
+            try std.testing.expect(cmd.?.forwarded.flags.nx == true);
+            found_delete = true;
+        } else if (hotkey.key == 0x2A) {
+            // backslash | previous
+            const cmd = hotkey.find_command_for_process("*");
+            try std.testing.expect(cmd != null);
+            try std.testing.expect(cmd.? == .forwarded);
+            // previous is NX_KEYTYPE_PREVIOUS = 18
+            try std.testing.expect(cmd.?.forwarded.key == c.NX_KEYTYPE_PREVIOUS);
+            try std.testing.expect(cmd.?.forwarded.flags.nx == true);
+            found_backslash = true;
+        } else if (hotkey.key == 0x23 and hotkey.flags.cmd) {
+            // cmd - p | play
+            const cmd = hotkey.find_command_for_process("*");
+            try std.testing.expect(cmd != null);
+            try std.testing.expect(cmd.? == .forwarded);
+            // play is NX_KEYTYPE_PLAY = 16
+            try std.testing.expect(cmd.?.forwarded.key == c.NX_KEYTYPE_PLAY);
+            try std.testing.expect(cmd.?.forwarded.flags.nx == true);
+            found_cmd_p = true;
+        }
+    }
+
+    try std.testing.expect(found_delete);
+    try std.testing.expect(found_backslash);
+    try std.testing.expect(found_cmd_p);
+}

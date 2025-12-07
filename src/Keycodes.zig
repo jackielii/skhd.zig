@@ -519,6 +519,25 @@ pub fn getKeyString(keyCode: u32) []const u8 {
     };
 }
 
+/// Get a human-readable string for NX media key codes
+pub fn getNXKeyString(keyCode: u8) []const u8 {
+    return switch (keyCode) {
+        c.NX_KEYTYPE_SOUND_UP => "sound_up",
+        c.NX_KEYTYPE_SOUND_DOWN => "sound_down",
+        c.NX_KEYTYPE_MUTE => "mute",
+        c.NX_KEYTYPE_BRIGHTNESS_UP => "brightness_up",
+        c.NX_KEYTYPE_BRIGHTNESS_DOWN => "brightness_down",
+        c.NX_KEYTYPE_PLAY => "play",
+        c.NX_KEYTYPE_PREVIOUS => "previous",
+        c.NX_KEYTYPE_NEXT => "next",
+        c.NX_KEYTYPE_REWIND => "rewind",
+        c.NX_KEYTYPE_FAST => "fast",
+        c.NX_KEYTYPE_ILLUMINATION_UP => "illumination_up",
+        c.NX_KEYTYPE_ILLUMINATION_DOWN => "illumination_down",
+        else => "unknown_nx",
+    };
+}
+
 test "ptrcast" {
     const alloc = std.testing.allocator;
     var buf = try alloc.alloc(u8, 10);

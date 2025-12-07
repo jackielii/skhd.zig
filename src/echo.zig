@@ -12,7 +12,8 @@ pub fn echo() !void {
         (1 << c.kCGEventFlagsChanged) |
         (1 << c.kCGEventLeftMouseDown) |
         (1 << c.kCGEventRightMouseDown) |
-        (1 << c.kCGEventOtherMouseDown);
+        (1 << c.kCGEventOtherMouseDown) |
+        (1 << c.NX_SYSDEFINED);
     var event_tap = EventTap{ .mask = mask };
     defer event_tap.deinit();
     std.debug.print("Ctrl+C to exit\n", .{});
@@ -32,11 +33,36 @@ fn callback(_: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, _: ?*
             std.debug.print("Mouse button: {d}\n", .{button});
             return @ptrFromInt(0);
         },
+        c.NX_SYSDEFINED => {
+            printSystemKey(event);
+            return event;
+        },
         else => {
             // std.debug.print("Event type: {any}\n", .{typ});
             return event;
         },
     }
+}
+
+fn printSystemKey(event: c.CGEventRef) void {
+    const event_data = c.CGEventCreateData(c.kCFAllocatorDefault, event);
+    if (event_data == null) return;
+    defer c.CFRelease(event_data);
+
+    const data = c.CFDataGetBytePtr(event_data);
+    const key_code = data[129];
+    const key_state = data[130];
+    const key_stype = data[123];
+
+    const NX_KEYDOWN: u8 = 0x0A;
+    const NX_SUBTYPE_AUX_CONTROL_BUTTONS: u8 = 8;
+
+    // Only print on key down for aux control buttons (media keys)
+    if (key_state != NX_KEYDOWN or key_stype != NX_SUBTYPE_AUX_CONTROL_BUTTONS) return;
+
+    // Get key name from our NX keycode table
+    const key_name = Keycodes.getNXKeyString(key_code);
+    std.debug.print("\t{s}\tkeycode: 0x{x:0>2} (NX media key)\n", .{ key_name, key_code });
 }
 
 fn printKeydown(event: c.CGEventRef) !c.CGEventRef {

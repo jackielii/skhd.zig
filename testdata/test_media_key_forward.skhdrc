@@ -1,0 +1,11 @@
+# Forward delete to next media key
+delete | next
+
+# Forward backslash to previous
+0x2A | previous
+
+# Forward with modifiers to play
+cmd - p | play
+
+# For M3 Macs, also test fast/rewind
+shift - delete | fast

@@ -420,6 +420,12 @@ inline fn interceptSystemKey(event: c.CGEventRef, eventkey: *Hotkey.KeyPress) bo
 const SKHD_EVENT_MARKER: i64 = 0x736B6864; // "skhd" in hex
 
 inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
+    // Check if this is an NX media key (requires different event type)
+    if (target_key.flags.nx) {
+        try postMediaKeyEvent(target_key.key);
+        return;
+    }
+
     // Create a proper event source for the new event
     const event_source = c.CGEventSourceCreate(c.kCGEventSourceStateHIDSystemState);
     if (event_source == null) return error.FailedToCreateEventSource;
@@ -447,6 +453,81 @@ inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
     // Post both key down and key up events
     c.CGEventPost(c.kCGSessionEventTap, key_down);
     c.CGEventPost(c.kCGSessionEventTap, key_up);
+}
+
+/// Synthesize and post a media key event (play, next, previous, etc.)
+/// Media keys use NX_SYSDEFINED events with special data encoding, not regular keyboard events.
+/// Reference: https://stackoverflow.com/questions/11045814/emulate-media-key-press-on-mac
+inline fn postMediaKeyEvent(key_code: u32) !void {
+    try postMediaKeyPress(key_code, true); // key down
+    try postMediaKeyPress(key_code, false); // key up
+}
+
+/// Post a single media key press (down or up) using NSEvent.otherEvent
+/// The data1 field encodes: (key_code << 16) | (state_flags << 8)
+/// where state_flags is 0x0a for down, 0x0b for up
+fn postMediaKeyPress(key_code: u32, key_down: bool) !void {
+    const NSEventClass = c.objc_getClass("NSEvent");
+    if (NSEventClass == null) return error.FailedToGetNSEventClass;
+
+    const state_flags: c_long = if (key_down) 0x0a00 else 0x0b00;
+    const data1: c_long = (@as(c_long, @intCast(key_code)) << 16) | state_flags;
+
+    const ev = nsEventOtherEvent(
+        @ptrCast(@alignCast(NSEventClass)),
+        14, // NSEventTypeSystemDefined
+        8, // NX_SUBTYPE_AUX_CONTROL_BUTTONS
+        data1,
+    );
+
+    if (ev != null) {
+        const cg_event = nsEventToCGEvent(ev);
+        if (cg_event != null) {
+            c.CGEventPost(c.kCGHIDEventTap, cg_event);
+        }
+    }
+}
+
+/// Create an NSEvent using otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:
+/// Reference: https://stackoverflow.com/questions/11045814/emulate-media-key-press-on-mac
+fn nsEventOtherEvent(ns_event_class: c.id, event_type: c_ulong, subtype: c_short, data1: c_long) c.id {
+    const sel = c.sel_registerName("otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:");
+    const msgSend = @extern(*const fn (
+        c.id,
+        c.SEL,
+        c_ulong,
+        f64,
+        f64,
+        c_ulong,
+        f64,
+        c_long,
+        ?*anyopaque,
+        c_short,
+        c_long,
+        c_long,
+    ) callconv(.C) c.id, .{ .name = "objc_msgSend" });
+
+    return msgSend(
+        ns_event_class,
+        sel,
+        event_type,
+        0.0,
+        0.0, // location
+        @as(c_ulong, @bitCast(data1)) & 0xff00, // modifierFlags from data1
+        0.0, // timestamp
+        0, // windowNumber
+        null, // context
+        subtype,
+        data1,
+        -1, // data2
+    );
+}
+
+/// Get CGEvent from NSEvent by calling [event CGEvent]
+fn nsEventToCGEvent(ns_event: c.id) c.CGEventRef {
+    const sel = c.sel_registerName("CGEvent");
+    const msgSend = @extern(*const fn (c.id, c.SEL) callconv(.C) ?*anyopaque, .{ .name = "objc_msgSend" });
+    return @ptrCast(msgSend(ns_event, sel));
 }
 
 inline fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {

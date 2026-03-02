@@ -9,7 +9,7 @@ pub const ParseError = struct {
     file_path: ?[]const u8,
     token_text: ?[]const u8,
 
-    pub fn format(self: ParseError, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: ParseError, writer: anytype) !void {
         if (self.file_path) |path| {
             try writer.print("{s}:", .{path});
         }
@@ -50,12 +50,12 @@ pub const ParseError = struct {
 
 pub const ParseErrorContext = struct {
     allocator: std.mem.Allocator,
-    errors: std.ArrayList(ParseError),
+    errors: std.array_list.Managed(ParseError),
 
     pub fn init(allocator: std.mem.Allocator) ParseErrorContext {
         return ParseErrorContext{
             .allocator = allocator,
-            .errors = std.ArrayList(ParseError).init(allocator),
+            .errors = std.array_list.Managed(ParseError).init(allocator),
         };
     }
 
@@ -69,7 +69,7 @@ pub const ParseErrorContext = struct {
 
     pub fn printErrors(self: *ParseErrorContext, writer: anytype) !void {
         for (self.errors.items) |err| {
-            try writer.print("{}\n", .{err});
+            try writer.print("{f}\n", .{err});
         }
     }
 };

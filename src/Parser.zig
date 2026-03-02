@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
 const Hotkey = @import("Hotkey.zig");
@@ -25,7 +25,7 @@ content: []const u8 = undefined,
 previous_token: ?Token = undefined,
 next_token: ?Token = undefined,
 keycodes: Keycodes = undefined,
-load_directives: std.ArrayList(LoadDirective) = undefined,
+load_directives: std.array_list.Managed(LoadDirective) = undefined,
 current_file_path: ?[]const u8 = null,
 error_info: ?ParseError = null,
 process_groups: std.StringHashMapUnmanaged([][]const u8) = .empty,
@@ -106,7 +106,7 @@ pub fn init(allocator: std.mem.Allocator) !Parser {
         .previous_token = null,
         .next_token = null,
         .keycodes = try Keycodes.init(allocator),
-        .load_directives = std.ArrayList(LoadDirective).init(allocator),
+        .load_directives = std.array_list.Managed(LoadDirective).init(allocator),
     };
 }
 
@@ -194,7 +194,7 @@ fn match(self: *Parser, typ: Tokenizer.TokenType) bool {
 
 /// Process escape sequences in a string, replacing \\ with \ and \" with "
 fn processStringOwned(self: *Parser, str: []const u8) ![]const u8 {
-    var result = std.ArrayList(u8).init(self.allocator);
+    var result = std.array_list.Managed(u8).init(self.allocator);
     errdefer result.deinit();
 
     var i: usize = 0;
@@ -339,7 +339,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             const key_str = try Keycodes.formatKeyPressBuffer(&buf, hotkey.flags, hotkey.key);
 
             // Get the mode(s) where we're trying to add this hotkey
-            var mode_names = std.ArrayList(u8).init(self.allocator);
+            var mode_names = std.array_list.Managed(u8).init(self.allocator);
             defer mode_names.deinit();
 
             var it = hotkey.mode_list.iterator();
@@ -770,7 +770,7 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
     // Check for opening parenthesis
     if (self.match(.Token_BeginTuple)) {
         // Parse arguments
-        var args = std.ArrayList([]const u8).init(self.allocator);
+        var args = std.array_list.Managed([]const u8).init(self.allocator);
         defer args.deinit();
         defer for (args.items) |arg| {
             self.allocator.free(arg);
@@ -820,7 +820,7 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
         }
 
         // Expand the template using pre-parsed parts
-        var result = std.ArrayList(u8).init(self.allocator);
+        var result = std.array_list.Managed(u8).init(self.allocator);
         errdefer result.deinit();
 
         for (cmd_def.parts) |part| {
@@ -845,7 +845,7 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
         return error.ParseErrorOccurred;
     } else {
         // No arguments needed, build from parts
-        var result = std.ArrayList(u8).init(self.allocator);
+        var result = std.array_list.Managed(u8).init(self.allocator);
         errdefer result.deinit();
 
         for (cmd_def.parts) |part| {
@@ -860,7 +860,7 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
 }
 
 fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !CommandDef {
-    var parts = std.ArrayList(CommandDef.Part).init(self.allocator);
+    var parts = std.array_list.Managed(CommandDef.Part).init(self.allocator);
     errdefer {
         for (parts.items) |part| {
             part.deinit(self.allocator);
@@ -964,7 +964,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             try self.command_defs.put(self.allocator, owned_name, parsed);
         } else if (self.match(.Token_BeginList)) {
             // Process group definition: define name ["app1", "app2"]
-            var process_list = std.ArrayList([]const u8).init(self.allocator);
+            var process_list = std.array_list.Managed([]const u8).init(self.allocator);
             errdefer {
                 for (process_list.items) |process| self.allocator.free(process);
                 process_list.deinit();

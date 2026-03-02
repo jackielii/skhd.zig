@@ -52,7 +52,7 @@ pub const Token = struct {
     line: usize,
     cursor: usize,
 
-    pub fn format(self: *const Token, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: *const Token, writer: anytype) !void {
         try writer.print("Token{{", .{});
         try writer.print("\n  line: {d}", .{self.line});
         try writer.print("\n  cursor: {d}", .{self.cursor});
@@ -332,7 +332,7 @@ test "nextRune" {
         \\
     ;
     var tokenizer = try init(content);
-    var got = std.ArrayList(u8).init(std.testing.allocator);
+    var got = std.array_list.Managed(u8).init(std.testing.allocator);
     defer got.deinit();
     while (tokenizer.peekRune()) |rune| {
         try got.appendSlice(rune);

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Zig 0.15** - Updated codebase to build with Zig 0.15.0 (minimum supported version)
+  - Build API: `addExecutable`/`addTest` use `root_module` and `b.createModule()`
+  - C import: `@cImport` result exposed as `c_impl`; callers use `@import("c.zig").c_impl` and `@import("c.zig").NSApplicationLoad()`
+  - Stdlib: `std.ArrayList` → `std.array_list.Managed`, `std.time.sleep` → `std.Thread.sleep`, `stderr.reader()` → `stderr.deprecatedReader()`, `std.posix.empty_sigset` → `std.posix.sigemptyset()`, `callconv(.C)` → `callconv(.c)`
+  - Format: custom `format` methods use Zig 0.15 signature `(self, writer)`; use `{f}` where format is intended
+  - CI: workflow now uses Zig 0.15.0
+  - **Breaking:** Zig 0.14 and earlier are no longer supported
+
 ## [0.0.17] - 2025-12-08
 
 ### Added

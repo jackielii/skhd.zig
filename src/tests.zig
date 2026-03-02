@@ -546,13 +546,13 @@ test "Parser error message formatting" {
     var err1 = try ParseError.fromPosition(testing.allocator, 5, 10, "Test error message", null);
     defer err1.deinit();
     var buf: [256]u8 = undefined;
-    const result1 = try std.fmt.bufPrint(&buf, "{}", .{err1});
+    const result1 = try std.fmt.bufPrint(&buf, "{f}", .{err1});
     try testing.expectEqualStrings("5:10: error: Test error message", result1);
 
     // Test error formatting with file path
     var err2 = try ParseError.fromPosition(testing.allocator, 3, 7, "Another error", "test.skhdrc");
     defer err2.deinit();
-    const result2 = try std.fmt.bufPrint(&buf, "{}", .{err2});
+    const result2 = try std.fmt.bufPrint(&buf, "{f}", .{err2});
     try testing.expectEqualStrings("test.skhdrc:3:7: error: Another error", result2);
 
     // Test error with token text
@@ -564,7 +564,7 @@ test "Parser error message formatting" {
     };
     var err3 = try ParseError.fromToken(testing.allocator, token, "Unknown key", "config.skhdrc");
     defer err3.deinit();
-    const result3 = try std.fmt.bufPrint(&buf, "{}", .{err3});
+    const result3 = try std.fmt.bufPrint(&buf, "{f}", .{err3});
     try testing.expectEqualStrings("config.skhdrc:2:15: error: Unknown key near 'badkey'", result3);
 }
 
@@ -1789,7 +1789,7 @@ test "mode activation with process groups" {
 
 test "NX media key forwarding" {
     const allocator = std.testing.allocator;
-    const c = @import("c.zig");
+    const c = @import("c.zig").c_impl;
 
     // Test forwarding regular key to NX media key
     const config =

@@ -38,7 +38,7 @@ pub fn main() !void {
 
     defer if (comptime track_alloc) {
         std.debug.print("\n=== Final Allocation Report ===\n", .{});
-        tracker.printReport(std.io.getStdErr().writer()) catch {};
+        tracker.printReport(std.fs.File.stderr().deprecatedWriter()) catch {};
         tracker.deinit();
     };
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const EventTap = @import("EventTap.zig");
 const Keycodes = @import("Keycodes.zig");
 
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 
 extern fn NSApplicationLoad() void;
 

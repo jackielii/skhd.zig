@@ -83,17 +83,14 @@ pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     try self.blacklist.put(self.allocator, owned, void{});
 }
 
-pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    // if (fmt.len != 0) {
-    //     std.fmt.invalidFmtError(fmt, self);
-    // }
-    _ = fmt;
+pub fn format(self: *const Mappings, writer: anytype) !void {
     try writer.print("Mappings {{", .{});
     try writer.print("\n  mode_map: {{", .{});
     {
         var it = self.mode_map.iterator();
         while (it.next()) |kv| {
-            try utils.indentPrint(self.allocator, writer, "    ", "\n{}", kv.value_ptr.*);
+            try writer.print("\n    ", .{});
+            try kv.value_ptr.*.format(writer);
         }
     }
     try writer.print("\n  }}", .{});
@@ -162,7 +159,7 @@ test "format" {
     defer mappings.deinit();
     const mode = try mappings.get_mode_or_create_default("default");
     // Just verify the formatting doesn't crash
-    const formatted = try std.fmt.allocPrint(alloc, "{}", .{mappings});
+    const formatted = try std.fmt.allocPrint(alloc, "{f}", .{mappings});
     defer alloc.free(formatted);
     try std.testing.expect(formatted.len > 0);
     try std.testing.expect(mode != null);

@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
@@ -54,7 +54,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     parser.parseWithPath(&mappings, content, config_file) catch |err| {
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {f}", .{parse_err});
         }
         return err;
     };
@@ -70,7 +70,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     // Log loaded modes
     var mode_iter = mappings.mode_map.iterator();
-    var modes_list = std.ArrayList(u8).init(gpa);
+    var modes_list = std.array_list.Managed(u8).init(gpa);
     defer modes_list.deinit();
     while (mode_iter.next()) |entry| {
         try modes_list.writer().print("'{s}' ", .{entry.key_ptr.*});
@@ -104,7 +104,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 pub fn deinit(self: *Skhd) void {
     // Print tracer summary before cleanup
     if (self.tracer.enabled) {
-        const stderr = std.io.getStdErr().writer();
+        const stderr = std.fs.File.stderr().deprecatedWriter();
         self.tracer.printSummary(stderr) catch {};
     }
 
@@ -118,10 +118,9 @@ pub fn deinit(self: *Skhd) void {
 }
 
 pub fn run(self: *Skhd, enable_hotload: bool) !void {
-    // Set up signal handler for config reload
     const usr1_act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigusr1 },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.USR1, &usr1_act, null);
@@ -129,7 +128,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Set up signal handler for SIGINT (Ctrl+C) to print trace summary
     const int_act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigint },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.INT, &int_act, null);
@@ -189,7 +188,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     };
 
     // Call NSApplicationLoad() like the original skhd
-    c.NSApplicationLoad();
+    @import("c.zig").NSApplicationLoad();
 
     // Always log successful event tap creation
     log.info("Event tap created successfully. skhd is now running.", .{});
@@ -505,7 +504,7 @@ fn nsEventOtherEvent(ns_event_class: c.id, event_type: c_ulong, subtype: c_short
         c_short,
         c_long,
         c_long,
-    ) callconv(.C) c.id, .{ .name = "objc_msgSend" });
+    ) callconv(.c) c.id, .{ .name = "objc_msgSend" });
 
     return msgSend(
         ns_event_class,
@@ -526,7 +525,7 @@ fn nsEventOtherEvent(ns_event_class: c.id, event_type: c_ulong, subtype: c_short
 /// Get CGEvent from NSEvent by calling [event CGEvent]
 fn nsEventToCGEvent(ns_event: c.id) c.CGEventRef {
     const sel = c.sel_registerName("CGEvent");
-    const msgSend = @extern(*const fn (c.id, c.SEL) callconv(.C) ?*anyopaque, .{ .name = "objc_msgSend" });
+    const msgSend = @extern(*const fn (c.id, c.SEL) callconv(.c) ?*anyopaque, .{ .name = "objc_msgSend" });
     return @ptrCast(msgSend(ns_event, sel));
 }
 
@@ -667,7 +666,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 }
 
 /// Signal handler for SIGUSR1 - reload configuration
-fn handleSigusr1(_: c_int) callconv(.C) void {
+fn handleSigusr1(_: c_int) callconv(.c) void {
     if (global_skhd) |skhd| {
         log.info("Received SIGUSR1, reloading configuration", .{});
         skhd.reloadConfig() catch |err| {
@@ -677,7 +676,7 @@ fn handleSigusr1(_: c_int) callconv(.C) void {
 }
 
 /// Signal handler for SIGINT - stop the run loop to allow graceful shutdown
-fn handleSigint(_: c_int) callconv(.C) void {
+fn handleSigint(_: c_int) callconv(.c) void {
     // Stop the run loop to allow graceful shutdown with defer statements
     c.CFRunLoopStop(c.CFRunLoopGetCurrent());
 }
@@ -699,7 +698,7 @@ pub fn reloadConfig(self: *Skhd) !void {
     parser.parseWithPath(&new_mappings, content, self.config_file) catch |err| {
         // Log the parse error with proper formatting
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {f}", .{parse_err});
         }
         return err;
     };

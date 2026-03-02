@@ -1,4 +1,4 @@
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 const std = @import("std");
 
 /// Fork and exec a command, detaching it from the parent process

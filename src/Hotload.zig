@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 
 /// File system event monitoring using macOS FSEvents API.
 ///
@@ -20,7 +20,7 @@ const WatchedFile = struct {
 // Core fields
 allocator: std.mem.Allocator,
 callback: Callback,
-watch_list: std.ArrayList(WatchedFile),
+watch_list: std.array_list.Managed(WatchedFile),
 enabled: bool = false,
 
 // FSEvents fields
@@ -36,7 +36,7 @@ pub fn create(allocator: std.mem.Allocator, callback: Callback) !*Hotload {
     self.* = .{
         .allocator = allocator,
         .callback = callback,
-        .watch_list = std.ArrayList(WatchedFile).init(allocator),
+        .watch_list = std.array_list.Managed(WatchedFile).init(allocator),
         .enabled = false,
         .stream = null,
         .paths = null,
@@ -207,7 +207,7 @@ fn fseventsCallback(
     event_paths: ?*anyopaque,
     event_flags: [*c]const c.FSEventStreamEventFlags,
     event_ids: [*c]const c.FSEventStreamEventId,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = stream;
     _ = event_flags;
     _ = event_ids;
@@ -267,7 +267,7 @@ test "hotload file watching" {
     const TimerContext = struct {
         count: u32 = 0,
 
-        fn timerCallback(timer: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
+        fn timerCallback(timer: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
             _ = timer;
             const self = @as(*@This(), @ptrCast(@alignCast(info.?)));
             self.count += 1;

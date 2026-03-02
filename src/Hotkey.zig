@@ -210,8 +210,7 @@ pub const ProcessCommand = union(enum) {
     }
 };
 
-pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    _ = fmt;
+pub fn format(self: *const Hotkey, writer: anytype) !void {
     try writer.print("Hotkey{{", .{});
     try writer.print("\n  mode_list: {{", .{});
     {
@@ -221,7 +220,7 @@ pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOp
         }
     }
     try writer.print("}}", .{});
-    try writer.print("\n  flags: {}", .{self.flags});
+    try writer.print("\n  flags: {f}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
     try writer.print("\n  process_mappings: {} entries", .{self.mappings.count()});
     try writer.print("\n}}", .{});

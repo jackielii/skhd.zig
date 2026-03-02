@@ -3,7 +3,7 @@ const zbench = @import("zbench");
 const Skhd = @import("skhd.zig");
 const Hotkey = @import("Hotkey.zig");
 const HotkeyOriginal = @import("Hotkey.zig");
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -179,5 +179,5 @@ pub fn main() !void {
     try bench.add("Process Mapping (Original)", benchProcessMappingOriginal, .{});
 
     // Run benchmarks
-    try bench.run(std.io.getStdOut().writer());
+    try bench.run(std.fs.File.stdout().deprecatedWriter());
 }

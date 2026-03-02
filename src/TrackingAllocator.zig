@@ -121,7 +121,7 @@ fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: us
     }
 
     // Always log allocations
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr().deprecatedWriter();
     stderr.print("[ALLOC] {} bytes at 0x{x} (total: {}, peak: {})\n", .{
         len,
         addr,
@@ -160,7 +160,7 @@ fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usi
         }
 
         // Always log resizes
-        const stderr = std.io.getStdErr().writer();
+        const stderr = std.fs.File.stderr().deprecatedWriter();
         stderr.print("[RESIZE] {} -> {} bytes at 0x{x} (total: {})\n", .{
             old_size,
             new_len,
@@ -184,7 +184,7 @@ fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usiz
         self.total_deallocations += 1;
 
         // Always log frees
-        const stderr = std.io.getStdErr().writer();
+        const stderr = std.fs.File.stderr().deprecatedWriter();
         stderr.print("[FREE] {} bytes at 0x{x} (total: {})\n", .{
             entry.value.size,
             addr,
@@ -279,7 +279,7 @@ pub fn printReport(self: *TrackingAllocator, writer: anytype) !void {
 fn dumpStackTrace(trace: std.builtin.StackTrace) void {
     if (trace.index == 0) return;
 
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr().deprecatedWriter();
     // Simple stack trace dumping for now - just print the addresses
     stderr.print("Stack trace:\n", .{}) catch {};
     for (trace.instruction_addresses[0..trace.index]) |addr| {

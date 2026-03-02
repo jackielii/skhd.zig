@@ -1,5 +1,4 @@
-// Unified C imports for the project
-pub usingnamespace @cImport({
+pub const c_impl = @cImport({
     @cInclude("Carbon/Carbon.h");
     @cInclude("CoreServices/CoreServices.h");
     @cInclude("objc/objc.h");
@@ -11,5 +10,5 @@ pub usingnamespace @cImport({
     @cInclude("IOKit/hidsystem/ev_keymap.h");
 });
 
-// Additional declarations
+// Additional declarations (module-level, not inside c_impl)
 pub extern fn NSApplicationLoad() void;

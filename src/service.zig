@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 const log = std.log.scoped(.service);
 
 // Import C function
@@ -188,11 +188,11 @@ pub fn startService(allocator: std.mem.Allocator) !void {
     try child.spawn();
 
     // Collect stderr to show any launchctl errors
-    var stderr_data = std.ArrayList(u8).init(allocator);
+    var stderr_data = std.array_list.Managed(u8).init(allocator);
     defer stderr_data.deinit();
 
     if (child.stderr) |stderr| {
-        try stderr.reader().readAllArrayList(&stderr_data, 8192);
+        try stderr.deprecatedReader().readAllArrayList(&stderr_data, 8192);
     }
 
     const term = try child.wait();
@@ -233,7 +233,7 @@ pub fn stopService(allocator: std.mem.Allocator) !void {
 pub fn restartService(allocator: std.mem.Allocator) !void {
     try stopService(allocator);
     // Small delay to ensure service is fully stopped
-    std.time.sleep(1 * std.time.ns_per_s);
+    std.Thread.sleep(1 * std.time.ns_per_s);
     try startService(allocator);
 }
 

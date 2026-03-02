@@ -41,11 +41,7 @@ pub fn set_command(self: *Mode, command: []const u8) !void {
     self.command = try self.allocator.dupeZ(u8, command);
 }
 
-pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    // if (fmt.len != 0) {
-    //     std.fmt.invalidFmtError(fmt, self);
-    // }
-    _ = fmt;
+pub fn format(self: *const Mode, writer: anytype) !void {
     try writer.print("Mode{{", .{});
     try writer.print("\n  name: {s}", .{self.name});
     try writer.print("\n  command: {?s}", .{self.command});
@@ -55,7 +51,8 @@ pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOpti
     {
         var it = self.hotkey_map.iterator();
         while (it.next()) |kv| {
-            try utils.indentPrint(self.allocator, writer, "    ", "{}", kv.key_ptr.*);
+            try writer.print("\n    ", .{});
+            try kv.key_ptr.*.format(writer);
         }
     }
     try writer.print("\n  }}", .{});

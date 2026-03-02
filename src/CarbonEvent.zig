@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 
 const CarbonEvent = @This();
 const log = std.log.scoped(.carbon_event);

@@ -21,7 +21,7 @@ pub fn indentPrint(alloc: std.mem.Allocator, writer: anytype, padding: []const u
 
 test {
     const alloc = std.testing.allocator;
-    var list = std.ArrayList(u8).init(alloc);
+    var list = std.array_list.Managed(u8).init(alloc);
     defer list.deinit();
     const writer = list.writer();
 

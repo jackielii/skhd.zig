@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig");
+const c = @import("c.zig").c_impl;
 const log = std.log.scoped(.keycodes);
 
 const layout_dependent_keycodes = [_]u32{
@@ -59,9 +59,7 @@ pub const ModifierFlag = packed struct(u32) {
         const m2: u32 = @bitCast(other);
         return @bitCast(m1 | m2);
     }
-    pub fn format(self: *const ModifierFlag, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-
+    pub fn format(self: *const ModifierFlag, writer: anytype) !void {
         var i: u32 = 0;
         inline for (@typeInfo(@This()).@"struct".fields) |field| {
             const name = field.name;
@@ -79,7 +77,7 @@ pub const ModifierFlag = packed struct(u32) {
 test "format ModifierFlag" {
     const flag = ModifierFlag{ .alt = true, .shift = true };
     // Verify formatting works without printing
-    const formatted = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{flag});
+    const formatted = try std.fmt.allocPrint(std.testing.allocator, "{f}", .{flag});
     defer std.testing.allocator.free(formatted);
     try std.testing.expectEqualStrings("alt, shift", formatted);
 }

@@ -11,6 +11,7 @@ BUNDLE_ID="${3:-com.jackielii.skhd}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/assets/Info.plist.template"
+LAUNCH_AGENT_PLIST="$REPO_ROOT/assets/LaunchAgent.plist"
 VERSION_FILE="$REPO_ROOT/VERSION"
 
 if [ ! -f "$BINARY_PATH" ]; then
@@ -19,6 +20,10 @@ if [ ! -f "$BINARY_PATH" ]; then
 fi
 if [ ! -f "$TEMPLATE" ]; then
     echo "Error: Info.plist template not found at $TEMPLATE" >&2
+    exit 1
+fi
+if [ ! -f "$LAUNCH_AGENT_PLIST" ]; then
+    echo "Error: LaunchAgent.plist not found at $LAUNCH_AGENT_PLIST" >&2
     exit 1
 fi
 if [ ! -f "$VERSION_FILE" ]; then
@@ -34,9 +39,15 @@ VERSION=$(tr -d '\n' < "$VERSION_FILE")
 TMP_APP="${APP_PATH}.tmp"
 rm -rf "$TMP_APP"
 mkdir -p "$TMP_APP/Contents/MacOS"
+mkdir -p "$TMP_APP/Contents/Library/LaunchAgents"
 
 sed -e "s/__VERSION__/${VERSION}/g" -e "s/__BUNDLE_ID__/${BUNDLE_ID}/g" \
     "$TEMPLATE" > "$TMP_APP/Contents/Info.plist"
+# SMAppService.agent(plistName:) reads its target launchd plist from the
+# bundle's Contents/Library/LaunchAgents/<plistName>. Filename matches
+# the bundle id so the runtime register call can find it by passing
+# "${BUNDLE_ID}.plist".
+cp "$LAUNCH_AGENT_PLIST" "$TMP_APP/Contents/Library/LaunchAgents/${BUNDLE_ID}.plist"
 cp "$BINARY_PATH" "$TMP_APP/Contents/MacOS/skhd"
 chmod 755 "$TMP_APP/Contents/MacOS/skhd"
 

@@ -4,6 +4,9 @@ fn linkFrameworks(exe: *std.Build.Step.Compile) void {
     exe.linkFramework("Cocoa");
     exe.linkFramework("Carbon");
     exe.linkFramework("CoreServices");
+    // ServiceManagement: SMAppService.agent / register / unregister, used
+    // by --register-service to register the bundled LaunchAgent with BTM.
+    exe.linkFramework("ServiceManagement");
 }
 
 fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {

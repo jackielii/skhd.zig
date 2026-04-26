@@ -230,10 +230,13 @@ fn printHelp() void {
         \\      --help             Show this help message
         \\
         \\Service Management:
-        \\      --install-service   Install launchd service
-        \\      --uninstall-service Remove launchd service
+        \\      --install-service   Register the bundled LaunchAgent with macOS
+        \\                          via SMAppService (BTM-tracked, auto-starts
+        \\                          at login)
+        \\      --uninstall-service Unregister and remove
         \\      --start-service     Start the service
-        \\      --stop-service      Stop the service
+        \\      --stop-service      Stop the service (transient — relaunches
+        \\                          on next login)
         \\      --restart-service   Restart the service
         \\      --status            Check service status
         \\

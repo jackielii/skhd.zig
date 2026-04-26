@@ -1,11 +1,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c.zig");
+const sm = @import("sm_app_service.zig");
 const log = std.log.scoped(.service);
 
 // Import C functions
 extern "c" fn getpid() c_int;
 extern "c" fn getuid() c_uint;
+
+/// Bundle ID of the agent the daemon registers itself as. Must match the
+/// CFBundleIdentifier embedded in skhd.app/Contents/Info.plist *and* the
+/// filename of the bundled launchd plist
+/// (skhd.app/Contents/Library/LaunchAgents/<this>.plist).
+const BUNDLE_ID = "com.jackielii.skhd";
+const LAUNCH_AGENT_PLIST_NAME: [*:0]const u8 = BUNDLE_ID ++ ".plist";
 
 /// Check if the current process has accessibility permissions
 pub fn hasAccessibilityPermissions() bool {
@@ -88,40 +96,6 @@ pub fn isProcessRunning(pid: i32) bool {
     return true;
 }
 
-/// Launchd plist template
-const plist_template =
-    \\<?xml version="1.0" encoding="UTF-8"?>
-    \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-    \\<plist version="1.0">
-    \\<dict>
-    \\    <key>Label</key>
-    \\    <string>com.jackielii.skhd</string>
-    \\    <key>ProgramArguments</key>
-    \\    <array>
-    \\        <string>{s}</string>
-    \\    </array>
-    \\    <key>EnvironmentVariables</key>
-    \\    <dict>
-    \\        <key>PATH</key>
-    \\        <string>{s}</string>
-    \\    </dict>
-    \\    <key>RunAtLoad</key>
-    \\    <true/>
-    \\    <key>KeepAlive</key>
-    \\    <true/>
-    \\    <key>StandardOutPath</key>
-    \\    <string>{s}/Library/Logs/skhd.log</string>
-    \\    <key>StandardErrorPath</key>
-    \\    <string>{s}/Library/Logs/skhd.log</string>
-    \\    <key>ThrottleInterval</key>
-    \\    <integer>10</integer>
-    \\    <key>ProcessType</key>
-    \\    <string>Interactive</string>
-    \\</dict>
-    \\</plist>
-    \\
-;
-
 /// Pick a path to recommend in error messages for the System Settings →
 /// Accessibility picker. Tahoe's picker only accepts `.app` bundles, and TCC
 /// keys entries by the running process's signature — so we prefer the `.app`
@@ -182,145 +156,108 @@ pub fn getServicePath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents/com.jackielii.skhd.plist", .{home});
 }
 
-/// Install or update the service plist file (silent version)
-fn installOrUpdateService(allocator: std.mem.Allocator) !void {
-    const service_path = try getServicePath(allocator);
-    defer allocator.free(service_path);
 
-    // Get the current executable path, then prefer a Homebrew-stable symlink
-    // when available so the plist survives `brew upgrade` + `brew cleanup`.
-    const raw_exe_path = try std.fs.selfExePathAlloc(allocator);
-    defer allocator.free(raw_exe_path);
-    const exe_path = try resolveStableExePath(allocator, raw_exe_path);
-    defer allocator.free(exe_path);
-
-    // Get PATH environment variable
-    const path_env = std.posix.getenv("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
-
-    const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
-
-    // Format the plist content
-    const plist_content = try std.fmt.allocPrint(allocator, plist_template, .{
-        exe_path,
-        path_env,
-        home,
-        home,
-    });
-    defer allocator.free(plist_content);
-
-    // Create LaunchAgents directory if it doesn't exist
-    const launch_agents_dir = try std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents", .{home});
-    defer allocator.free(launch_agents_dir);
-
-    std.fs.makeDirAbsolute(launch_agents_dir) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
-
-    // Ensure ~/Library/Logs exists so launchd can write Standard{Out,Error}Path
-    const logs_dir = try std.fmt.allocPrint(allocator, "{s}/Library/Logs", .{home});
-    defer allocator.free(logs_dir);
-
-    std.fs.makeDirAbsolute(logs_dir) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
-
-    // Write the plist file
-    const file = try std.fs.createFileAbsolute(service_path, .{});
-    defer file.close();
-    try file.writeAll(plist_content);
-}
-
+/// Register the bundled LaunchAgent with macOS Background Tasks Manager via
+/// SMAppService and clean up any pre-0.0.21 plist installed at
+/// ~/Library/LaunchAgents/. With the SMAppService flow, BTM auto-tracks the
+/// agent so it actually auto-starts at login (the legacy hand-installed
+/// plist is silently disallowed by BTM on Sequoia/Tahoe — that's the
+/// "skhd doesn't always start after reboot" bug at its root).
 pub fn installService(allocator: std.mem.Allocator) !void {
-    // Use the helper function to do the actual installation
-    try installOrUpdateService(allocator);
-
-    const service_path = try getServicePath(allocator);
-    defer allocator.free(service_path);
-
-    std.debug.print("Service installed at: {s}\n", .{service_path});
-    std.debug.print("\nNext steps:\n", .{});
-    std.debug.print("1. Grant accessibility permissions to skhd in System Settings\n", .{});
-    std.debug.print("2. Run: skhd --start-service\n", .{});
-    std.debug.print("\nNote: The service will start automatically on login once enabled.\n", .{});
+    cleanupLegacyInstall(allocator);
+    try registerWithBTM();
 }
 
 pub fn uninstallService(allocator: std.mem.Allocator) !void {
-    const service_path = try getServicePath(allocator);
-    defer allocator.free(service_path);
+    cleanupLegacyInstall(allocator);
 
-    // First try to stop the service
-    stopService(allocator) catch {};
-
-    // Remove the plist file
-    std.fs.deleteFileAbsolute(service_path) catch |err| {
-        if (err != error.FileNotFound) return err;
+    const service = sm.agentService(LAUNCH_AGENT_PLIST_NAME) orelse {
+        std.debug.print("SMAppService unavailable; nothing to unregister.\n", .{});
+        return;
     };
-
-    std.debug.print("Service uninstalled\n", .{});
+    sm.unregister(service) catch |err| {
+        // unregister fails if the service was never registered — treat as success.
+        log.info("Unregister returned: {}", .{err});
+    };
+    std.debug.print("Service unregistered.\n", .{});
 }
 
 pub fn startService(allocator: std.mem.Allocator) !void {
-    // Always install/update the service first to ensure it's up to date
-    try installOrUpdateService(allocator);
+    _ = allocator;
+    try registerWithBTM();
+}
 
-    const service_path = try getServicePath(allocator);
+/// Register (or re-register) the bundled LaunchAgent and print the
+/// resulting BTM status. Idempotent — calling on an already-registered
+/// agent re-loads it (useful as the implementation of both
+/// --install-service and --start-service).
+fn registerWithBTM() !void {
+    const service = sm.agentService(LAUNCH_AGENT_PLIST_NAME) orelse {
+        std.debug.print("Failed to obtain SMAppService instance.\n", .{});
+        std.debug.print("Verify the bundled plist exists at:\n", .{});
+        std.debug.print("  <skhd.app>/Contents/Library/LaunchAgents/{s}\n", .{std.mem.span(LAUNCH_AGENT_PLIST_NAME)});
+        return error.SMAppServiceUnavailable;
+    };
+
+    sm.register(service) catch |err| {
+        std.debug.print("Failed to register service: {}\n", .{err});
+        std.debug.print("\nMake sure you're running skhd from inside its .app bundle.\n", .{});
+        std.debug.print("Try: /opt/homebrew/opt/skhd-zig/skhd.app/Contents/MacOS/skhd --install-service\n", .{});
+        return err;
+    };
+
+    const st = sm.status(service);
+    std.debug.print("Service registered with macOS.\n", .{});
+    std.debug.print("Status: {s}\n", .{st.describe()});
+    std.debug.print("Logs: {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
+
+    if (st == .requires_approval) {
+        std.debug.print("\nMacOS requires approval before the agent can run:\n", .{});
+        std.debug.print("1. Open System Settings → General → Login Items & Extensions\n", .{});
+        std.debug.print("2. Find 'skhd' under 'Allow in the Background' and toggle it on\n", .{});
+        std.debug.print("3. Then run: skhd --restart-service\n", .{});
+    }
+}
+
+/// Best-effort cleanup of the pre-0.0.21 install layout: bootout the
+/// hand-installed launchd job and delete the plist at
+/// ~/Library/LaunchAgents/com.jackielii.skhd.plist. Silent if the legacy
+/// state isn't present. Run on every install/uninstall to make sure we
+/// never have both a legacy agent and a BTM-registered agent racing for
+/// the event tap.
+fn cleanupLegacyInstall(allocator: std.mem.Allocator) void {
+    const service_path = getServicePath(allocator) catch return;
     defer allocator.free(service_path);
 
+    std.fs.accessAbsolute(service_path, .{}) catch return;
+
+    log.info("Found legacy plist at {s}, cleaning up.", .{service_path});
+
+    // Bootout from launchd (no-op if not loaded).
     const uid = getuid();
-    const target = try std.fmt.allocPrint(allocator, "gui/{d}/com.jackielii.skhd", .{uid});
+    const target = std.fmt.allocPrint(allocator, "gui/{d}/{s}", .{ uid, BUNDLE_ID }) catch return;
     defer allocator.free(target);
-    const domain = try std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
-    defer allocator.free(domain);
-
-    // Clear any persistent disable flag. Older versions of skhd used
-    // `launchctl unload -w` for --stop-service, which writes a flag to the
-    // disable list that survives reboot — so on the next login launchd
-    // refuses to auto-load the agent even with RunAtLoad=true. `enable` is
-    // idempotent and a no-op when the agent isn't disabled.
     {
-        const enable_argv = [_][]const u8{ "launchctl", "enable", target };
-        var enable_child = std.process.Child.init(&enable_argv, allocator);
-        enable_child.stdout_behavior = .Ignore;
-        enable_child.stderr_behavior = .Ignore;
-        enable_child.spawn() catch {};
-        _ = enable_child.wait() catch {};
+        const argv = [_][]const u8{ "launchctl", "bootout", target };
+        var child = std.process.Child.init(&argv, allocator);
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.spawn() catch {};
+        _ = child.wait() catch {};
     }
 
-    const argv = [_][]const u8{ "launchctl", "bootstrap", domain, service_path };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Pipe;
-
-    try child.spawn();
-
-    // Collect stderr to show any launchctl errors
-    var stderr_data = std.ArrayList(u8).init(allocator);
-    defer stderr_data.deinit();
-
-    if (child.stderr) |stderr| {
-        try stderr.reader().readAllArrayList(&stderr_data, 8192);
+    // Older code wrote a persistent `disable` flag via `unload -w` — clear
+    // it so a future register isn't silently blocked.
+    {
+        const argv = [_][]const u8{ "launchctl", "enable", target };
+        var child = std.process.Child.init(&argv, allocator);
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.spawn() catch {};
+        _ = child.wait() catch {};
     }
 
-    const term = try child.wait();
-
-    if (term != .Exited or term.Exited != 0) {
-        // bootstrap returns errno 17 (EEXIST, "File exists") or 37
-        // ("Operation already in progress") when the agent is already
-        // loaded. Both are no-ops for --start-service.
-        const already_loaded = std.mem.indexOf(u8, stderr_data.items, "File exists") != null or
-            std.mem.indexOf(u8, stderr_data.items, "already in progress") != null;
-        if (!already_loaded) {
-            if (stderr_data.items.len > 0) {
-                std.debug.print("Failed to start service: {s}\n", .{stderr_data.items});
-            } else {
-                std.debug.print("Failed to start service. Check ~/Library/Logs/skhd.log for details.\n", .{});
-            }
-            return error.ServiceStartFailed;
-        }
-    }
-
-    std.debug.print("Service started successfully.\n", .{});
-    std.debug.print("Check logs at: {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
+    std.fs.deleteFileAbsolute(service_path) catch {};
 }
 
 pub fn stopService(allocator: std.mem.Allocator) !void {
@@ -502,19 +439,19 @@ fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) Ev
 }
 
 pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
-    const service_path = try getServicePath(allocator);
-    defer allocator.free(service_path);
-
-    const service_installed = blk: {
-        std.fs.accessAbsolute(service_path, .{}) catch break :blk false;
-        break :blk true;
-    };
-
     const daemon_state = getDaemonState(allocator);
     const tap_health = getEventTapHealth(allocator, daemon_state);
 
+    // Determine SMAppService registration status. Don't use the legacy
+    // ~/Library/LaunchAgents/<id>.plist file as a marker any more — that
+    // path is empty for SMAppService-managed installs (our 0.0.21+ flow).
+    const sm_service = sm.agentService(LAUNCH_AGENT_PLIST_NAME);
+    const sm_status = if (sm_service) |svc| sm.status(svc) else sm.Status.not_found;
+    const installed = sm_status != .not_registered and sm_status != .not_found;
+
     std.debug.print("skhd service status:\n", .{});
-    std.debug.print("  Service installed:    {s}\n", .{if (service_installed) "Yes" else "No"});
+    std.debug.print("  Service installed:    {s}\n", .{if (installed) "Yes" else "No"});
+    std.debug.print("  Registration status:  {s}\n", .{sm_status.describe()});
 
     switch (daemon_state) {
         .running => |pid| std.debug.print("  Daemon running:       Yes (PID {d})\n", .{pid}),
@@ -528,14 +465,17 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
         .unknown => "Unknown (no recent event-tap activity in log)",
     };
     std.debug.print("  Hotkeys functional:   {s}\n", .{tap_label});
+    std.debug.print("  Log file:             {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
 
-    if (service_installed) {
-        std.debug.print("  Service path:         {s}\n", .{service_path});
-        std.debug.print("  Log file:             {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
-    }
-
-    if (!service_installed) {
+    if (!installed) {
         std.debug.print("\nTo install the service, run: skhd --install-service\n", .{});
+        std.debug.print("(must be invoked from inside the .app — typically via\n", .{});
+        std.debug.print(" /Applications/skhd.app/Contents/MacOS/skhd --install-service)\n", .{});
+    } else if (sm_status == .requires_approval) {
+        std.debug.print("\nMacOS requires approval before the agent can run:\n", .{});
+        std.debug.print("1. Open System Settings → General → Login Items & Extensions\n", .{});
+        std.debug.print("2. Find 'skhd' under 'Allow in the Background' and toggle it on\n", .{});
+        std.debug.print("3. Then run: skhd --restart-service\n", .{});
     } else if (daemon_state == .not_loaded) {
         std.debug.print("\nTo start the service, run: skhd --start-service\n", .{});
     } else if (tap_health == .denied) {
@@ -548,3 +488,4 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
         std.debug.print("\nFor more troubleshooting, see docs/CODE_SIGNING.md.\n", .{});
     }
 }
+

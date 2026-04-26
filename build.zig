@@ -79,17 +79,48 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Code signing step
+    const installed_exe = b.getInstallPath(.bin, exe.name);
+    const installed_app = b.getInstallPath(.prefix, "skhd.app");
+
+    // .app bundle step. Wraps the binary into skhd.app so macOS Tahoe's
+    // Accessibility picker accepts it and TCC keys entries by bundle ID
+    // (com.jackielii.skhd) instead of by the binary's path. Inner binary at
+    // skhd.app/Contents/MacOS/skhd is a copy, not a symlink, so codesigning
+    // works.
+    const app_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/make-app.sh",
+    });
+    app_cmd.addArg(installed_exe);
+    app_cmd.addArg(installed_app);
+    app_cmd.step.dependOn(b.getInstallStep());
+
+    const app_step = b.step("app", "Build the skhd.app bundle wrapper");
+    app_step.dependOn(&app_cmd.step);
+
+    // Code signing. Passing the .app bundle signs both the inner Mach-O and
+    // the bundle; passing the bare binary signs just it. Default to .app when
+    // it exists so users iterating with `zig build app && zig build sign` get
+    // a properly-signed bundle.
     const sign_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",
         "scripts/codesign.sh",
     });
-    const installed_exe = b.getInstallPath(.bin, exe.name);
     sign_cmd.addArg(installed_exe);
     sign_cmd.step.dependOn(b.getInstallStep());
 
     const sign_step = b.step("sign", "Code sign the binary (required for accessibility permissions on macOS 15+)");
     sign_step.dependOn(&sign_cmd.step);
+
+    const sign_app_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/codesign.sh",
+    });
+    sign_app_cmd.addArg(installed_app);
+    sign_app_cmd.step.dependOn(&app_cmd.step);
+
+    const sign_app_step = b.step("sign-app", "Build and code sign the skhd.app bundle");
+    sign_app_step.dependOn(&sign_app_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
 

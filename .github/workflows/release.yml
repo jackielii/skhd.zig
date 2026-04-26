@@ -102,32 +102,46 @@ jobs:
           echo "SHOULD_SIGN=false" >> $GITHUB_ENV
         fi
 
-    - name: Build Release
+    - name: Build Release (binary + .app bundle)
       run: |
         zig build -Doptimize=ReleaseFast
+        zig build app -Doptimize=ReleaseFast
+        # Stage release artifacts at the working tree root for tarballing.
         mv zig-out/bin/skhd skhd-${{ matrix.arch }}-macos
+        mv zig-out/skhd.app skhd-${{ matrix.arch }}-macos.app
 
-    - name: Code Sign Binary
+    - name: Code Sign Binary and Bundle
       if: env.SHOULD_SIGN == 'true'
       run: |
+        # Sign the bare binary (kept for users who only need CLI invocation).
         codesign -f -s "skhd-cert" -i com.jackielii.skhd skhd-${{ matrix.arch }}-macos
         codesign -dv skhd-${{ matrix.arch }}-macos
+        # Sign the bundle: inner Mach-O first, then the bundle layer.
+        codesign -f -s "skhd-cert" -i com.jackielii.skhd \
+          skhd-${{ matrix.arch }}-macos.app/Contents/MacOS/skhd
+        codesign -f -s "skhd-cert" -i com.jackielii.skhd \
+          skhd-${{ matrix.arch }}-macos.app
+        codesign -dv --verbose=2 skhd-${{ matrix.arch }}-macos.app
 
     - name: Create tarball
       run: |
+        # Ship both the bare binary tarball (back-compat for source-style
+        # installs) and the .app bundle tarball (the supported Tahoe path).
         tar -czf skhd-${{ matrix.arch }}-macos.tar.gz skhd-${{ matrix.arch }}-macos
+        tar -czf skhd-${{ matrix.arch }}-macos-app.tar.gz skhd-${{ matrix.arch }}-macos.app
 
     - name: Cleanup Keychain
       if: always() && env.SHOULD_SIGN == 'true'
       run: |
         security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
     
-    - name: Upload Release Asset
+    - name: Upload Release Assets
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         gh release upload ${{ github.ref_name }} \
           ./skhd-${{ matrix.arch }}-macos.tar.gz \
+          ./skhd-${{ matrix.arch }}-macos-app.tar.gz \
           --repo ${{ github.repository }} \
           --clobber
 

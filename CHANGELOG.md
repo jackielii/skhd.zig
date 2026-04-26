@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23] - 2026-04-26
+
+### Fixed
+- **Event tap now actually detaches on Accessibility revoke.** v0.0.22 relied on `kCGEventTapDisabledByUserInput` firing when Accessibility was toggled off at runtime, but the callback isn't actually fired in that case — the OS just stops delivering events to the tap, leaving the keyboard captured with no signal `keyHandler` could react to. The one-shot recovery timer is replaced with an always-on 1 s `CFRunLoopTimer` that reconciles the tap with `AXIsProcessTrusted` in both directions: detach proactively on revoke, recreate on re-grant. `AXIsProcessTrusted` is cached at the OS level and runs in ~µs, so the poll has no measurable overhead and the keydown / `NX_SYSDEFINED` hot path is untouched.
+- **Daemon log lines actually reach `~/Library/Logs/skhd.log`.** SMAppService's bundled `LaunchAgent.plist` sets no `StandardErrorPath`, so stderr went to `/dev/null` and every `log.err` / `log.info` from the daemon was silently dropped. Stderr is now redirected to the log file when the process is launchd-managed (detected by `XPC_SERVICE_NAME != "0"` — the variable is set to the placeholder `"0"` for normal user-shell processes, so a plain null-check matched everything). Foreground `-V` runs and `zig build`-spawned subprocesses keep stderr at the terminal/pipe.
+- **`std_options.log_level` floored at `.warn`** so the session-start marker (`=== skhd <ver> started at <iso ts> (PID N) ===`) survives ReleaseFast builds, which would otherwise filter everything below `.err`.
+
+### Changed
+- **Foreground runs use silent `AXIsProcessTrusted` instead of `AXIsProcessTrustedWithOptions(prompt: true)`.** The TCC dialog popped on every `zig build run` / `zig build alloc` iteration was noise, and on Tahoe TCC mis-displays the path when self-signed dev/prod bundles share a `com.jackielii.skhd*` prefix. The daemon install path still prompts on first install.
+
+### Internal
+- **`zig build alloc` is routed through the dev `.app` + sign chain** so the alloc binary inherits the dev TCC slot. A bare Mach-O can't be granted Accessibility on Tahoe, so the previous setup couldn't actually run end-to-end.
+
 ## [0.0.22] - 2026-04-26
 
 ### Fixed
@@ -367,7 +380,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.22...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.23...HEAD
+[0.0.23]: https://github.com/jackielii/skhd.zig/compare/v0.0.22...v0.0.23
 [0.0.22]: https://github.com/jackielii/skhd.zig/compare/v0.0.21...v0.0.22
 [0.0.21]: https://github.com/jackielii/skhd.zig/compare/v0.0.20...v0.0.21
 [0.0.20]: https://github.com/jackielii/skhd.zig/compare/v0.0.19...v0.0.20

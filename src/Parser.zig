@@ -1222,11 +1222,19 @@ fn parse_remap_decl(self: *Parser, mappings: *Mappings) !void {
         return error.ParseErrorOccurred;
     }
 
+    // Branch: colon form (`.remap X [device d] : Y`) vs block form
+    // (`.remap X [device d] { tap: ..., hold: ..., ... }`).
+    if (self.peek_check(.Token_BeginBlock)) {
+        _ = self.advance();
+        try self.parse_remap_block_body(mappings, src_token, src_usage, alias_name);
+        return;
+    }
+
     // Destination keysym. Top-level `:` lexes as Token_Command grabbing
     // to newline — the dest is just the trimmed text.
     if (!self.match(.Token_Command)) {
         const token = self.peek() orelse self.previous();
-        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ':' followed by destination key", self.current_file_path);
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ':' followed by destination key, or '{' for the tap-hold block form", self.current_file_path);
         return error.ParseErrorOccurred;
     }
     const dst_token = self.previous();
@@ -1244,13 +1252,161 @@ fn parse_remap_decl(self: *Parser, mappings: *Mappings) !void {
 
     mappings.add_remap(src_usage, dst_usage, alias_name) catch |err| {
         if (err == error.RemapConflict) {
-            const msg = try std.fmt.allocPrint(self.allocator, "Source key '{s}' is already remapped on device '{s}'", .{ src_token.text, alias_name });
+            const msg = try std.fmt.allocPrint(self.allocator, "Source key '{s}' is already claimed by another .remap or .remap{{}} on device '{s}'", .{ src_token.text, alias_name });
             defer self.allocator.free(msg);
             self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
             return error.ParseErrorOccurred;
         }
         return err;
     };
+}
+
+/// Parse the body of `.remap X [device d] { ... }`. The opening `{` has
+/// already been consumed. Fields:
+///
+///   tap : <keysym>                 (required)
+///   hold : <keysym>                (required)
+///   timeout : <ms>                 (default 200)
+///   permissive_hold : on|off       (default on)
+///   hold_on_other_key_press : on|off  (default off)
+///   retro_tap : on|off             (default off)
+///
+/// Field order is free; commas optional. Unknown fields error loudly so
+/// future Phase-4 extensions (`hold: <mode_name>`, etc.) land cleanly.
+fn parse_remap_block_body(self: *Parser, mappings: *Mappings, src_token: Token, src_usage: u32, alias_name: []const u8) !void {
+    var tap_usage: ?u32 = null;
+    var hold_usage: ?u32 = null;
+    var timeout_ms: u32 = 200;
+    var permissive_hold: bool = true;
+    var hold_on_other_key_press: bool = false;
+    var retro_tap: bool = false;
+
+    while (!self.match(.Token_EndBlock)) {
+        if (!self.match(.Token_Identifier)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected field name (tap, hold, timeout, permissive_hold, hold_on_other_key_press, retro_tap) or '}'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        const field_token = self.previous();
+        const field = field_token.text;
+
+        if (!self.match(.Token_Colon)) {
+            const token = self.peek() orelse self.previous();
+            const msg = try std.fmt.allocPrint(self.allocator, "Expected ':' after field name '{s}'", .{field});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        if (std.mem.eql(u8, field, "tap")) {
+            tap_usage = try self.parse_keysym_value();
+        } else if (std.mem.eql(u8, field, "hold")) {
+            hold_usage = try self.parse_keysym_value();
+        } else if (std.mem.eql(u8, field, "timeout")) {
+            timeout_ms = try self.parse_duration_ms();
+        } else if (std.mem.eql(u8, field, "permissive_hold")) {
+            permissive_hold = try self.parse_bool_on_off();
+        } else if (std.mem.eql(u8, field, "hold_on_other_key_press")) {
+            hold_on_other_key_press = try self.parse_bool_on_off();
+        } else if (std.mem.eql(u8, field, "retro_tap")) {
+            retro_tap = try self.parse_bool_on_off();
+        } else {
+            const msg = try std.fmt.allocPrint(self.allocator, "Unknown field '{s}' in .remap block. Supported: tap, hold, timeout, permissive_hold, hold_on_other_key_press, retro_tap", .{field});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, field_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        _ = self.match(.Token_Comma);
+    }
+
+    if (tap_usage == null) {
+        self.error_info = try ParseError.fromToken(self.allocator, src_token, "Missing required field 'tap' in .remap block", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (hold_usage == null) {
+        self.error_info = try ParseError.fromToken(self.allocator, src_token, "Missing required field 'hold' in .remap block. (For a plain remap with no tap-vs-hold, use the colon form: .remap KEY [device D] : TARGET)", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    mappings.add_taphold(.{
+        .src_usage = src_usage,
+        .tap_usage = tap_usage.?,
+        .hold_usage = hold_usage.?,
+        .device_alias = alias_name,
+        .timeout_ms = timeout_ms,
+        .permissive_hold = permissive_hold,
+        .hold_on_other_key_press = hold_on_other_key_press,
+        .retro_tap = retro_tap,
+    }) catch |err| {
+        if (err == error.RemapConflict) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Source key '{s}' is already claimed by another .remap or .remap{{}} on device '{s}'", .{ src_token.text, alias_name });
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return err;
+    };
+}
+
+fn parse_keysym_value(self: *Parser) !u32 {
+    const token = self.peek() orelse {
+        self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Expected key name", self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+    switch (token.type) {
+        .Token_Literal, .Token_Modifier, .Token_Identifier, .Token_Key => {},
+        else => {
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected key name (e.g., escape, lctrl, space)", self.current_file_path);
+            return error.ParseErrorOccurred;
+        },
+    }
+    self.advance();
+    return HidKeyMap.lookup(token.text) orelse {
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown key '{s}'. Supported names live in src/HidKeyMap.zig.", .{token.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+}
+
+fn parse_duration_ms(self: *Parser) !u32 {
+    if (!self.match(.Token_Key)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected number for duration (e.g., 120 or 120ms)", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const num_token = self.previous();
+    const value = std.fmt.parseInt(u32, num_token.text, 10) catch {
+        const msg = try std.fmt.allocPrint(self.allocator, "Invalid duration '{s}'", .{num_token.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, num_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+    // Optional `ms` unit suffix. Today it's accepted-and-ignored
+    // (timeouts are already in ms). If we ever support seconds the
+    // suffix becomes meaningful.
+    if (self.peek_check(.Token_Identifier)) {
+        if (self.peek()) |t| {
+            if (std.mem.eql(u8, t.text, "ms")) _ = self.advance();
+        }
+    }
+    return value;
+}
+
+fn parse_bool_on_off(self: *Parser) !bool {
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected 'on' or 'off'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const t = self.previous();
+    if (std.mem.eql(u8, t.text, "on") or std.mem.eql(u8, t.text, "true")) return true;
+    if (std.mem.eql(u8, t.text, "off") or std.mem.eql(u8, t.text, "false")) return false;
+    const msg = try std.fmt.allocPrint(self.allocator, "Expected 'on' or 'off', got '{s}'", .{t.text});
+    defer self.allocator.free(msg);
+    self.error_info = try ParseError.fromToken(self.allocator, t, msg, self.current_file_path);
+    return error.ParseErrorOccurred;
 }
 
 /// Parse `.device <name> { vendor: 0x..., product: 0x... }`. The
@@ -1632,6 +1788,139 @@ test ".remap duplicate src+device is a parse error" {
         \\.device builtin { vendor: 0x05AC, product: 0x0342 }
         \\.remap caps_lock [device builtin] : lctrl
         \\.remap caps_lock [device builtin] : lshift
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap block form registers a taphold with defaults" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] {
+        \\    tap : escape
+        \\    hold : lctrl
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), mappings.tapholds.items.len);
+    const t = mappings.tapholds.items[0];
+    try std.testing.expectEqual(@as(u32, 0x39), t.src_usage);
+    try std.testing.expectEqual(@as(u32, 0x29), t.tap_usage);
+    try std.testing.expectEqual(@as(u32, 0xE0), t.hold_usage);
+    try std.testing.expectEqualStrings("builtin", t.device_alias);
+    // Defaults
+    try std.testing.expectEqual(@as(u32, 200), t.timeout_ms);
+    try std.testing.expectEqual(true, t.permissive_hold);
+    try std.testing.expectEqual(false, t.hold_on_other_key_press);
+    try std.testing.expectEqual(false, t.retro_tap);
+}
+
+test ".remap block form parses all knobs" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] {
+        \\    tap : escape
+        \\    hold : lctrl
+        \\    timeout : 120ms
+        \\    permissive_hold : on
+        \\    hold_on_other_key_press : off
+        \\    retro_tap : off
+        \\}
+    );
+
+    const t = mappings.tapholds.items[0];
+    try std.testing.expectEqual(@as(u32, 120), t.timeout_ms);
+    try std.testing.expectEqual(true, t.permissive_hold);
+    try std.testing.expectEqual(false, t.hold_on_other_key_press);
+    try std.testing.expectEqual(false, t.retro_tap);
+}
+
+test ".remap block form mixes on/off with defaults" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap space [device builtin] {
+        \\    tap : space
+        \\    hold : lalt
+        \\    timeout : 300
+        \\    retro_tap : on
+        \\}
+    );
+
+    const t = mappings.tapholds.items[0];
+    try std.testing.expectEqual(@as(u32, 300), t.timeout_ms);
+    try std.testing.expectEqual(true, t.retro_tap);
+    try std.testing.expectEqual(true, t.permissive_hold); // default
+}
+
+test ".remap block missing required tap field errors" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] { hold : lctrl }
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap block unknown field errors" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] {
+        \\    tap : escape
+        \\    hold : lctrl
+        \\    flow_tap : on
+        \\}
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap colon and block form on same key+device conflicts" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] : lctrl
+        \\.remap caps_lock [device builtin] {
+        \\    tap : escape
+        \\    hold : lctrl
+        \\}
     );
     try std.testing.expectError(error.ParseErrorOccurred, result);
 }

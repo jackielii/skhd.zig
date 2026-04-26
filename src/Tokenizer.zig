@@ -199,12 +199,28 @@ pub fn get_token(self: *Tokenizer) ?Token {
             token.type = .Token_Forward;
         },
         else => {
-            const next = self.peekRune() orelse return null;
-            if (r[0] == '0' and next[0] == 'x') {
-                self.moveOver(next);
+            // Pre-existing latent bug: peekRune was unconditionally
+            // required even by branches that don't read `next`. That
+            // returned null for any digit or letter at end-of-input.
+            // Now `next` is only consulted by the hex-prefix check.
+            const next_opt = self.peekRune();
+            const has_hex_x = next_opt != null and next_opt.?[0] == 'x';
+            if (r[0] == '0' and has_hex_x) {
+                self.moveOver(next_opt.?);
                 token.text = self.acceptRun(hex_chars);
                 token.type = .Token_Key_Hex;
             } else if (ascii.isDigit(r[0])) {
+                // Multi-digit numbers: a sequence of digits lexes as a
+                // single Token_Key. Existing single-digit keycodes
+                // (e.g., `cmd - 1`) are unaffected because skhd config
+                // never writes multi-digit unsuffixed numbers in key
+                // position — hex is `0x..`, key combos are one digit.
+                // Multi-digit support unblocks duration values like
+                // `timeout: 120` inside `{ ... }` blocks.
+                const start = self.pos - r.len;
+                _ = self.acceptRun(number_chars);
+                const end = self.pos;
+                token.text = self.buffer[start..end];
                 token.type = .Token_Key;
             } else if (ascii.isAlphanumeric(r[0])) {
                 const start = self.pos - 1; // rewind
@@ -461,6 +477,26 @@ test "tokenize brace block with colon separators" {
         try std.testing.expectEqualStrings(e.text, tok.?.text);
     }
     try std.testing.expect(tokenizer.get_token() == null);
+}
+
+test "multi-digit number lexes as one Token_Key" {
+    var tokenizer = try init("120 ms");
+    const t1 = tokenizer.get_token().?;
+    try std.testing.expectEqual(TokenType.Token_Key, t1.type);
+    try std.testing.expectEqualStrings("120", t1.text);
+    const t2 = tokenizer.get_token().?;
+    try std.testing.expectEqual(TokenType.Token_Identifier, t2.type);
+    try std.testing.expectEqualStrings("ms", t2.text);
+}
+
+test "single-digit hotkey key still works" {
+    // Regression: `cmd - 1` should still produce a single Token_Key("1").
+    var tokenizer = try init("cmd - 1");
+    _ = tokenizer.get_token().?; // cmd
+    _ = tokenizer.get_token().?; // -
+    const t = tokenizer.get_token().?;
+    try std.testing.expectEqual(TokenType.Token_Key, t.type);
+    try std.testing.expectEqualStrings("1", t.text);
 }
 
 test "colon outside block still grabs command" {

@@ -13,6 +13,7 @@ const ParseError = @import("ParseError.zig").ParseError;
 
 const Parser = @This();
 const log = std.log.scoped(.parser);
+const HidKeyMap = @import("HidKeyMap.zig");
 
 const LoadDirective = struct {
     filename: []const u8,
@@ -1108,8 +1109,10 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         }
     } else if (std.mem.eql(u8, option, "device")) {
         try self.parse_device_decl(mappings);
+    } else if (std.mem.eql(u8, option, "remap")) {
+        try self.parse_remap_decl(mappings);
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell, device", .{option});
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell, device, remap", .{option});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
         return error.ParseErrorOccurred;
@@ -1155,6 +1158,99 @@ fn parse_device_guard_body(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) 
         return error.ParseErrorOccurred;
     }
     hotkey.device_guard = try self.allocator.dupe(u8, alias_name);
+}
+
+/// Parse `.remap <src> [device <alias>] : <dst>` (colon form). Source
+/// and destination are single keysym names resolvable via HidKeyMap;
+/// chord modifiers and shell commands are not allowed as targets — this
+/// is a HID-level remap, not a hotkey. The device guard is required;
+/// global remaps are deferred (and unwise — clobbers all keyboards).
+fn parse_remap_decl(self: *Parser, mappings: *Mappings) !void {
+    // Source key. Accept any of the token types skhd uses for keysyms.
+    const src_token = self.peek() orelse {
+        self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Expected source key after '.remap'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+    switch (src_token.type) {
+        .Token_Literal, .Token_Modifier, .Token_Identifier, .Token_Key => {},
+        else => {
+            self.error_info = try ParseError.fromToken(self.allocator, src_token, "Expected key name (e.g., caps_lock, lctrl, escape) as remap source", self.current_file_path);
+            return error.ParseErrorOccurred;
+        },
+    }
+    self.advance();
+
+    const src_usage = HidKeyMap.lookup(src_token.text) orelse {
+        const msg = try std.fmt.allocPrint(self.allocator, "Source '{s}' has no HID-level mapping. Supported names live in src/HidKeyMap.zig — add it there if needed.", .{src_token.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+
+    // Required device guard. Identical syntax to the hotkey-side
+    // `[device <alias>]` so users have one mental model.
+    if (!self.match(.Token_BeginList)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "'.remap' requires a [device <alias>] guard. Global remaps are not supported (would clobber other keyboards).", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected 'device' inside guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!std.mem.eql(u8, self.previous().text, "device")) {
+        self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Expected 'device' keyword inside guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected device alias name after 'device'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const alias_token = self.previous();
+    const alias_name = alias_token.text;
+    if (!mappings.device_aliases.contains(alias_name)) {
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown device alias '{s}'. Declare it with '.device {s} {{ vendor: 0x..., product: 0x... }}' first.", .{ alias_name, alias_name });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, alias_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!self.match(.Token_EndList)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ']' to close device guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    // Destination keysym. Top-level `:` lexes as Token_Command grabbing
+    // to newline — the dest is just the trimmed text.
+    if (!self.match(.Token_Command)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ':' followed by destination key", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const dst_token = self.previous();
+    const dst_name = std.mem.trim(u8, dst_token.text, " \t");
+    if (dst_name.len == 0) {
+        self.error_info = try ParseError.fromToken(self.allocator, dst_token, "Empty destination — expected a key name (e.g., lctrl)", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const dst_usage = HidKeyMap.lookup(dst_name) orelse {
+        const msg = try std.fmt.allocPrint(self.allocator, "Destination '{s}' has no HID-level mapping. Supported names live in src/HidKeyMap.zig.", .{dst_name});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, dst_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+
+    mappings.add_remap(src_usage, dst_usage, alias_name) catch |err| {
+        if (err == error.RemapConflict) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Source key '{s}' is already remapped on device '{s}'", .{ src_token.text, alias_name });
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return err;
+    };
 }
 
 /// Parse `.device <name> { vendor: 0x..., product: 0x... }`. The
@@ -1456,6 +1552,100 @@ test "[device <alias>] with unknown alias is a parse error" {
 
     const result = parser.parse(&mappings,
         \\ctrl - h [device builtin] : echo
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap colon form registers a remap" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] : lctrl
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), mappings.remaps.items.len);
+    const r = mappings.remaps.items[0];
+    try std.testing.expectEqual(@as(u32, 0x39), r.src_usage); // caps_lock
+    try std.testing.expectEqual(@as(u32, 0xE0), r.dst_usage); // lctrl
+    try std.testing.expectEqualStrings("builtin", r.device_alias);
+}
+
+test ".remap without device guard is a parse error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.remap caps_lock : lctrl
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap with unknown source keysym errors" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap nosuchkey [device builtin] : lctrl
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap with unknown destination keysym errors" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] : nosuchkey
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap duplicate src+device is a parse error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] : lctrl
+        \\.remap caps_lock [device builtin] : lshift
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".remap with unknown device alias errors" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.remap caps_lock [device builtin] : lctrl
     );
     try std.testing.expectError(error.ParseErrorOccurred, result);
 }

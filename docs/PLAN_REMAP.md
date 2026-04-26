@@ -72,43 +72,43 @@ existing command-grabbing colon semantics for `[ "app" : cmd ]` lists).
 
 ---
 
-## Phase 2 — `.remap` colon form (plain HID remap)
+## Phase 2 — `.remap` colon form (plain HID remap) ✓
 
-**Goal:** ship the simplest user-visible feature — declarative
-`.remap X [device:Y] : Z` — backed by `hidutil` with proper crash recovery.
+**Status:** landed. Syntax: `.remap <src_key> [device <alias>] : <dst_key>`.
+Device guard is required (global remaps are not supported in v1; they would
+clobber every connected keyboard).
 
-**Deliverables:**
+**What landed:**
 
-- `src/Hidutil.zig` — apply/restore `UserKeyMapping` per-device via
-  `hidutil property --matching … --set …`. Uses `std.process.Child` for
-  the shell-out.
-- `src/HidutilState.zig` — state file at
-  `~/.cache/skhd/hidutil_state.json` containing
-  `{pid, started_at, original: {…}, applied: {…}}`. Written *before* each
-  apply, deleted on clean exit.
-- Signal handlers for `SIGTERM`, `SIGINT`, `SIGHUP` → restore from
-  in-memory snapshot.
-- Startup recovery: if state file exists and `pid` is no longer running,
-  restore `original` before applying current config's remaps.
-- `src/Parser.zig` — parse `.remap <key> [device:<alias>] : <target>`.
-  Device guard required for hidutil remaps (without it, parser warns and
-  applies globally — risky, but explicit).
-- `src/Hotkey.zig` — extend with optional device guard field.
-- Conflict detection at parse time: same `(key, device)` claimed twice
-  by `.remap` → `ParseError.RemapConflict`.
+- `src/HidKeyMap.zig` — small static map from skhd keysym names
+  ("caps_lock", "lctrl", "f18", …) to HID Keyboard/Keypad usage codes
+  (page 0x07). `fullUsage(usage)` packs the 64-bit value `hidutil`
+  expects.
+- `src/Hidutil.zig` — per-device apply/restore via `hidutil property
+  --matching '{"VendorID":…,"ProductID":…}' --set '{"UserKeyMapping":…}'`.
+  Crash-recovery state file at `~/.cache/skhd/hidutil_state.json` lists
+  the (vendor, product) pairs we touched + our pid; `recoverFromCrash()`
+  consults this on startup and clears any orphaned mappings before
+  reapplying. `restoreAll()` runs from `deinit` and from SIGINT / SIGTERM
+  / SIGHUP handlers so a `kill <pid>` or `launchctl stop` leaves the
+  user's keyboard in default state.
+- `src/Mappings.zig` — `remaps: ArrayListUnmanaged(RemapDecl)` registry
+  with `add_remap` conflict detection (same source key on the same
+  device → `error.RemapConflict`).
+- `src/Parser.zig` — `parse_remap_decl` for the colon form. Source can
+  be any keysym (literal/modifier/identifier/single-char) the
+  `HidKeyMap` table recognises; destination comes from the
+  command-grabbing colon's text. Required device guard mirrors the
+  hotkey-side `[device <alias>]` syntax.
+- `src/skhd.zig` — lazy Hidutil init when remaps exist; SIGTERM/SIGHUP
+  handlers added (SIGINT was already wired) so all three graceful-
+  shutdown signals path through `Hidutil.restoreAll()`.
 
-**Test surface:**
-
-- `.remap caps_lock [device:builtin] : lctrl` → caps acts as ctrl in all
-  apps. Cmd-key combos via caps (e.g., caps+a → ctrl+a) work.
-- HHKB caps_lock unaffected (per-device matching works).
-- `kill -TERM <skhd>` → caps restored to default.
-- `kill -9 <skhd>` then re-launch → caps restored on next startup
-  (state-file recovery).
-- Two `.remap` for same key+device → parse error with line number.
-
-**Files added:** `Hidutil.zig`, `HidutilState.zig`. **Files modified:**
-`Parser.zig`, `Hotkey.zig`, `Mappings.zig`, `main.zig`, `skhd.zig`.
+**V1 caveat:** `Hidutil` does not preserve any pre-existing
+`UserKeyMapping`. If another tool (Hyperkey, Karabiner-with-driver,
+manual `hidutil` invocations) has already set one, applying our remaps
+overwrites it; restoring sets it to empty. Document this and detect-and-
+warn deferred to Phase 5 polish.
 
 ---
 

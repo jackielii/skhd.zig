@@ -15,12 +15,25 @@ hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
 // when the user hasn't opted into per-device matching, in which case the
 // IOHIDManager monitor is never started.
 device_aliases: std.StringHashMapUnmanaged(DeviceAlias) = .empty,
+// HID-level remaps declared via `.remap <src> [device <alias>] : <dst>`.
+// Owned by Mappings — strings are duped on insert, freed in deinit.
+remaps: std.ArrayListUnmanaged(RemapDecl) = .empty,
 
 const Mappings = @This();
 
 pub const DeviceAlias = struct {
     vendor: u32,
     product: u32,
+};
+
+pub const RemapDecl = struct {
+    /// HID usage byte (page implied = 0x07 keyboard) of the source key.
+    src_usage: u32,
+    /// HID usage byte of the destination key.
+    dst_usage: u32,
+    /// Device alias name. Owned by Mappings (duped on insert, freed in
+    /// deinit). Required for v1 — global remaps are not supported.
+    device_alias: []const u8,
 };
 
 pub fn init(alloc: std.mem.Allocator) !Mappings {
@@ -61,6 +74,8 @@ pub fn deinit(self: *Mappings) void {
         while (it.next()) |key| self.allocator.free(key.*);
         self.device_aliases.deinit(self.allocator);
     }
+    for (self.remaps.items) |r| self.allocator.free(r.device_alias);
+    self.remaps.deinit(self.allocator);
     self.allocator.free(self.shell);
 
     // Free loaded file paths
@@ -104,6 +119,22 @@ pub fn add_device_alias(self: *Mappings, name: []const u8, vendor: u32, product:
     const owned = try self.allocator.dupe(u8, name);
     errdefer self.allocator.free(owned);
     try self.device_aliases.put(self.allocator, owned, .{ .vendor = vendor, .product = product });
+}
+
+pub fn add_remap(self: *Mappings, src_usage: u32, dst_usage: u32, device_alias: []const u8) !void {
+    // Same source key for the same device cannot be remapped twice.
+    for (self.remaps.items) |existing| {
+        if (existing.src_usage == src_usage and std.mem.eql(u8, existing.device_alias, device_alias)) {
+            return error.RemapConflict;
+        }
+    }
+    const owned_alias = try self.allocator.dupe(u8, device_alias);
+    errdefer self.allocator.free(owned_alias);
+    try self.remaps.append(self.allocator, .{
+        .src_usage = src_usage,
+        .dst_usage = dst_usage,
+        .device_alias = owned_alias,
+    });
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -189,6 +220,21 @@ test "format" {
     defer alloc.free(formatted);
     try std.testing.expect(formatted.len > 0);
     try std.testing.expect(mode != null);
+}
+
+test "add_remap returns error on duplicate src+device" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_remap(0x39, 0xE0, "builtin"); // caps_lock -> lctrl on builtin
+    // Same source on a different device is fine.
+    try mappings.add_remap(0x39, 0xE0, "hhkb");
+    try std.testing.expectEqual(@as(usize, 2), mappings.remaps.items.len);
+    // Same source + same device is a conflict.
+    const result = mappings.add_remap(0x39, 0xE1, "builtin");
+    try std.testing.expectError(error.RemapConflict, result);
+    try std.testing.expectEqual(@as(usize, 2), mappings.remaps.items.len);
 }
 
 test "add_device_alias returns error on duplicate" {

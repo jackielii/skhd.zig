@@ -6,6 +6,7 @@ const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
 const HidMonitor = @import("HidMonitor.zig");
+const Hidutil = @import("Hidutil.zig");
 const Hotkey = @import("Hotkey.zig");
 const Hotload = @import("Hotload.zig");
 const Keycodes = @import("Keycodes.zig");
@@ -51,6 +52,10 @@ watchdog_timer: c.CFRunLoopTimerRef = null,
 /// guarding any hotkey via `[device <name>]`. Null means per-device
 /// matching is disabled and lookups behave exactly like prior versions.
 hid_monitor: ?*HidMonitor = null,
+/// Lazy: only allocated when at least one `.remap` declaration is
+/// present. Owns the per-device hidutil UserKeyMapping lifecycle: apply
+/// after parsing, restore on shutdown.
+hidutil: ?*Hidutil = null,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -118,6 +123,24 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     }
     errdefer if (hid_monitor) |hm| hm.deinit();
 
+    // Lazy-init Hidutil only if any `.remap` declarations exist. Run
+    // crash recovery first so a previous instance's stale UserKeyMapping
+    // gets cleared before we apply our own.
+    var hidutil: ?*Hidutil = null;
+    if (mappings.remaps.items.len > 0) {
+        hidutil = Hidutil.init(gpa) catch |err| blk: {
+            log.warn("Failed to init Hidutil: {s}. .remap declarations ignored.", .{@errorName(err)});
+            break :blk null;
+        };
+        if (hidutil) |h| {
+            h.recoverFromCrash() catch |err| {
+                log.warn("Hidutil crash recovery failed: {s}. Continuing.", .{@errorName(err)});
+            };
+            log.info("Hidutil initialized for {d} remap declaration(s)", .{mappings.remaps.items.len});
+        }
+    }
+    errdefer if (hidutil) |h| h.deinit();
+
     return Skhd{
         .allocator = gpa,
         .mappings = mappings,
@@ -128,6 +151,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
         .hid_monitor = hid_monitor,
+        .hidutil = hidutil,
     };
 }
 
@@ -136,6 +160,14 @@ pub fn deinit(self: *Skhd) void {
     if (self.tracer.enabled) {
         const stderr = std.io.getStdErr().writer();
         self.tracer.printSummary(stderr) catch {};
+    }
+
+    // Restore hidutil UserKeyMapping FIRST so the user's keyboard isn't
+    // left in a remapped state if anything below errors. Idempotent —
+    // safe even if applyRemaps was never called.
+    if (self.hidutil) |h| {
+        h.restoreAll();
+        h.deinit();
     }
 
     if (self.hotloader) |hotloader| {
@@ -234,6 +266,19 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     };
     std.posix.sigaction(std.posix.SIG.INT, &int_act, null);
 
+    // SIGTERM (`launchctl stop`, `kill <pid>`) and SIGHUP (terminal hangup,
+    // service stop) need to trigger the same graceful shutdown so
+    // hidutil.restoreAll fires through deinit. Without these, killing the
+    // daemon while a `.remap` is active would leave the user with a
+    // remapped keyboard until reboot or crash-recovery on next launch.
+    const term_act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigterm },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TERM, &term_act, null);
+    std.posix.sigaction(std.posix.SIG.HUP, &term_act, null);
+
     // Store a global reference for the signal handler
     global_skhd = self;
 
@@ -330,6 +375,15 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
         if (!hm.open()) {
             log.warn("Per-device matching is disabled. Grant Input Monitoring in System Settings → Privacy & Security to enable .device features.", .{});
         }
+    }
+
+    // Apply hidutil remaps. Done AFTER event tap setup because the
+    // remap may change keycodes for the next keystroke immediately, and
+    // we want our event tap intercepting those translated keystrokes.
+    if (self.hidutil) |h| {
+        h.applyRemaps(&self.mappings) catch |err| {
+            log.err("Failed to apply hidutil remaps: {s}. Continuing — caps_lock and similar will use OS defaults.", .{@errorName(err)});
+        };
     }
 
     // Watchdog reconciles the tap with TCC state every 1s. Catches runtime
@@ -872,6 +926,14 @@ fn handleSigusr1(_: c_int) callconv(.C) void {
 /// Signal handler for SIGINT - stop the run loop to allow graceful shutdown
 fn handleSigint(_: c_int) callconv(.C) void {
     // Stop the run loop to allow graceful shutdown with defer statements
+    c.CFRunLoopStop(c.CFRunLoopGetCurrent());
+}
+
+/// Signal handler for SIGTERM / SIGHUP. Same shape as SIGINT — stop the
+/// run loop so deinit runs (in particular, Hidutil.restoreAll() clears
+/// any UserKeyMapping we applied so the user's caps_lock isn't stuck
+/// after a `kill` or service stop).
+fn handleSigterm(_: c_int) callconv(.C) void {
     c.CFRunLoopStop(c.CFRunLoopGetCurrent());
 }
 

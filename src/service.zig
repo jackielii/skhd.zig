@@ -395,12 +395,57 @@ fn getDaemonState(allocator: std.mem.Allocator) DaemonState {
 
 const EventTapHealth = enum { unknown, working, denied };
 
-/// Look at the tail of the daemon's log file to determine whether the most
-/// recent event-tap attempt succeeded. This is the only reliable way to
-/// answer "does the daemon actually have accessibility right now?" from the
-/// CLI: AXIsProcessTrusted() in a CLI process reports the *terminal's*
-/// trust state, not skhd's, because the CLI is the responsible process.
-fn getEventTapHealth(allocator: std.mem.Allocator) EventTapHealth {
+/// Darwin sysctl MIB to fetch a single process's kinfo_proc.
+/// Equivalent to: `int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };`
+const CTL_KERN: c_int = 1;
+const KERN_PROC: c_int = 14;
+const KERN_PROC_PID: c_int = 1;
+
+/// Get the running process's uptime in seconds via the darwin sysctl
+/// `kern.proc.pid.<pid>` interface. The first 8 bytes of `struct
+/// kinfo_proc` are `kp_proc.p_un.__p_starttime.tv_sec` (this layout has
+/// been stable across macOS versions). Avoids spawning `ps`. Returns
+/// null if the process isn't reachable or the call fails.
+fn getProcessUptimeSeconds(pid: i32) ?u64 {
+    var mib = [_]c_int{ CTL_KERN, KERN_PROC, KERN_PROC_PID, @intCast(pid) };
+
+    // kinfo_proc is ~656 bytes on macOS — 1 KiB stack buffer is plenty.
+    var buf: [1024]u8 = undefined;
+    var size: usize = buf.len;
+    if (std.c.sysctl(&mib, mib.len, &buf, &size, null, 0) != 0) return null;
+    if (size < @sizeOf(i64)) return null;
+
+    const tv_sec = std.mem.readInt(i64, buf[0..@sizeOf(i64)], .little);
+    if (tv_sec <= 0) return null;
+
+    const now = std.time.timestamp();
+    if (now < tv_sec) return null;
+    return @intCast(now - tv_sec);
+}
+
+/// Determine whether the daemon's event tap is currently active. Two signals
+/// in priority order:
+///
+/// 1. **Process uptime.** With `KeepAlive=true` and `ThrottleInterval=10`,
+///    a daemon that fails event-tap creation exits within ~5s (10 retries
+///    × 500ms) and is respawned 10s later — so a daemon that has been
+///    alive for >30s necessarily has a working event tap. This is the
+///    primary signal: it works for any build mode without relying on the
+///    daemon emitting success messages (we deliberately keep the log
+///    quiet on the happy path).
+/// 2. **Log tail fallback** for daemons too young for #1 to be conclusive,
+///    or when the daemon is loaded but currently in the throttle window.
+///    Recent "ACCESSIBILITY PERMISSIONS REQUIRED" / "Event tap creation
+///    failed" entries point to denial. Success-side patterns are also
+///    matched for Debug/ReleaseSafe builds where `log.info` reaches the
+///    file.
+fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) EventTapHealth {
+    if (daemon_state == .running) {
+        if (getProcessUptimeSeconds(daemon_state.running)) |uptime| {
+            if (uptime >= 30) return .working;
+        }
+    }
+
     const home = std.posix.getenv("HOME") orelse return .unknown;
     const log_path = std.fmt.allocPrint(allocator, "{s}/Library/Logs/skhd.log", .{home}) catch return .unknown;
     defer allocator.free(log_path);
@@ -443,7 +488,7 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
     };
 
     const daemon_state = getDaemonState(allocator);
-    const tap_health = getEventTapHealth(allocator);
+    const tap_health = getEventTapHealth(allocator, daemon_state);
 
     std.debug.print("skhd service status:\n", .{});
     std.debug.print("  Service installed:    {s}\n", .{if (service_installed) "Yes" else "No"});
@@ -473,8 +518,10 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
     } else if (tap_health == .denied) {
         std.debug.print("\nTo grant accessibility permissions:\n", .{});
         std.debug.print("1. Open System Settings → Privacy & Security → Accessibility\n", .{});
-        std.debug.print("2. Add /Applications/skhd.app and enable it\n", .{});
-        std.debug.print("3. Run: skhd --restart-service\n", .{});
-        std.debug.print("\nIf the picker won't accept the .app, see docs/CODE_SIGNING.md.\n", .{});
+        std.debug.print("2. Click '+' and add /Applications/skhd.app (the .app shows\n", .{});
+        std.debug.print("   up in the list, unlike a bare binary)\n", .{});
+        std.debug.print("3. Toggle the entry on\n", .{});
+        std.debug.print("4. Run: skhd --restart-service\n", .{});
+        std.debug.print("\nFor more troubleshooting, see docs/CODE_SIGNING.md.\n", .{});
     }
 }

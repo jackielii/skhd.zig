@@ -185,9 +185,10 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
                 \\4. Run: skhd --restart-service
                 \\
                 \\Troubleshooting:
-                \\- macOS Tahoe's picker only accepts .app bundles. If the path
-                \\  above is not a .app, install the app bundle (e.g.
-                \\  `brew upgrade skhd-zig`) and re-run --install-service.
+                \\- macOS Tahoe hides bare-binary entries from the Accessibility
+                \\  list. If the path above is not a .app, install the app
+                \\  bundle (`brew upgrade skhd-zig`) so the entry is visible
+                \\  and toggleable, then re-run --install-service.
                 \\- If skhd was working before and stopped after a binary swap,
                 \\  a stale TCC entry may need clearing. See:
                 \\    docs/CODE_SIGNING.md (Troubleshooting section)
@@ -201,7 +202,6 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Call NSApplicationLoad() like the original skhd
     c.NSApplicationLoad();
 
-    // Always log successful event tap creation
     log.info("Event tap created successfully. skhd is now running.", .{});
 
     // Now start the run loop - this will handle both event tap and FSEvents

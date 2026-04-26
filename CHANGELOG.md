@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22] - 2026-04-26
+
+### Fixed
+- **Event tap survives runtime Accessibility revoke.** When Accessibility was toggled off while skhd was running, macOS sent `kCGEventTapDisabledByUserInput` and the in-place `CGEventTapEnable` retry silently failed — the tap stayed in the event chain as an active filter that couldn't forward events, leaving the keyboard unresponsive until skhd was killed. The tap is now detached on the disabled callback, and a 1 s `CFRunLoopTimer` watches for `AXIsProcessTrusted` to flip back and recreates the tap on re-grant. `EventTap.deinit` also cleans up when the tap is system-disabled, not just when `enabled()`.
+- **`--status` no longer false-negatives in the first 30 s after daemon start.** `getEventTapHealth` scanned the daemon log for the `ACCESSIBILITY PERMISSIONS REQUIRED` marker, but SMAppService routes the daemon's stderr to `/dev/null`, so stale denial lines from previous runs dominated the tail. The log scan is now skipped when the log file is older than the running daemon, and reports `unknown` in that window instead.
+
+### Changed
+- **Daemon sources `PATH` from `$SHELL -ilc` at startup.** Hotkeys that exec `/opt/homebrew/bin/yabai`, `/opt/homebrew/bin/aerospace`, etc. previously failed under launchd's minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`). The interactive-login shell is queried once at startup so command lookups match what the user sees in their terminal.
+
+### Internal
+- **`zig build deploy-prod`** swaps the binary in `/Applications/skhd.app`, re-signs with `skhd-cert`, and restarts the SMAppService daemon — for testing the prod code path without cutting a release.
+
 ## [0.0.21] - 2026-04-26
 
 ### Fixed
@@ -355,7 +367,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.21...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.22...HEAD
+[0.0.22]: https://github.com/jackielii/skhd.zig/compare/v0.0.21...v0.0.22
 [0.0.21]: https://github.com/jackielii/skhd.zig/compare/v0.0.20...v0.0.21
 [0.0.20]: https://github.com/jackielii/skhd.zig/compare/v0.0.19...v0.0.20
 [0.0.19]: https://github.com/jackielii/skhd.zig/compare/v0.0.18...v0.0.19

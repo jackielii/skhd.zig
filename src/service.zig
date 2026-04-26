@@ -3,8 +3,9 @@ const builtin = @import("builtin");
 const c = @import("c.zig");
 const log = std.log.scoped(.service);
 
-// Import C function
+// Import C functions
 extern "c" fn getpid() c_int;
+extern "c" fn getuid() c_uint;
 
 /// Check if the current process has accessibility permissions
 pub fn hasAccessibilityPermissions() bool {
@@ -223,7 +224,27 @@ pub fn startService(allocator: std.mem.Allocator) !void {
     const service_path = try getServicePath(allocator);
     defer allocator.free(service_path);
 
-    const argv = [_][]const u8{ "launchctl", "load", "-w", service_path };
+    const uid = getuid();
+    const target = try std.fmt.allocPrint(allocator, "gui/{d}/com.jackielii.skhd", .{uid});
+    defer allocator.free(target);
+    const domain = try std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
+    defer allocator.free(domain);
+
+    // Clear any persistent disable flag. Older versions of skhd used
+    // `launchctl unload -w` for --stop-service, which writes a flag to the
+    // disable list that survives reboot — so on the next login launchd
+    // refuses to auto-load the agent even with RunAtLoad=true. `enable` is
+    // idempotent and a no-op when the agent isn't disabled.
+    {
+        const enable_argv = [_][]const u8{ "launchctl", "enable", target };
+        var enable_child = std.process.Child.init(&enable_argv, allocator);
+        enable_child.stdout_behavior = .Ignore;
+        enable_child.stderr_behavior = .Ignore;
+        enable_child.spawn() catch {};
+        _ = enable_child.wait() catch {};
+    }
+
+    const argv = [_][]const u8{ "launchctl", "bootstrap", domain, service_path };
     var child = std.process.Child.init(&argv, allocator);
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Pipe;
@@ -241,12 +262,19 @@ pub fn startService(allocator: std.mem.Allocator) !void {
     const term = try child.wait();
 
     if (term != .Exited or term.Exited != 0) {
-        if (stderr_data.items.len > 0) {
-            std.debug.print("Failed to start service: {s}\n", .{stderr_data.items});
-        } else {
-            std.debug.print("Failed to start service. Check ~/Library/Logs/skhd.log for details.\n", .{});
+        // bootstrap returns errno 17 (EEXIST, "File exists") or 37
+        // ("Operation already in progress") when the agent is already
+        // loaded. Both are no-ops for --start-service.
+        const already_loaded = std.mem.indexOf(u8, stderr_data.items, "File exists") != null or
+            std.mem.indexOf(u8, stderr_data.items, "already in progress") != null;
+        if (!already_loaded) {
+            if (stderr_data.items.len > 0) {
+                std.debug.print("Failed to start service: {s}\n", .{stderr_data.items});
+            } else {
+                std.debug.print("Failed to start service. Check ~/Library/Logs/skhd.log for details.\n", .{});
+            }
+            return error.ServiceStartFailed;
         }
-        return error.ServiceStartFailed;
     }
 
     std.debug.print("Service started successfully.\n", .{});
@@ -254,10 +282,13 @@ pub fn startService(allocator: std.mem.Allocator) !void {
 }
 
 pub fn stopService(allocator: std.mem.Allocator) !void {
-    const service_path = try getServicePath(allocator);
-    defer allocator.free(service_path);
+    const uid = getuid();
+    const target = try std.fmt.allocPrint(allocator, "gui/{d}/com.jackielii.skhd", .{uid});
+    defer allocator.free(target);
 
-    const argv = [_][]const u8{ "launchctl", "unload", "-w", service_path };
+    // bootout unloads the agent without touching the disable list, so the
+    // agent can still auto-load on next login (unlike legacy `unload -w`).
+    const argv = [_][]const u8{ "launchctl", "bootout", target };
     var child = std.process.Child.init(&argv, allocator);
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;

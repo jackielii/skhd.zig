@@ -12,6 +12,7 @@ const ModifierFlag = Keycodes.ModifierFlag;
 const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
 const Parser = @import("Parser.zig");
+const service = @import("service.zig");
 const Tracer = @import("Tracer.zig");
 
 // Use scoped logging for skhd module
@@ -157,33 +158,42 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     log.info("Starting event tap", .{});
     self.event_tap.begin(keyHandler, self) catch |err| {
         if (err == error.AccessibilityPermissionDenied) {
-            const allocated_path: ?[]u8 = std.fs.selfExePathAlloc(self.allocator) catch null;
-            defer if (allocated_path) |path| self.allocator.free(path);
-            const exe_path = allocated_path orelse "/opt/homebrew/bin/skhd";
+            const raw_path: ?[]u8 = std.fs.selfExePathAlloc(self.allocator) catch null;
+            defer if (raw_path) |p| self.allocator.free(p);
+            const stable_path: ?[]const u8 = if (raw_path) |p|
+                service.resolveStableExePath(self.allocator, p) catch null
+            else
+                null;
+            defer if (stable_path) |p| self.allocator.free(p);
+            const bundle_path: ?[]const u8 = if (stable_path) |p|
+                service.resolveBundlePath(self.allocator, p) catch null
+            else
+                null;
+            defer if (bundle_path) |p| self.allocator.free(p);
+            const display_path = bundle_path orelse stable_path orelse raw_path orelse "/Applications/skhd.app";
 
             log.err(
                 \\
                 \\=====================================================
                 \\ACCESSIBILITY PERMISSIONS REQUIRED
                 \\=====================================================
-                \\skhd requires accessibility permissions to function.
+                \\skhd needs accessibility permissions to capture hotkeys.
                 \\
-                \\Please grant accessibility permissions:
                 \\1. Open System Settings → Privacy & Security → Accessibility
-                \\2. Click the lock to make changes
-                \\3. Add this binary: {s}
-                \\4. Make sure it's enabled (checkbox checked)
-                \\5. Restart skhd
+                \\2. Click '+' and add: {s}
+                \\3. Toggle the entry on
+                \\4. Run: skhd --restart-service
                 \\
                 \\Troubleshooting:
-                \\If skhd is already listed but still not working:
-                \\- Remove the existing skhd entry
-                \\- Stop the service: skhd --stop-service
-                \\- Re-add skhd to the list - Or just restart the service to see the entry added
-                \\- Enable the entry and run skhd --restart-service
+                \\- macOS Tahoe's picker only accepts .app bundles. If the path
+                \\  above is not a .app, install the app bundle (e.g.
+                \\  `brew upgrade skhd-zig`) and re-run --install-service.
+                \\- If skhd was working before and stopped after a binary swap,
+                \\  a stale TCC entry may need clearing. See:
+                \\    docs/CODE_SIGNING.md (Troubleshooting section)
                 \\=====================================================
                 \\
-            , .{exe_path});
+            , .{display_path});
         }
         return err;
     };

@@ -19,12 +19,28 @@ jobs:
     
     - name: Run tests
       run: zig build test
-    
+
     - name: Build Debug
       run: zig build
-    
+
     - name: Check version
       run: ./zig-out/bin/skhd --version
+
+    - name: Build .app bundle
+      run: zig build app
+
+    - name: Verify bundle layout
+      # The release pipeline ships skhd.app, so any regression in
+      # scripts/make-app.sh or assets/Info.plist.template must fail at
+      # PR time, not at tag time.
+      run: |
+        test -f zig-out/skhd.app/Contents/MacOS/skhd
+        test -f zig-out/skhd.app/Contents/Info.plist
+        grep -q "<string>com.jackielii.skhd</string>" zig-out/skhd.app/Contents/Info.plist
+        plutil -lint zig-out/skhd.app/Contents/Info.plist
+
+    - name: Lint shell scripts
+      run: bash -n scripts/make-app.sh && bash -n scripts/codesign.sh && bash -n scripts/release.sh
 
   build-all:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

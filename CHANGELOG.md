@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20] - 2026-04-26
+
+Local-development quality-of-life release. No runtime changes.
+
+### Internal
+- **`zig build run` now produces a signed dev `.app` bundle** at `zig-out/skhd-dev.app`, signed with a separate `skhd-dev-cert` and bundle ID `com.jackielii.skhd.dev`. On macOS Tahoe, an adhoc-signed bare binary cannot be granted Accessibility, so `zig build run` previously failed with permission errors during local debugging. The dev TCC slot is fully isolated from the prod entry (`com.jackielii.skhd` + `skhd-cert`) used by the Homebrew install, and re-signing every build keeps permissions stable across rebuilds. See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md#local-debug-workflow-zig-build-run).
+- **First-run Accessibility popup.** `AXIsProcessTrustedWithOptions(prompt=true)` is now called before event tap setup so unknown bundles surface the macOS popup and System Settings deep-link, instead of failing silently after 10 retries.
+- **`AccessibilityPermissionDenied` error message** prefers the `.app` bundle that actually contains the running binary over `/Applications/skhd.app`, so the displayed path matches what a grant would apply to.
+- **`scripts/codesign.sh`** reads `SKHD_BUNDLE_ID` env var (defaults to `com.jackielii.skhd`).
+- **`scripts/make-app.sh`** accepts an optional bundle ID as the third argument.
+
 ## [0.0.19] - 2026-04-26
 
 Small follow-up to v0.0.18 fixing a reporting bug.
@@ -331,7 +342,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.19...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.20...HEAD
+[0.0.20]: https://github.com/jackielii/skhd.zig/compare/v0.0.19...v0.0.20
 [0.0.19]: https://github.com/jackielii/skhd.zig/compare/v0.0.18...v0.0.19
 [0.0.18]: https://github.com/jackielii/skhd.zig/compare/v0.0.17...v0.0.18
 [0.0.17]: https://github.com/jackielii/skhd.zig/compare/v0.0.16...v0.0.17

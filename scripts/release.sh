@@ -193,7 +193,7 @@ echo ""
 echo -e "${BLUE}[Step 6/$TOTAL_STEPS] Generating release notes...${NC}"
 CHANGELOG_ENTRY=$(awk "/## \[$CURRENT_VERSION\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
 
-RELEASE_NOTES=$(claude -p "Generate concise GitHub release notes for skhd.zig version $CURRENT_VERSION based on this changelog entry. Format it nicely with markdown, highlighting the most important changes first. Keep it user-friendly and avoid technical jargon where possible:\n\n$CHANGELOG_ENTRY")
+RELEASE_NOTES=$(claude -p "Generate concise GitHub release notes for skhd.zig version $CURRENT_VERSION based on this changelog entry. Format it nicely with markdown, highlighting the most important changes first. Keep it user-friendly and avoid technical jargon where possible:\n\n$CHANGELOG_ENTRY" </dev/null)
 
 echo ""
 echo -e "${YELLOW}Release Notes:${NC}"
@@ -212,7 +212,10 @@ fi
 # Step 7: Create tag and push
 echo ""
 echo -e "${BLUE}[Step 7/$TOTAL_STEPS] Creating and pushing tag...${NC}"
-git tag -a "$TAG" -m "$RELEASE_NOTES"
+# --cleanup=verbatim: preserve markdown headings (lines starting with `#`).
+# Default cleanup mode strips them as comments, which silently drops a
+# leading "# Title" line from the release notes.
+git tag -a "$TAG" --cleanup=verbatim -m "$RELEASE_NOTES"
 echo -e "${GREEN}✓ Tag $TAG created${NC}"
 
 echo "Pushing tag to origin..."

@@ -17,7 +17,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Need full history to get tag messages
+        fetch-depth: 0   # full history
+        fetch-tags: true # ensure annotated tag *objects* (not just refs) are
+                         # fetched, otherwise `git tag -l --format='%(contents)'`
+                         # falls back to the pointed-to commit's message and
+                         # the release body becomes the commit message instead
+                         # of the tag annotation.
     
     - name: Create Release
       id: create_release

@@ -316,7 +316,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.17...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.18...HEAD
+[0.0.18]: https://github.com/jackielii/skhd.zig/compare/v0.0.17...v0.0.18
 [0.0.17]: https://github.com/jackielii/skhd.zig/compare/v0.0.16...v0.0.17
 [0.0.16]: https://github.com/jackielii/skhd.zig/compare/v0.0.15...v0.0.16
 [0.0.15]: https://github.com/jackielii/skhd.zig/compare/v0.0.13...v0.0.15

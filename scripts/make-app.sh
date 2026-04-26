@@ -20,18 +20,24 @@ if [ ! -f "$TEMPLATE" ]; then
     echo "Error: Info.plist template not found at $TEMPLATE" >&2
     exit 1
 fi
+if [ ! -f "$VERSION_FILE" ]; then
+    echo "Error: VERSION file not found at $VERSION_FILE" >&2
+    exit 1
+fi
 
 VERSION=$(tr -d '\n' < "$VERSION_FILE")
 
-# Build the bundle next to a temp path then move into place atomically so a
-# failed signing run does not leave a half-written bundle.
+# Build the new bundle in a temp path, then swap it in only after every step
+# has succeeded. If any command above the swap fails, set -e aborts and the
+# previously-installed $APP_PATH is left intact.
 TMP_APP="${APP_PATH}.tmp"
-rm -rf "$TMP_APP" "$APP_PATH"
+rm -rf "$TMP_APP"
 mkdir -p "$TMP_APP/Contents/MacOS"
 
 sed "s/__VERSION__/${VERSION}/g" "$TEMPLATE" > "$TMP_APP/Contents/Info.plist"
 cp "$BINARY_PATH" "$TMP_APP/Contents/MacOS/skhd"
 chmod 755 "$TMP_APP/Contents/MacOS/skhd"
 
+rm -rf "$APP_PATH"
 mv "$TMP_APP" "$APP_PATH"
 echo "Bundle created at $APP_PATH"

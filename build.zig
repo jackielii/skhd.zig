@@ -86,9 +86,11 @@ pub fn build(b: *std.Build) void {
     // Accessibility picker accepts it and TCC keys entries by bundle ID
     // (com.jackielii.skhd) instead of by the binary's path. Inner binary at
     // skhd.app/Contents/MacOS/skhd is a copy, not a symlink, so codesigning
-    // works.
+    // works. Scripts have bash shebangs and use bash-only `[[ ... ]]` syntax,
+    // so invoke via bash explicitly (`/bin/sh` may not be bash on every
+    // system that runs `zig build`).
     const app_cmd = b.addSystemCommand(&[_][]const u8{
-        "sh",
+        "bash",
         "scripts/make-app.sh",
     });
     app_cmd.addArg(installed_exe);
@@ -98,28 +100,29 @@ pub fn build(b: *std.Build) void {
     const app_step = b.step("app", "Build the skhd.app bundle wrapper");
     app_step.dependOn(&app_cmd.step);
 
-    // Code signing. Passing the .app bundle signs both the inner Mach-O and
-    // the bundle; passing the bare binary signs just it. Default to .app when
-    // it exists so users iterating with `zig build app && zig build sign` get
-    // a properly-signed bundle.
+    // Code signing.
+    //   `zig build sign`     - signs the bare binary at zig-out/bin/skhd.
+    //   `zig build sign-app` - signs the .app bundle (inner Mach-O + bundle
+    //                          layer); use this after `zig build app` for
+    //                          Tahoe-compatible installs.
     const sign_cmd = b.addSystemCommand(&[_][]const u8{
-        "sh",
+        "bash",
         "scripts/codesign.sh",
     });
     sign_cmd.addArg(installed_exe);
     sign_cmd.step.dependOn(b.getInstallStep());
 
-    const sign_step = b.step("sign", "Code sign the binary (required for accessibility permissions on macOS 15+)");
+    const sign_step = b.step("sign", "Code sign the bare binary");
     sign_step.dependOn(&sign_cmd.step);
 
     const sign_app_cmd = b.addSystemCommand(&[_][]const u8{
-        "sh",
+        "bash",
         "scripts/codesign.sh",
     });
     sign_app_cmd.addArg(installed_app);
     sign_app_cmd.step.dependOn(&app_cmd.step);
 
-    const sign_app_step = b.step("sign-app", "Build and code sign the skhd.app bundle");
+    const sign_app_step = b.step("sign-app", "Build and code sign the skhd.app bundle (Tahoe-compatible)");
     sign_app_step.dependOn(&sign_app_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");

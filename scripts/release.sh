@@ -95,6 +95,30 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Verify homebrew-tap is bundle-aware. The release.yml auto-bump rewrites
+# the formula's URL + sha256, but does NOT touch the install block. With
+# 0.0.18+ the tarball contains skhd.app/ instead of a bare binary, so a
+# pre-bundle install block (`bin.install "skhd-arm64-macos" => "skhd"`)
+# would silently produce broken installs after the auto-bump runs. Block
+# the release until the formula has the bundle-aware install logic.
+echo "Checking homebrew-tap formula is bundle-aware..."
+HEAD_FORMULA=$(curl -fsSL https://raw.githubusercontent.com/jackielii/homebrew-tap/main/Formula/skhd-zig.rb 2>/dev/null || true)
+if [ -z "$HEAD_FORMULA" ]; then
+    echo -e "${YELLOW}Warning: could not fetch homebrew-tap formula${NC}"
+    echo "Continue anyway? (y/n)"
+    read -r CONFIRM
+    if [ "$CONFIRM" != "y" ]; then
+        exit 1
+    fi
+elif ! echo "$HEAD_FORMULA" | grep -q 'File.directory?("skhd.app")'; then
+    echo -e "${RED}Error: homebrew-tap/main formula is NOT bundle-aware.${NC}"
+    echo "Releasing v$CURRENT_VERSION now will break 'brew install jackielii/tap/skhd-zig'"
+    echo "for everyone, because the auto-bump rewrites a stale install block."
+    echo ""
+    echo "Merge the bundle-aware formula PR first, then re-run this script."
+    exit 1
+fi
+
 echo -e "${GREEN}✓ Pre-flight checks passed${NC}"
 echo ""
 
@@ -147,11 +171,22 @@ if ! zig build test; then
 fi
 echo -e "${GREEN}✓ Tests passed${NC}"
 
-# Step 5: Build release binaries
+# Step 5: Build release artifacts (bare binary + .app bundle)
+# The release pipeline ships skhd.app inside skhd-<arch>-macos.tar.gz, so
+# verify the bundle layout builds cleanly here before tagging.
 echo ""
-echo -e "${BLUE}[Step 5/$TOTAL_STEPS] Building release binaries...${NC}"
+echo -e "${BLUE}[Step 5/$TOTAL_STEPS] Building release artifacts...${NC}"
 zig build -Doptimize=ReleaseFast
-echo -e "${GREEN}✓ Release binaries built${NC}"
+zig build app -Doptimize=ReleaseFast
+test -f zig-out/skhd.app/Contents/MacOS/skhd || {
+    echo -e "${RED}Error: skhd.app missing inner binary${NC}"
+    exit 1
+}
+test -f zig-out/skhd.app/Contents/Info.plist || {
+    echo -e "${RED}Error: skhd.app missing Info.plist${NC}"
+    exit 1
+}
+echo -e "${GREEN}✓ Release artifacts built (bare binary + skhd.app bundle)${NC}"
 
 # Step 6: Generate release notes using Claude
 echo ""
@@ -186,9 +221,10 @@ echo -e "${GREEN}✓ Tag pushed to origin${NC}"
 
 echo ""
 echo "GitHub Actions will now automatically:"
-echo "  - Build binaries for both architectures"
-echo "  - Create a GitHub release"
-echo "  - Update the Homebrew formula"
+echo "  - Build skhd.app bundles for both architectures (arm64 + x86_64)"
+echo "  - Code-sign with skhd-cert (if MACOS_CERTIFICATE secret is set)"
+echo "  - Create a GitHub release with skhd-<arch>-macos.tar.gz containing skhd.app"
+echo "  - Update the Homebrew formula (URL + sha256)"
 
 # Step 8: Bump version if requested
 if [ "$BUMP_VERSION" = true ]; then

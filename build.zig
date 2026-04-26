@@ -69,15 +69,6 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addOptions("build_options", options);
 
     b.installArtifact(exe);
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
 
     const installed_exe = b.getInstallPath(.bin, exe.name);
     const installed_app = b.getInstallPath(.prefix, "skhd.app");
@@ -124,6 +115,47 @@ pub fn build(b: *std.Build) void {
 
     const sign_app_step = b.step("sign-app", "Build and code sign the skhd.app bundle (Tahoe-compatible)");
     sign_app_step.dependOn(&sign_app_cmd.step);
+
+    // Local debug bundle. Uses a separate path, cert (skhd-dev-cert), and
+    // bundle ID (com.jackielii.skhd.dev) so debug runs get their own TCC slot
+    // and don't disturb the prod entry (com.jackielii.skhd + skhd-cert) used
+    // by the Homebrew install. On Tahoe, TCC is bundle-ID-keyed and validates
+    // against the stored csreq, so the running process must carry the right
+    // bundle ID and a signature matching the granted entry — the bare binary
+    // at zig-out/bin/skhd is adhoc-signed and unbundled, so it can't be
+    // granted accessibility on Tahoe.
+    const installed_dev_app = b.getInstallPath(.prefix, "skhd-dev.app");
+    const dev_bundle_id = "com.jackielii.skhd.dev";
+    const dev_cert_name = "skhd-dev-cert";
+
+    const dev_app_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/make-app.sh",
+    });
+    dev_app_cmd.addArg(installed_exe);
+    dev_app_cmd.addArg(installed_dev_app);
+    dev_app_cmd.addArg(dev_bundle_id);
+    dev_app_cmd.step.dependOn(b.getInstallStep());
+
+    const sign_dev_app_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/codesign.sh",
+    });
+    sign_dev_app_cmd.addArg(installed_dev_app);
+    sign_dev_app_cmd.setEnvironmentVariable("SKHD_CERT", dev_cert_name);
+    sign_dev_app_cmd.setEnvironmentVariable("SKHD_BUNDLE_ID", dev_bundle_id);
+    sign_dev_app_cmd.step.dependOn(&dev_app_cmd.step);
+
+    const inner_exe = b.pathJoin(&.{ installed_dev_app, "Contents", "MacOS", "skhd" });
+    const run_cmd = b.addSystemCommand(&[_][]const u8{inner_exe});
+    run_cmd.step.dependOn(&sign_dev_app_cmd.step);
+
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const run_step = b.step("run", "Run the app");
+    run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
 

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.jackielii.skhd</string>
+    <string>__BUNDLE_ID__</string>
     <key>CFBundleName</key>
     <string>skhd</string>
     <key>CFBundleDisplayName</key>

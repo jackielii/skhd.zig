@@ -62,6 +62,21 @@ zig build app                          # produces zig-out/skhd.app
 
 Permissions will now **persist across rebuilds** as long as you sign each new build with the same certificate.
 
+## Local Debug Workflow (`zig build run`)
+
+`zig build run` does not run the bare binary at `zig-out/bin/skhd` — on Tahoe, an adhoc-signed bare binary cannot be granted accessibility. Instead it builds and signs a **separate dev bundle** so debug runs have their own TCC slot:
+
+| | Path | Bundle ID | Cert |
+|---|---|---|---|
+| Prod (`sign-app`) | `zig-out/skhd.app` | `com.jackielii.skhd` | `skhd-cert` |
+| Dev (`run`) | `zig-out/skhd-dev.app` | `com.jackielii.skhd.dev` | `skhd-dev-cert` |
+
+The dev cert is auto-created on first `zig build run`. One-time setup: add `zig-out/skhd-dev.app` in **System Settings → Privacy & Security → Accessibility** and toggle it on. Permissions persist across rebuilds because every `zig build run` re-signs with the same `skhd-dev-cert`.
+
+The two bundles never overlap, so debugging never disturbs the prod TCC entry that the Homebrew-installed daemon relies on. If you want to debug without the prod daemon also receiving keypresses, stop it first: `skhd --stop-service`.
+
+To override the dev cert/bundle ID, set `SKHD_CERT` and `SKHD_BUNDLE_ID` before invoking `scripts/codesign.sh` directly.
+
 ## Verifying Code Signature
 
 ```bash

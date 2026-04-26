@@ -15,6 +15,27 @@ pub fn hasAccessibilityPermissions() bool {
     return c.AXIsProcessTrusted() != 0;
 }
 
+/// Like hasAccessibilityPermissions() but uses the prompting variant. The
+/// first time an unknown bundle calls this, macOS pops the "X would like to
+/// control this computer" dialog and opens System Settings → Accessibility.
+/// Subsequent calls (granted or denied) just return without prompting.
+/// CGEventTap creation itself never prompts, so we have to call this
+/// explicitly to surface the popup.
+pub fn promptForAccessibility() bool {
+    const keys = [_]?*const anyopaque{@ptrCast(c.kAXTrustedCheckOptionPrompt)};
+    const values = [_]?*const anyopaque{@ptrCast(c.kCFBooleanTrue)};
+    const opts = c.CFDictionaryCreate(
+        null,
+        @ptrCast(@constCast(&keys)),
+        @ptrCast(@constCast(&values)),
+        1,
+        &c.kCFCopyStringDictionaryKeyCallBacks,
+        &c.kCFTypeDictionaryValueCallBacks,
+    );
+    defer if (opts != null) c.CFRelease(opts);
+    return c.AXIsProcessTrustedWithOptions(opts) != 0;
+}
+
 /// PID file management
 pub fn writePidFile(allocator: std.mem.Allocator) !void {
     const username = std.posix.getenv("USER") orelse "unknown";
@@ -102,20 +123,22 @@ const plist_template =
 ;
 
 /// Pick a path to recommend in error messages for the System Settings →
-/// Accessibility picker. Tahoe's picker only accepts `.app` bundles, so we
-/// prefer `/Applications/skhd.app` when present, fall back to the `.app`
-/// inferred from a binary that lives inside a bundle, and finally return the
-/// caller's path unchanged for bare-binary installs.
+/// Accessibility picker. Tahoe's picker only accepts `.app` bundles, and TCC
+/// keys entries by the running process's signature — so we prefer the `.app`
+/// that actually contains the running binary, since that's the one a grant
+/// would apply to. Only fall back to `/Applications/skhd.app` when the running
+/// process is bare (e.g. cellar binary), in which case adding the prod bundle
+/// is the right pointer for the install.
 pub fn resolveBundlePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]const u8 {
-    const apps_path = "/Applications/skhd.app";
-    if (std.fs.accessAbsolute(apps_path, .{})) |_| {
-        return allocator.dupe(u8, apps_path);
-    } else |_| {}
-
     const marker = ".app/Contents/MacOS/";
     if (std.mem.indexOf(u8, exe_path, marker)) |idx| {
         return allocator.dupe(u8, exe_path[0 .. idx + 4]); // keep ".app"
     }
+
+    const apps_path = "/Applications/skhd.app";
+    if (std.fs.accessAbsolute(apps_path, .{})) |_| {
+        return allocator.dupe(u8, apps_path);
+    } else |_| {}
 
     return allocator.dupe(u8, exe_path);
 }

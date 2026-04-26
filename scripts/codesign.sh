@@ -4,7 +4,7 @@ set -e
 # Configuration
 TARGET_PATH="${1:-./zig-out/bin/skhd}"
 CERT_NAME="${SKHD_CERT:-skhd-cert}"
-BUNDLE_ID="com.jackielii.skhd"
+BUNDLE_ID="${SKHD_BUNDLE_ID:-com.jackielii.skhd}"
 
 # Colors for output
 RED='\033[0;31m'

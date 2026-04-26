@@ -5,8 +5,9 @@
 # so permissions persist across `brew upgrade`.
 set -e
 
-BINARY_PATH="${1:?usage: make-app.sh <binary> <app-path>}"
-APP_PATH="${2:?usage: make-app.sh <binary> <app-path>}"
+BINARY_PATH="${1:?usage: make-app.sh <binary> <app-path> [bundle-id]}"
+APP_PATH="${2:?usage: make-app.sh <binary> <app-path> [bundle-id]}"
+BUNDLE_ID="${3:-com.jackielii.skhd}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/assets/Info.plist.template"
@@ -34,7 +35,8 @@ TMP_APP="${APP_PATH}.tmp"
 rm -rf "$TMP_APP"
 mkdir -p "$TMP_APP/Contents/MacOS"
 
-sed "s/__VERSION__/${VERSION}/g" "$TEMPLATE" > "$TMP_APP/Contents/Info.plist"
+sed -e "s/__VERSION__/${VERSION}/g" -e "s/__BUNDLE_ID__/${BUNDLE_ID}/g" \
+    "$TEMPLATE" > "$TMP_APP/Contents/Info.plist"
 cp "$BINARY_PATH" "$TMP_APP/Contents/MacOS/skhd"
 chmod 755 "$TMP_APP/Contents/MacOS/skhd"
 

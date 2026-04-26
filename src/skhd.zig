@@ -154,7 +154,12 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
         try self.enableHotReload();
     }
 
-    // Set up event tap (but don't start run loop yet)
+    // Set up event tap (but don't start run loop yet). Prompt first so that
+    // unknown bundles trigger the macOS Accessibility popup and System
+    // Settings deep-link — CGEventTap creation itself fails silently.
+    if (!service.promptForAccessibility()) {
+        log.warn("Accessibility not granted yet — System Settings should now show the prompt", .{});
+    }
     log.info("Starting event tap", .{});
     self.event_tap.begin(keyHandler, self) catch |err| {
         if (err == error.AccessibilityPermissionDenied) {

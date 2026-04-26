@@ -112,48 +112,66 @@ warn deferred to Phase 5 polish.
 
 ---
 
-## Phase 3 — `.remap` block form, state machine
+## Phase 3 — `.remap` block form, state machine ✓
 
-**Goal:** the headline feature — tap-hold dual-function keys.
+**Status:** landed. The headline feature — tap-hold dual-function keys.
 
-**Deliverables:**
+Config:
 
-- `src/TapHoldMachine.zig` — per-rule state machine. States:
-  `idle → pending → committed_tap | committed_hold`. Driven by
-  `CGEventGetTimestamp(event)` for event timing, `CFRunLoopTimer` for
-  timeout fires (one timer per rule, pre-allocated, reused via
-  `CFRunLoopTimerSetNextFireDate`).
-- Knobs: `timeout`, `permissive_hold`, `hold_on_other_key_press`,
-  `retro_tap`. Defaults: `timeout=200ms`, `permissive_hold=on`,
-  `hold_on_other_key_press=off`, `retro_tap=off`.
-- Auto-proxy for caps-class keys: when `.remap caps_lock { … }` is
-  declared, internally hidutil-remap caps→F18 (per-device); state machine
-  intercepts F18 events. User still writes `caps_lock` in config.
-- Auto-repeat preservation: track `last_tap_time` per rule; if next press
-  within `timeout` of last release, treat as plain repeated tap (skip
-  state machine for that press).
-- Event suppression + synthesis: pending events are buffered; on commit,
-  the chosen action's events are synthesized via `CGEventPost` with
-  `kCGEventSourceUserData = 'skhd'` set.
-- `src/Parser.zig` — parse the block form with the four knobs.
-- Conflict detection: `.remap X : Y` and `.remap X { … }` both targeting
-  same `(key, device)` → parse error.
+```
+.remap caps_lock [device builtin] {
+    tap : escape
+    hold : lctrl
+    timeout : 120ms
+    permissive_hold : on
+    hold_on_other_key_press : off
+    retro_tap : off
+}
+```
 
-**Test surface:**
+**What landed:**
 
-- `.remap caps_lock [device:builtin] { tap: escape, hold: lctrl, timeout: 120ms, permissive_hold: on, retro_tap: off }`:
-  - Quick tap → escape.
-  - Hold + a → ctrl-a.
-  - Hold alone past timeout, release → no output (retro off).
-- Walk through scenarios A–F from design transcript; outputs match.
-- Hold caps, type "abc" → "ABC" (no — wait, ctrl-a-b-c, app-specific).
-- Type "the " quickly → "the " (rolling press not falsely held — but
-  with permissive_hold on, this depends on timing; document the trade-off).
-- Auto-repeat: tap caps quickly twice → "esc esc" (or whatever escape
-  triggers); then hold third press → ctrl held.
+- `src/TapHoldMachine.zig` — per-rule state machine.
+  States: `idle → pending → committed_hold`. Driven by
+  `CGEventGetTimestamp(event)` for event timing and `CFRunLoopTimer`
+  for timeout fires (one timer per rule, reused via
+  `CFRunLoopTimerSetNextFireDate`). All four QMK-aligned knobs plus
+  auto-repeat preservation.
+- `src/HidKeyMap.zig` extensions — `macVKForHidUsage`,
+  `modifierFlagForHidUsage`, `needsProxy`, `PROXY_USAGE`.
+- `src/Mappings.zig` — `add_taphold` auto-inserts the F18 proxy
+  remap when the source is caps_lock. Helper `effectiveSourceUsage`.
+- `src/Tokenizer.zig` — `Token_BeginBlock` / `Token_EndBlock` /
+  `Token_Colon` (block_depth-aware so `:` is a separator inside
+  `{ … }` and command-grabbing outside). Multi-digit number
+  tokenisation for durations. Latent EOF-after-digit bug fixed.
+- `src/Parser.zig` — `parse_remap_decl` branches on the post-device-
+  guard token. Conflict detection across colon and block forms.
+- `src/skhd.zig` — `taphold_machines` registry, `routeTapHold`
+  dispatcher (source-key match + pending-machine fan-out for
+  other-key buffering). Synthesised events tagged with the existing
+  `SKHD_EVENT_MARKER`.
 
-**Files added:** `TapHoldMachine.zig`. **Files modified:** `Parser.zig`,
-`Hotkey.zig`, `Hidutil.zig`, `EventTap.zig`, `Mappings.zig`.
+**Caps_lock end-to-end:** parse → `add_taphold` queues the proxy remap →
+`Hidutil.applyRemaps` shells out to set `UserKeyMapping` per device →
+`TapHoldMachine` listens on `kVK_F18` → state machine emits escape /
+ctrl according to timing → SIGINT / SIGTERM / SIGHUP / clean exit
+restore the keyboard.
+
+**v1 limits:**
+
+- `hold:` accepts only key/modifier targets in Phase 3. Layer/mode
+  holds (`hold: fn_layer`) are Phase 4.
+- Multiple simultaneously-pressed tap-hold sources: behaviour is
+  "first machine that consumes wins"; not formally modelled.
+- Tap-hold processing skipped on the `NX_SYSDEFINED` (media-key)
+  path — covers no realistic source key.
+- `Hidutil` does not preserve any pre-existing `UserKeyMapping`
+  from other tools (Hyperkey etc.).
+
+**Files added:** `TapHoldMachine.zig`. **Files modified:**
+`Parser.zig`, `Tokenizer.zig`, `Mappings.zig`, `HidKeyMap.zig`,
+`skhd.zig`.
 
 ---
 

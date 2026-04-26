@@ -27,6 +27,83 @@ pub fn lookup(name: []const u8) ?u32 {
     return Map.get(name);
 }
 
+const c = @import("c.zig");
+
+/// Convert a HID Keyboard/Keypad usage byte (what `HidKeyMap.lookup`
+/// returns) into the Mac virtual keycode that CGEvent's
+/// `kCGKeyboardEventKeycode` field carries. Used by the tap-hold state
+/// machine to recognise its source key in the CGEventTap callback and
+/// to synthesize the tap/hold actions via `CGEventCreateKeyboardEvent`.
+///
+/// Only the keysyms relevant to tap-hold sources/actions are mapped.
+/// Returns null on unknown usage; caller should treat that rule as
+/// non-actionable and log.
+pub fn macVKForHidUsage(hid_usage: u32) ?u32 {
+    return switch (hid_usage) {
+        // Modifiers — use the Mac VK constants.
+        0xE0 => c.kVK_Control,       // lctrl
+        0xE1 => c.kVK_Shift,         // lshift
+        0xE2 => c.kVK_Option,        // lalt
+        0xE3 => c.kVK_Command,       // lcmd
+        0xE4 => c.kVK_RightControl,  // rctrl
+        0xE5 => c.kVK_RightShift,    // rshift
+        0xE6 => c.kVK_RightOption,   // ralt
+        0xE7 => c.kVK_RightCommand,  // rcmd
+
+        0x39 => c.kVK_CapsLock,
+        0x29 => c.kVK_Escape,
+        0x28 => c.kVK_Return,
+        0x2B => c.kVK_Tab,
+        0x2C => c.kVK_Space,
+        0x2A => c.kVK_Delete,
+        0x4C => c.kVK_ForwardDelete,
+        0x4A => c.kVK_Home,
+        0x4D => c.kVK_End,
+        0x4B => c.kVK_PageUp,
+        0x4E => c.kVK_PageDown,
+        0x50 => c.kVK_LeftArrow,
+        0x4F => c.kVK_RightArrow,
+        0x52 => c.kVK_UpArrow,
+        0x51 => c.kVK_DownArrow,
+
+        // F-keys — the proxy slot for caps_lock-class interception is
+        // F18. F1..F20 covered for symmetry.
+        0x3A => c.kVK_F1,  0x3B => c.kVK_F2,  0x3C => c.kVK_F3,  0x3D => c.kVK_F4,
+        0x3E => c.kVK_F5,  0x3F => c.kVK_F6,  0x40 => c.kVK_F7,  0x41 => c.kVK_F8,
+        0x42 => c.kVK_F9,  0x43 => c.kVK_F10, 0x44 => c.kVK_F11, 0x45 => c.kVK_F12,
+        0x68 => c.kVK_F13, 0x69 => c.kVK_F14, 0x6A => c.kVK_F15, 0x6B => c.kVK_F16,
+        0x6C => c.kVK_F17, 0x6D => c.kVK_F18, 0x6E => c.kVK_F19, 0x6F => c.kVK_F20,
+
+        else => null,
+    };
+}
+
+/// CGEvent flag mask for a HID usage if it's a modifier; null otherwise.
+/// When the tap-hold state machine commits to "hold" with a modifier
+/// destination, it both synthesizes the modifier-down keycode (so the
+/// OS sees a real modifier press) and stamps the same flag onto any
+/// buffered events it replays so apps see them as modifier-chord.
+pub fn modifierFlagForHidUsage(hid_usage: u32) ?u64 {
+    return switch (hid_usage) {
+        0xE0, 0xE4 => c.kCGEventFlagMaskControl,    // lctrl, rctrl
+        0xE1, 0xE5 => c.kCGEventFlagMaskShift,      // lshift, rshift
+        0xE2, 0xE6 => c.kCGEventFlagMaskAlternate,  // lalt, ralt
+        0xE3, 0xE7 => c.kCGEventFlagMaskCommand,    // lcmd, rcmd
+        else => null,
+    };
+}
+
+/// True if the HID usage refers to a key whose interception requires
+/// the F18 proxy. macOS toggles caps_lock state at IOKit level before
+/// CGEventTap can suppress it; remapping at HID layer to a non-toggle
+/// key (F18) sidesteps the toggle entirely.
+pub fn needsProxy(hid_usage: u32) bool {
+    return hid_usage == 0x39; // caps_lock; extend if/when other toggles appear
+}
+
+/// HID usage of the proxy key reserved for caps-class interception.
+pub const PROXY_USAGE: u32 = 0x6D; // F18
+
 /// Static name → usage table. Names match skhd's existing literal
 /// keycode strings and modifier names so the user writes config the
 /// same way they do for hotkeys.
@@ -82,4 +159,25 @@ test "lookup returns expected HID usage codes" {
 test "fullUsage packs keyboard page" {
     try std.testing.expectEqual(@as(u64, 0x700000039), fullUsage(0x39));
     try std.testing.expectEqual(@as(u64, 0x7000000E0), fullUsage(0xE0));
+}
+
+test "macVKForHidUsage returns Mac VK for modifiers and common keys" {
+    try std.testing.expectEqual(@as(?u32, c.kVK_Control), macVKForHidUsage(0xE0));
+    try std.testing.expectEqual(@as(?u32, c.kVK_Escape), macVKForHidUsage(0x29));
+    try std.testing.expectEqual(@as(?u32, c.kVK_F18), macVKForHidUsage(0x6D));
+    try std.testing.expectEqual(@as(?u32, c.kVK_CapsLock), macVKForHidUsage(0x39));
+    try std.testing.expectEqual(@as(?u32, null), macVKForHidUsage(0xFF));
+}
+
+test "modifierFlagForHidUsage classifies modifier vs non-modifier" {
+    try std.testing.expectEqual(@as(?u64, c.kCGEventFlagMaskControl), modifierFlagForHidUsage(0xE0));
+    try std.testing.expectEqual(@as(?u64, c.kCGEventFlagMaskShift), modifierFlagForHidUsage(0xE1));
+    try std.testing.expectEqual(@as(?u64, null), modifierFlagForHidUsage(0x29)); // escape
+    try std.testing.expectEqual(@as(?u64, null), modifierFlagForHidUsage(0x39)); // caps_lock
+}
+
+test "needsProxy true only for caps_lock" {
+    try std.testing.expect(needsProxy(0x39));
+    try std.testing.expect(!needsProxy(0x2C)); // space
+    try std.testing.expect(!needsProxy(0xE0)); // lctrl
 }

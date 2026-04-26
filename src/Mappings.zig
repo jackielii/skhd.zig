@@ -1,6 +1,7 @@
 const std = @import("std");
 const Mode = @import("Mode.zig");
 const Hotkey = @import("Hotkey.zig");
+const HidKeyMap = @import("HidKeyMap.zig");
 const utils = @import("utils.zig");
 const log = std.log.scoped(.mappings);
 
@@ -171,11 +172,40 @@ pub fn add_taphold(self: *Mappings, decl: TapHoldDecl) !void {
     if (self.findRemapOrTaphold(decl.src_usage, decl.device_alias)) {
         return error.RemapConflict;
     }
+
+    // Auto-proxy: caps-class source keys (currently just caps_lock)
+    // need a HID-level remap to F18 so CGEventTap can intercept them
+    // without macOS toggling caps_lock state behind our back. The proxy
+    // remap is registered into `remaps` so Hidutil.applyRemaps picks it
+    // up alongside any user-declared .remaps. The state machine then
+    // listens for F18 events from this device.
+    if (HidKeyMap.needsProxy(decl.src_usage)) {
+        // Reject if the proxy key is already claimed for this device.
+        if (self.findRemapOrTaphold(HidKeyMap.PROXY_USAGE, decl.device_alias)) {
+            return error.ProxyKeyConflict;
+        }
+        const owned_proxy_alias = try self.allocator.dupe(u8, decl.device_alias);
+        errdefer self.allocator.free(owned_proxy_alias);
+        try self.remaps.append(self.allocator, .{
+            .src_usage = decl.src_usage,
+            .dst_usage = HidKeyMap.PROXY_USAGE,
+            .device_alias = owned_proxy_alias,
+        });
+    }
+
     const owned_alias = try self.allocator.dupe(u8, decl.device_alias);
     errdefer self.allocator.free(owned_alias);
     var d = decl;
     d.device_alias = owned_alias;
     try self.tapholds.append(self.allocator, d);
+}
+
+/// Effective source HID usage byte after auto-proxy. For caps-class
+/// keys this is `HidKeyMap.PROXY_USAGE` (F18); for other keys it's the
+/// original. Used by the runtime to decide which key to listen for in
+/// the CGEventTap callback.
+pub fn effectiveSourceUsage(decl: TapHoldDecl) u32 {
+    return if (HidKeyMap.needsProxy(decl.src_usage)) HidKeyMap.PROXY_USAGE else decl.src_usage;
 }
 
 /// True if (src_usage, device_alias) is already claimed by a `.remap`
@@ -275,6 +305,56 @@ test "format" {
     defer alloc.free(formatted);
     try std.testing.expect(formatted.len > 0);
     try std.testing.expect(mode != null);
+}
+
+test "add_taphold on caps_lock auto-inserts F18 proxy remap" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_taphold(.{
+        .src_usage = 0x39, // caps_lock
+        .tap_usage = 0x29, // escape
+        .hold_usage = 0xE0, // lctrl
+        .device_alias = "builtin",
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), mappings.tapholds.items.len);
+    // Auto-inserted proxy remap: caps_lock → F18 on builtin.
+    try std.testing.expectEqual(@as(usize, 1), mappings.remaps.items.len);
+    const proxy = mappings.remaps.items[0];
+    try std.testing.expectEqual(@as(u32, 0x39), proxy.src_usage);
+    try std.testing.expectEqual(@as(u32, 0x6D), proxy.dst_usage);
+    try std.testing.expectEqualStrings("builtin", proxy.device_alias);
+}
+
+test "add_taphold on space does not auto-proxy" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_taphold(.{
+        .src_usage = 0x2C, // space
+        .tap_usage = 0x2C,
+        .hold_usage = 0xE2,
+        .device_alias = "builtin",
+    });
+    try std.testing.expectEqual(@as(usize, 0), mappings.remaps.items.len);
+}
+
+test "add_taphold caps_lock with prior F18 .remap on same device errors" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_remap(0x6D, 0x29, "builtin"); // F18 → escape (user-declared)
+    const result = mappings.add_taphold(.{
+        .src_usage = 0x39,
+        .tap_usage = 0x29,
+        .hold_usage = 0xE0,
+        .device_alias = "builtin",
+    });
+    try std.testing.expectError(error.ProxyKeyConflict, result);
 }
 
 test "add_taphold rejects collision with prior .remap on same src+device" {

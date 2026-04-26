@@ -8,6 +8,7 @@ const forkAndExec = @import("exec.zig").forkAndExec;
 const HidMonitor = @import("HidMonitor.zig");
 const Hidutil = @import("Hidutil.zig");
 const Hotkey = @import("Hotkey.zig");
+const TapHoldMachine = @import("TapHoldMachine.zig");
 const Hotload = @import("Hotload.zig");
 const Keycodes = @import("Keycodes.zig");
 const ModifierFlag = Keycodes.ModifierFlag;
@@ -56,6 +57,10 @@ hid_monitor: ?*HidMonitor = null,
 /// present. Owns the per-device hidutil UserKeyMapping lifecycle: apply
 /// after parsing, restore on shutdown.
 hidutil: ?*Hidutil = null,
+/// One state machine per `.remap { ... }` block declaration. Indexed by
+/// effective source Mac VK + device alias for routing in keyHandler.
+/// Empty when only colon-form remaps (or no remaps) are configured.
+taphold_machines: std.ArrayListUnmanaged(*TapHoldMachine) = .empty,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -141,6 +146,26 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     }
     errdefer if (hidutil) |h| h.deinit();
 
+    // Allocate one TapHoldMachine per block-form .remap declaration.
+    // Errors during machine init (typically unmapped HID usage in tap/
+    // hold target) are logged and the machine is skipped — the rule is
+    // effectively dead, but the rest of the daemon still runs.
+    var taphold_machines: std.ArrayListUnmanaged(*TapHoldMachine) = .empty;
+    errdefer {
+        for (taphold_machines.items) |m| m.deinit();
+        taphold_machines.deinit(gpa);
+    }
+    for (mappings.tapholds.items) |t| {
+        const machine = TapHoldMachine.init(gpa, t) catch |err| {
+            log.warn("Skipping .remap{{}} for src 0x{x:0>2}: {s}", .{ t.src_usage, @errorName(err) });
+            continue;
+        };
+        try taphold_machines.append(gpa, machine);
+    }
+    if (taphold_machines.items.len > 0) {
+        log.info("Initialized {d} tap-hold state machine(s)", .{taphold_machines.items.len});
+    }
+
     return Skhd{
         .allocator = gpa,
         .mappings = mappings,
@@ -152,6 +177,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         .carbon_event = carbon_event,
         .hid_monitor = hid_monitor,
         .hidutil = hidutil,
+        .taphold_machines = taphold_machines,
     };
 }
 
@@ -169,6 +195,9 @@ pub fn deinit(self: *Skhd) void {
         h.restoreAll();
         h.deinit();
     }
+
+    for (self.taphold_machines.items) |m| m.deinit();
+    self.taphold_machines.deinit(self.allocator);
 
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
@@ -458,6 +487,18 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     }
 
     const device_alias = self.resolveSourceDevice(event);
+
+    // Route through tap-hold state machines first. They have priority
+    // over regular hotkeys because they need to suppress every keystroke
+    // of their source key (and buffer other keys while pending) — a
+    // hotkey lookup down-stream would never see the right event anyway.
+    if (try self.routeTapHold(event, device_alias, true)) |action| {
+        return switch (action) {
+            .consume => @ptrFromInt(0),
+            .passthrough => event,
+        };
+    }
+
     const eventkey = createEventKey(event, device_alias);
     const result = try self.processHotkey(&eventkey, event, process_name);
     return try self.handleHotkeyResult(result, event, eventkey, process_name);
@@ -522,6 +563,51 @@ inline fn createEventKey(event: c.CGEventRef, device_alias: ?[]const u8) Hotkey.
         .flags = cgeventFlagsToHotkeyFlags(c.CGEventGetFlags(event)),
         .device_guard = device_alias,
     };
+}
+
+/// Dispatch a CGEvent to the relevant TapHoldMachine, if any. Returns
+/// the action the caller should take (consume / passthrough), or null
+/// to indicate no machine claimed the event and normal hotkey lookup
+/// should proceed.
+///
+/// Routing rules:
+/// - For each machine, if event keycode == machine.source_vk AND the
+///   device alias matches → handleSource on that machine. There can be
+///   at most one such match because (src_vk, device_alias) is unique.
+/// - If no source match but at least one machine is in pending state,
+///   route the event to ALL pending machines as `handleOther`. The
+///   first machine that returns `consume` wins; tie-breaking by
+///   declaration order.
+fn routeTapHold(self: *Skhd, event: c.CGEventRef, device_alias: ?[]const u8, is_down: bool) !?TapHoldMachine.Action {
+    if (self.taphold_machines.items.len == 0) return null;
+
+    const keycode: u32 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
+    const ts_ns = c.CGEventGetTimestamp(event);
+
+    // 1. Source match.
+    for (self.taphold_machines.items) |m| {
+        if (m.source_vk != keycode) continue;
+        if (!deviceAliasMatches(m.decl.device_alias, device_alias)) continue;
+        return m.handleSource(is_down, ts_ns);
+    }
+
+    // 2. Other-key fan-out to pending machines.
+    var consumed: ?TapHoldMachine.Action = null;
+    for (self.taphold_machines.items) |m| {
+        if (m.state != .pending and m.state != .committed_hold) continue;
+        // Only fan out to machines whose device alias matches the
+        // event's source. Keys from other devices shouldn't influence
+        // this machine's tap-vs-hold decision.
+        if (!deviceAliasMatches(m.decl.device_alias, device_alias)) continue;
+        const action = m.handleOther(event, is_down, keycode);
+        if (action == .consume) consumed = .consume;
+    }
+    return consumed;
+}
+
+inline fn deviceAliasMatches(rule_alias: []const u8, event_alias: ?[]const u8) bool {
+    const ea = event_alias orelse return false;
+    return std.mem.eql(u8, rule_alias, ea);
 }
 
 /// Look up the source device of a CGEvent via the HidMonitor's ring

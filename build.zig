@@ -283,6 +283,7 @@ pub fn build(b: *std.Build) void {
         "src/synthesize.zig",
         "src/HidKeyMap.zig",
         "src/Hidutil.zig",
+        "src/TapHoldMachine.zig",
         // "src/Hotload.zig", // Skip hot load test for local test only
     };
 

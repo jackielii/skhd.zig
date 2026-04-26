@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19] - 2026-04-26
+
+Small follow-up to v0.0.18 fixing a reporting bug.
+
+### Fixed
+- **`--status` reported `Hotkeys functional: No` while the daemon was actually working.** The previous logic read the daemon log's tail looking for "Event tap created successfully" markers — but ReleaseFast (Homebrew's build mode) suppresses `log.info`, so the log stayed silent on success and old failure entries dominated. The daemon's event tap was active, only the status reporter was misled. Now uses process uptime via `sysctl(kern.proc.pid)` as the primary signal: a daemon alive for >30 s necessarily has a working event tap (otherwise launchd would have respawned it). Log tail kept as a fallback for very recent starts.
+- **`AccessibilityPermissionDenied` error message wording.** Previously said macOS Tahoe's picker "only accepts `.app` bundles". The picker actually accepts bare binaries — they're just hidden from the visible Accessibility list, so users can't toggle them on. Updated message describes the actual behavior.
+
+### Internal
+- **Release pipeline robustness.** Validate that the git tag is annotated before reading its message; force-fetch tag objects post-checkout; fall back to `CHANGELOG.md` if the tag annotation is missing. v0.0.18 initially shipped with a release body containing a random commit message because `actions/checkout@v4`'s `fetch-tags: true` doesn't reliably fetch annotated tag objects.
+
 ## [0.0.18] - 2026-04-26
 
 ### macOS Tahoe (26) compatibility
@@ -320,7 +331,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.18...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.19...HEAD
+[0.0.19]: https://github.com/jackielii/skhd.zig/compare/v0.0.18...v0.0.19
 [0.0.18]: https://github.com/jackielii/skhd.zig/compare/v0.0.17...v0.0.18
 [0.0.17]: https://github.com/jackielii/skhd.zig/compare/v0.0.16...v0.0.17
 [0.0.16]: https://github.com/jackielii/skhd.zig/compare/v0.0.15...v0.0.16

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-04-26
+
+### macOS Tahoe (26) compatibility
+
+This release reworks distribution and service management for macOS 26 (Tahoe). See [docs/UPGRADING.md](docs/UPGRADING.md) for the one-time setup users on 0.0.17 or earlier need to perform after upgrading.
+
+### Added
+- **`.app` bundle distribution** — skhd now ships as `skhd.app` instead of a bare Mach-O. TCC accessibility entries are keyed by bundle ID (`com.jackielii.skhd`) instead of by file path, so permissions persist across rebuilds and `brew upgrade`.
+- **`zig build app` / `zig build sign-app`** — build steps for producing and signing the `.app` bundle locally.
+- **Daemon health in `--status`** — now reports `Daemon running` (from `launchctl list`) and `Hotkeys functional` (from log file tail), instead of the misleading `AXIsProcessTrusted` check on the CLI process.
+- **[docs/UPGRADING.md](docs/UPGRADING.md)** — step-by-step guide for users moving from 0.0.17 to 0.0.18.
+
+### Changed
+- **Logs moved to `~/Library/Logs/skhd.log`** (was `/tmp/skhd_$USER.log`). The previous path was wiped at every boot, hiding boot-time failures.
+- **Service management uses `launchctl bootstrap` / `bootout`** instead of legacy `load -w` / `unload -w`. `--stop-service` no longer leaves the agent in a persistently-disabled state across reboots.
+- **Plist `ProgramArguments`** points at the stable `/opt/homebrew/opt/skhd-zig/skhd.app/Contents/MacOS/skhd` symlink instead of a version-pinned Cellar path.
+- **Plist `ThrottleInterval`** lowered from 30 s to 10 s for faster recovery from boot-time failures.
+- **`AccessibilityPermissionDenied` error message** now points at the `.app` bundle path (which Tahoe's picker accepts) instead of the inner binary.
+
+### Fixed
+- **Boot-time `CGEventTapCreate` race** — added a 10-attempt retry loop with 500 ms backoff. The daemon used to exit and wait the full `ThrottleInterval` when WindowServer/TCC weren't ready immediately at login.
+- **`scripts/codesign.sh` cert auto-creation** — fixed empty-password p12 import rejection on macOS Tahoe + OpenSSL 3.6, and the missing `extendedKeyUsage = codeSigning` that hid the cert from `find-identity -p codesigning`.
+- **Homebrew formula auto-bump regex** — replaced the buggy `[0-9.(-preview)]\+` character class with `v[0-9.]+(-[A-Za-z0-9]+)?` so pre-release tags (`v0.0.18-preview`, `v0.0.19-rc1`) update correctly.
+
 ## [0.0.17] - 2025-12-08
 
 ### Added

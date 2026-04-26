@@ -39,6 +39,7 @@ hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
+recovery_timer: c.CFRunLoopTimerRef = null,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -112,10 +113,58 @@ pub fn deinit(self: *Skhd) void {
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
     }
+    self.stopRecoveryTimer();
     self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
+}
+
+fn startRecoveryTimer(self: *Skhd) void {
+    if (self.recovery_timer != null) return;
+    var ctx = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = self,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    const interval: f64 = 1.0;
+    const fire_at = c.CFAbsoluteTimeGetCurrent() + interval;
+    self.recovery_timer = c.CFRunLoopTimerCreate(
+        c.kCFAllocatorDefault,
+        fire_at,
+        interval,
+        0,
+        0,
+        recoveryTimerCallback,
+        &ctx,
+    );
+    if (self.recovery_timer == null) {
+        log.err("Failed to create accessibility recovery timer", .{});
+        return;
+    }
+    c.CFRunLoopAddTimer(c.CFRunLoopGetMain(), self.recovery_timer, c.kCFRunLoopCommonModes);
+    log.info("Watching for accessibility re-grant (poll every {d:.0}s)", .{interval});
+}
+
+fn stopRecoveryTimer(self: *Skhd) void {
+    if (self.recovery_timer) |t| {
+        c.CFRunLoopTimerInvalidate(t);
+        c.CFRelease(t);
+        self.recovery_timer = null;
+    }
+}
+
+fn recoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const self = @as(*Skhd, @ptrCast(@alignCast(info)));
+    if (!service.hasAccessibilityPermissions()) return;
+    log.info("Accessibility re-granted — recreating event tap", .{});
+    self.event_tap.begin(keyHandler, self) catch |err| {
+        log.err("Failed to recreate event tap after re-grant: {}", .{err});
+        return;
+    };
+    self.stopRecoveryTimer();
 }
 
 pub fn run(self: *Skhd, enable_hotload: bool) !void {
@@ -226,6 +275,16 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
         c.kCGEventTapDisabledByTimeout, c.kCGEventTapDisabledByUserInput => {
             log.info("Restarting event-tap", .{});
             c.CGEventTapEnable(self.event_tap.handle, true);
+            // If re-enable fails (e.g. accessibility revoked at runtime), the
+            // tap stays in the event chain as an active filter that can't
+            // forward events — the keyboard goes unresponsive. Tear it down
+            // immediately to free the chain, then poll for re-grant on a
+            // 1s timer; recreate the tap when accessibility comes back.
+            if (!c.CGEventTapIsEnabled(self.event_tap.handle)) {
+                log.err("Event tap re-enable failed — accessibility likely revoked. Detaching and waiting for re-grant.", .{});
+                self.event_tap.deinit();
+                self.startRecoveryTimer();
+            }
             return event;
         },
         c.kCGEventKeyDown => {

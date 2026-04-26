@@ -42,14 +42,20 @@ pub fn begin(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyop
 }
 
 pub fn deinit(self: *EventTap) void {
-    if (self.enabled()) {
-        c.CGEventTapEnable(self.handle, false);
-        c.CFMachPortInvalidate(self.handle);
+    if (self.handle == null) return;
+    // Clean up regardless of enabled state — when the system disables the tap
+    // (e.g. accessibility revoked at runtime), `enabled()` is false but the
+    // CFMachPort and run loop source are still installed and must be torn
+    // down or the keyboard remains captured.
+    c.CGEventTapEnable(self.handle, false);
+    c.CFMachPortInvalidate(self.handle);
+    if (self.runloop_source != null) {
         c.CFRunLoopRemoveSource(c.CFRunLoopGetMain(), self.runloop_source, c.kCFRunLoopCommonModes);
         c.CFRelease(self.runloop_source);
-        c.CFRelease(self.handle);
-        self.handle = null;
+        self.runloop_source = null;
     }
+    c.CFRelease(self.handle);
+    self.handle = null;
 }
 
 // This test would block forever as it runs an actual event tap

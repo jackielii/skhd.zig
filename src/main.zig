@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const track_alloc = @import("build_options").track_alloc;
 
+const c = @import("c.zig");
 const service = @import("service.zig");
 const Skhd = @import("skhd.zig");
 const synthesize = @import("synthesize.zig");
@@ -148,6 +149,8 @@ pub fn main() !void {
     try service.writePidFile(gpa);
     defer service.removePidFile(gpa);
 
+    inheritUserPath(gpa);
+
     // Initialize and run skhd
     var skhd = try Skhd.init(gpa, resolved_config_file, verbose, profile);
     defer skhd.deinit();
@@ -166,6 +169,47 @@ pub fn main() !void {
 
     // Pass the hotload flag to run
     skhd.run(!no_hotload) catch {};
+}
+
+/// Augment PATH from the user's login shell so commands launched by hotkeys
+/// resolve the same as they do in a terminal. launchd starts services with a
+/// minimal `PATH=/usr/bin:/bin:/usr/sbin:/sbin` that excludes Homebrew
+/// (`/opt/homebrew/bin`, `/usr/local/bin`), `~/.local/bin`, and similar — so
+/// commands like `yabai` or `jq` referenced bare in skhdrc fail to exec.
+/// This is the same problem (and same fix) GUI editors like VS Code solve.
+///
+/// Runs `$SHELL -ilc 'printenv PATH'` once at startup. `-l` sources login
+/// files, `-i` sources interactive rc files (`~/.bashrc`, `config.fish`),
+/// and `printenv` prints PATH colon-separated regardless of shell (fish
+/// otherwise prints `$PATH` as a space-separated array).
+fn inheritUserPath(allocator: std.mem.Allocator) void {
+    const shell = std.posix.getenv("SHELL") orelse return;
+
+    const argv = [_][]const u8{ shell, "-ilc", "printenv PATH" };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return;
+
+    var stdout_data = std.ArrayList(u8).init(allocator);
+    defer stdout_data.deinit();
+    if (child.stdout) |stdout| {
+        stdout.reader().readAllArrayList(&stdout_data, 64 * 1024) catch {
+            _ = child.wait() catch {};
+            return;
+        };
+    }
+    const term = child.wait() catch return;
+    if (term != .Exited or term.Exited != 0) return;
+
+    const trimmed = std.mem.trim(u8, stdout_data.items, " \r\n\t");
+    if (trimmed.len == 0) return;
+
+    const path_z = allocator.dupeZ(u8, trimmed) catch return;
+    defer allocator.free(path_z);
+
+    if (c.setenv("PATH", path_z.ptr, 1) != 0) return;
+    log.info("inherited PATH from {s}", .{shell});
 }
 
 /// Resolve config file path following XDG spec

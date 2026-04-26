@@ -400,8 +400,10 @@ fn getProcessUptimeSeconds(pid: i32) ?u64 {
 ///    matched for Debug/ReleaseSafe builds where `log.info` reaches the
 ///    file.
 fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) EventTapHealth {
+    var daemon_uptime: ?u64 = null;
     if (daemon_state == .running) {
-        if (getProcessUptimeSeconds(daemon_state.running)) |uptime| {
+        daemon_uptime = getProcessUptimeSeconds(daemon_state.running);
+        if (daemon_uptime) |uptime| {
             if (uptime >= 30) return .working;
         }
     }
@@ -416,6 +418,17 @@ fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) Ev
     const stat = file.stat() catch return .unknown;
     const tail_size: u64 = 8192;
     if (stat.size == 0) return .unknown;
+
+    // SMAppService doesn't redirect the daemon's stderr (no StandardErrorPath
+    // in LaunchAgent.plist), so the file holds messages from a previous run.
+    // If it's older than the current daemon, scanning it would surface stale
+    // "ACCESSIBILITY PERMISSIONS REQUIRED" lines and report a false denied —
+    // bail out as unknown instead.
+    if (daemon_uptime) |uptime| {
+        const log_mtime_s = @divFloor(stat.mtime, std.time.ns_per_s);
+        const now_s: i128 = std.time.timestamp();
+        if (now_s - log_mtime_s > @as(i128, uptime)) return .unknown;
+    }
     const start: u64 = if (stat.size > tail_size) stat.size - tail_size else 0;
     file.seekTo(start) catch return .unknown;
 

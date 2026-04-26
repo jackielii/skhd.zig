@@ -160,6 +160,21 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // `zig build deploy-prod` — replace the prod binary inside the
+    // brew-installed /Applications/skhd.app with a fresh local build,
+    // re-sign with skhd-cert + prod bundle id, and restart the SMAppService
+    // daemon. Lets you exercise the prod path without cutting a release.
+    // Pass -Doptimize=ReleaseFast to match the brew binary's perf profile.
+    const deploy_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/deploy-prod.sh",
+    });
+    deploy_cmd.addArg(installed_exe);
+    deploy_cmd.step.dependOn(b.getInstallStep());
+
+    const deploy_step = b.step("deploy-prod", "Replace /Applications/skhd.app's binary with the local build and restart prod service");
+    deploy_step.dependOn(&deploy_cmd.step);
+
     const test_step = b.step("test", "Run unit tests");
 
     // Benchmark executable

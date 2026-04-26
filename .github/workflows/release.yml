@@ -77,7 +77,11 @@ jobs:
         CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
         KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
 
-        # Import certificate if available
+        # Import certificate if available; otherwise hard-fail. Tagged releases
+        # without skhd-cert produce adhoc-signed bundles that silently lose
+        # TCC accessibility permissions on every install/upgrade — never the
+        # right outcome for a public release. Override only by setting
+        # ALLOW_UNSIGNED_RELEASE=true in the workflow env.
         if [ -n "$CERTIFICATE_P12" ]; then
           echo "Certificate found, setting up code signing..."
 
@@ -97,9 +101,15 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
 
           echo "SHOULD_SIGN=true" >> $GITHUB_ENV
-        else
-          echo "No certificate found, skipping code signing (binaries will use adhoc signature)"
+        elif [ "${ALLOW_UNSIGNED_RELEASE:-false}" = "true" ]; then
+          echo "::warning::ALLOW_UNSIGNED_RELEASE=true — shipping adhoc-signed bundles."
+          echo "::warning::Tahoe users will lose accessibility permissions on this release."
           echo "SHOULD_SIGN=false" >> $GITHUB_ENV
+        else
+          echo "::error::MACOS_CERTIFICATE secret is not configured."
+          echo "::error::Tagged releases require code signing — see docs/CODE_SIGNING.md."
+          echo "::error::Set ALLOW_UNSIGNED_RELEASE=true in this workflow's env to opt out (not recommended)."
+          exit 1
         fi
 
     - name: Build Release .app bundle
@@ -179,19 +189,28 @@ jobs:
         echo "x86_64_sha=${X86_64_SHA}" >> $GITHUB_OUTPUT
 
     - name: Update Formula
+      env:
+        VERSION: ${{ steps.release.outputs.version }}
+        ARM64_SHA: ${{ steps.release.outputs.arm64_sha }}
+        X86_64_SHA: ${{ steps.release.outputs.x86_64_sha }}
       run: |
         cd homebrew-tap
-        
-        # Update version
-        sed -i "s/version \".*\"/version \"${{ steps.release.outputs.version }}\"/" Formula/skhd-zig.rb
-        
-        # Update URLs
-        sed -i "s|download/v[0-9.(-preview)]\+/skhd-x86_64|download/v${{ steps.release.outputs.version }}/skhd-x86_64|" Formula/skhd-zig.rb
-        sed -i "s|download/v[0-9.(-preview)]\+/skhd-arm64|download/v${{ steps.release.outputs.version }}/skhd-arm64|" Formula/skhd-zig.rb
-        
-        # Update SHA256
-        sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${{ steps.release.outputs.x86_64_sha }}\"/" Formula/skhd-zig.rb
-        sed -i "/arm64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${{ steps.release.outputs.arm64_sha }}\"/" Formula/skhd-zig.rb
+
+        # Update version line if present (the formula may scan version from
+        # URL instead). No-op when missing.
+        sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/skhd-zig.rb
+
+        # Update URLs. Match v<digits-and-dots> with an optional pre-release
+        # suffix (-preview, -rc1, etc.). Use ERE with -E so the alternation
+        # syntax is sane; the previous BRE character class
+        # `[0-9.(-preview)]\+` accidentally allowed any of those literal
+        # characters and only worked for plain semver tags.
+        sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-x86_64|download/v${VERSION}/skhd-x86_64|" Formula/skhd-zig.rb
+        sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-arm64|download/v${VERSION}/skhd-arm64|" Formula/skhd-zig.rb
+
+        # Update each architecture's sha256 (range from URL line to next sha256 line).
+        sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${X86_64_SHA}\"/" Formula/skhd-zig.rb
+        sed -i "/arm64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${ARM64_SHA}\"/" Formula/skhd-zig.rb
 
     - name: Commit and push
       run: |

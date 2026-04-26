@@ -12,6 +12,7 @@ const ModifierFlag = Keycodes.ModifierFlag;
 const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
 const Parser = @import("Parser.zig");
+const service = @import("service.zig");
 const Tracer = @import("Tracer.zig");
 
 // Use scoped logging for skhd module
@@ -157,9 +158,14 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     log.info("Starting event tap", .{});
     self.event_tap.begin(keyHandler, self) catch |err| {
         if (err == error.AccessibilityPermissionDenied) {
-            const allocated_path: ?[]u8 = std.fs.selfExePathAlloc(self.allocator) catch null;
-            defer if (allocated_path) |path| self.allocator.free(path);
-            const exe_path = allocated_path orelse "/opt/homebrew/bin/skhd";
+            const raw_path: ?[]u8 = std.fs.selfExePathAlloc(self.allocator) catch null;
+            defer if (raw_path) |p| self.allocator.free(p);
+            const stable_path: ?[]const u8 = if (raw_path) |p|
+                service.resolveStableExePath(self.allocator, p) catch null
+            else
+                null;
+            defer if (stable_path) |p| self.allocator.free(p);
+            const exe_path = stable_path orelse raw_path orelse "/opt/homebrew/bin/skhd";
 
             log.err(
                 \\

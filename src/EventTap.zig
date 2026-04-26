@@ -15,14 +15,30 @@ pub fn enabled(self: *EventTap) bool {
 // pub const CGEventTapCallBack = ?*const fn (CGEventTapProxy, CGEventType, CGEventRef, ?*anyopaque) callconv(.c) CGEventRef;
 
 pub fn begin(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyopaque) !void {
-    self.handle = c.CGEventTapCreate(c.kCGSessionEventTap, c.kCGHeadInsertEventTap, //
-        c.kCGEventTapOptionDefault, self.mask, callback, user_info);
-    if (self.enabled()) {
-        self.runloop_source = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, self.handle, 0);
-        c.CFRunLoopAddSource(c.CFRunLoopGetMain(), self.runloop_source, c.kCFRunLoopCommonModes);
-    } else {
-        return error.AccessibilityPermissionDenied;
+    // CGEventTapCreate can transiently return NULL during early login on macOS
+    // (Tahoe especially) when WindowServer/TCC haven't finished coming up, even
+    // though accessibility permissions are granted. Retry briefly before giving
+    // up; a real permissions denial will fail every attempt and surface the
+    // same error after the retry budget is spent.
+    const max_attempts: u8 = 10;
+    const retry_delay_ns: u64 = 500 * std.time.ns_per_ms;
+
+    var attempt: u8 = 0;
+    while (attempt < max_attempts) : (attempt += 1) {
+        self.handle = c.CGEventTapCreate(c.kCGSessionEventTap, c.kCGHeadInsertEventTap, //
+            c.kCGEventTapOptionDefault, self.mask, callback, user_info);
+        if (self.enabled()) {
+            self.runloop_source = c.CFMachPortCreateRunLoopSource(c.kCFAllocatorDefault, self.handle, 0);
+            c.CFRunLoopAddSource(c.CFRunLoopGetMain(), self.runloop_source, c.kCFRunLoopCommonModes);
+            if (attempt > 0) log.info("Event tap created on attempt {d}/{d}", .{ attempt + 1, max_attempts });
+            return;
+        }
+        if (attempt + 1 < max_attempts) {
+            log.warn("Event tap creation failed (attempt {d}/{d}), retrying in 500ms...", .{ attempt + 1, max_attempts });
+            std.time.sleep(retry_delay_ns);
+        }
     }
+    return error.AccessibilityPermissionDenied;
 }
 
 pub fn deinit(self: *EventTap) void {

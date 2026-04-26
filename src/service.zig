@@ -88,17 +88,51 @@ const plist_template =
     \\    <key>KeepAlive</key>
     \\    <true/>
     \\    <key>StandardOutPath</key>
-    \\    <string>/tmp/skhd_{s}.log</string>
+    \\    <string>{s}/Library/Logs/skhd.log</string>
     \\    <key>StandardErrorPath</key>
-    \\    <string>/tmp/skhd_{s}.log</string>
+    \\    <string>{s}/Library/Logs/skhd.log</string>
     \\    <key>ThrottleInterval</key>
-    \\    <integer>30</integer>
+    \\    <integer>10</integer>
     \\    <key>ProcessType</key>
     \\    <string>Interactive</string>
     \\</dict>
     \\</plist>
     \\
 ;
+
+/// Resolve a Homebrew Cellar path (e.g. /opt/homebrew/Cellar/skhd-zig/0.0.15/bin/skhd)
+/// to its stable opt symlink (/opt/homebrew/opt/skhd-zig/bin/skhd) so the plist
+/// keeps working across `brew upgrade` + `brew cleanup`. Returns the input
+/// unchanged when no stable equivalent exists.
+pub fn resolveStableExePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]const u8 {
+    const cellar_marker = "/Cellar/";
+    const idx = std.mem.indexOf(u8, exe_path, cellar_marker) orelse {
+        return allocator.dupe(u8, exe_path);
+    };
+
+    const prefix = exe_path[0..idx];
+    const after_cellar = exe_path[idx + cellar_marker.len ..];
+
+    const formula_end = std.mem.indexOfScalar(u8, after_cellar, '/') orelse {
+        return allocator.dupe(u8, exe_path);
+    };
+    const formula = after_cellar[0..formula_end];
+
+    const after_formula = after_cellar[formula_end + 1 ..];
+    const version_end = std.mem.indexOfScalar(u8, after_formula, '/') orelse {
+        return allocator.dupe(u8, exe_path);
+    };
+    const rest = after_formula[version_end + 1 ..];
+
+    const candidate = try std.fmt.allocPrint(allocator, "{s}/opt/{s}/{s}", .{ prefix, formula, rest });
+    errdefer allocator.free(candidate);
+
+    std.fs.accessAbsolute(candidate, .{}) catch {
+        allocator.free(candidate);
+        return allocator.dupe(u8, exe_path);
+    };
+    return candidate;
+}
 
 pub fn getServicePath(allocator: std.mem.Allocator) ![]const u8 {
     const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
@@ -110,31 +144,40 @@ fn installOrUpdateService(allocator: std.mem.Allocator) !void {
     const service_path = try getServicePath(allocator);
     defer allocator.free(service_path);
 
-    // Get the current executable path
-    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    // Get the current executable path, then prefer a Homebrew-stable symlink
+    // when available so the plist survives `brew upgrade` + `brew cleanup`.
+    const raw_exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(raw_exe_path);
+    const exe_path = try resolveStableExePath(allocator, raw_exe_path);
     defer allocator.free(exe_path);
 
     // Get PATH environment variable
     const path_env = std.posix.getenv("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
 
-    // Get username for log file
-    const username = std.posix.getenv("USER") orelse "unknown";
+    const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
 
     // Format the plist content
     const plist_content = try std.fmt.allocPrint(allocator, plist_template, .{
         exe_path,
         path_env,
-        username,
-        username,
+        home,
+        home,
     });
     defer allocator.free(plist_content);
 
     // Create LaunchAgents directory if it doesn't exist
-    const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
     const launch_agents_dir = try std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents", .{home});
     defer allocator.free(launch_agents_dir);
 
     std.fs.makeDirAbsolute(launch_agents_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+
+    // Ensure ~/Library/Logs exists so launchd can write Standard{Out,Error}Path
+    const logs_dir = try std.fmt.allocPrint(allocator, "{s}/Library/Logs", .{home});
+    defer allocator.free(logs_dir);
+
+    std.fs.makeDirAbsolute(logs_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
 
@@ -201,13 +244,13 @@ pub fn startService(allocator: std.mem.Allocator) !void {
         if (stderr_data.items.len > 0) {
             std.debug.print("Failed to start service: {s}\n", .{stderr_data.items});
         } else {
-            std.debug.print("Failed to start service. Check /tmp/skhd_$USER.log for details.\n", .{});
+            std.debug.print("Failed to start service. Check ~/Library/Logs/skhd.log for details.\n", .{});
         }
         return error.ServiceStartFailed;
     }
 
     std.debug.print("Service started successfully.\n", .{});
-    std.debug.print("Check logs at: /tmp/skhd_{s}.log\n", .{std.posix.getenv("USER") orelse "unknown"});
+    std.debug.print("Check logs at: {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
 }
 
 pub fn stopService(allocator: std.mem.Allocator) !void {
@@ -290,7 +333,7 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
 
     if (service_installed) {
         std.debug.print("  Service path: {s}\n", .{service_path});
-        std.debug.print("  Log file: /tmp/skhd_{s}.log\n", .{std.posix.getenv("USER") orelse "unknown"});
+        std.debug.print("  Log file: {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
     }
 
     if (!service_installed) {

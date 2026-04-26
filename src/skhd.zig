@@ -5,6 +5,7 @@ const c = @import("c.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
+const HidMonitor = @import("HidMonitor.zig");
 const Hotkey = @import("Hotkey.zig");
 const Hotload = @import("Hotload.zig");
 const Keycodes = @import("Keycodes.zig");
@@ -14,6 +15,12 @@ const Mode = @import("Mode.zig");
 const Parser = @import("Parser.zig");
 const service = @import("service.zig");
 const Tracer = @import("Tracer.zig");
+
+/// Correlation window: HID events older than this from a CGEvent's
+/// timestamp don't count. 5ms is well above macOS scheduling jitter for
+/// the common case (sub-ms) but tight enough to avoid false matches when
+/// two devices fire in quick succession.
+const CORRELATION_WINDOW_NS: u64 = 5_000_000;
 
 // Use scoped logging for skhd module
 const log = std.log.scoped(.skhd);
@@ -40,6 +47,10 @@ hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
 watchdog_timer: c.CFRunLoopTimerRef = null,
+/// Lazy: only allocated when at least one `.device` alias is declared,
+/// guarding any hotkey via `[device <name>]`. Null means per-device
+/// matching is disabled and lookups behave exactly like prior versions.
+hid_monitor: ?*HidMonitor = null,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -91,6 +102,22 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
 
+    // Lazy-init HidMonitor only if the user has declared `.device` aliases.
+    // The monitor consumes Input Monitoring permission and a small CPU
+    // budget per event, so it stays off when not needed.
+    var hid_monitor: ?*HidMonitor = null;
+    if (mappings.device_aliases.count() > 0) {
+        hid_monitor = HidMonitor.init(gpa) catch |err| blk: {
+            log.warn("Failed to init HID monitor: {s}. Per-device matching disabled.", .{@errorName(err)});
+            break :blk null;
+        };
+        if (hid_monitor) |hm| {
+            log.info("HID monitor initialized for {d} device alias(es)", .{mappings.device_aliases.count()});
+            _ = hm;
+        }
+    }
+    errdefer if (hid_monitor) |hm| hm.deinit();
+
     return Skhd{
         .allocator = gpa,
         .mappings = mappings,
@@ -100,6 +127,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         .verbose = verbose,
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
+        .hid_monitor = hid_monitor,
     };
 }
 
@@ -116,6 +144,7 @@ pub fn deinit(self: *Skhd) void {
     self.stopWatchdog();
     self.carbon_event.deinit();
     self.event_tap.deinit();
+    if (self.hid_monitor) |hm| hm.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
 }
@@ -294,6 +323,15 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
 
     log.info("Event tap created successfully. skhd is now running.", .{});
 
+    // Open the HID monitor after the event tap is wired up. Failure here
+    // (typically Input Monitoring permission denied) is non-fatal: the
+    // daemon keeps running, just without per-device attribution.
+    if (self.hid_monitor) |hm| {
+        if (!hm.open()) {
+            log.warn("Per-device matching is disabled. Grant Input Monitoring in System Settings → Privacy & Security to enable .device features.", .{});
+        }
+    }
+
     // Watchdog reconciles the tap with TCC state every 1s. Catches runtime
     // accessibility revoke (which the OS doesn't surface via the disabled
     // callback) and re-grant.
@@ -365,7 +403,8 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return event;
     }
 
-    const eventkey = createEventKey(event);
+    const device_alias = self.resolveSourceDevice(event);
+    const eventkey = createEventKey(event, device_alias);
     const result = try self.processHotkey(&eventkey, event, process_name);
     return try self.handleHotkeyResult(result, event, eventkey, process_name);
 }
@@ -415,6 +454,7 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
 
     var eventkey: Hotkey.KeyPress = undefined;
     if (interceptSystemKey(event, &eventkey)) {
+        eventkey.device_guard = self.resolveSourceDevice(event);
         const result = try self.processHotkey(&eventkey, event, process_name);
         return try self.handleHotkeyResult(result, event, eventkey, process_name);
     }
@@ -422,11 +462,34 @@ inline fn handleSystemKey(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     return event;
 }
 
-inline fn createEventKey(event: c.CGEventRef) Hotkey.KeyPress {
+inline fn createEventKey(event: c.CGEventRef, device_alias: ?[]const u8) Hotkey.KeyPress {
     return .{
         .key = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode)),
         .flags = cgeventFlagsToHotkeyFlags(c.CGEventGetFlags(event)),
+        .device_guard = device_alias,
     };
+}
+
+/// Look up the source device of a CGEvent via the HidMonitor's ring
+/// buffer, then resolve the (vendor, product) pair to a configured device
+/// alias name. Returns null when:
+///   - the HidMonitor isn't running (no `.device` aliases declared, or
+///     Input Monitoring permission denied)
+///   - no HID input event correlates within `CORRELATION_WINDOW_NS`
+///   - the source device's vendor/product matches no declared alias
+/// In all null cases, hotkey lookup falls back to unguarded rules.
+inline fn resolveSourceDevice(self: *Skhd, event: c.CGEventRef) ?[]const u8 {
+    const hm = self.hid_monitor orelse return null;
+    if (self.mappings.device_aliases.count() == 0) return null;
+    const ts = c.CGEventGetTimestamp(event);
+    const dev = hm.findRecentDevice(ts, CORRELATION_WINDOW_NS) orelse return null;
+    var it = self.mappings.device_aliases.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.vendor == dev.vendor and entry.value_ptr.product == dev.product) {
+            return entry.key_ptr.*;
+        }
+    }
+    return null;
 }
 
 inline fn cgeventFlagsToHotkeyFlags(event_flags: c.CGEventFlags) ModifierFlag {
@@ -707,11 +770,29 @@ pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.
     // return self.findHotkeyLinear(mode, eventkey);
 }
 
-/// HashMap-based lookup using adapted context
+/// HashMap-based lookup using adapted context. Two-pass for device-guarded
+/// rules: first try with the device guard set (matches rules whose
+/// `device_guard` equals the event's source device alias), then fall
+/// through to a null-guarded pass (matches the device-agnostic rule with
+/// no guard). This implements the "most-specific-wins" policy decided in
+/// the design phase.
 pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
     self.tracer.traceHotkeyLookup();
     const ctx = Hotkey.KeyboardLookupContext{};
-    const result = mode.hotkey_map.getKeyAdapted(eventkey, ctx);
+
+    // Pass 1: device-guarded match (only if event has a known source).
+    if (eventkey.device_guard != null) {
+        if (mode.hotkey_map.getKeyAdapted(eventkey, ctx)) |hk| {
+            self.tracer.traceHotkeyFound(true);
+            return hk;
+        }
+    }
+
+    // Pass 2: unguarded fallback. Strip device_guard before lookup so
+    // KeyboardLookupContext.eql sees null on both sides.
+    var fallback = eventkey;
+    fallback.device_guard = null;
+    const result = mode.hotkey_map.getKeyAdapted(fallback, ctx);
     self.tracer.traceHotkeyFound(result != null);
     return result;
 }

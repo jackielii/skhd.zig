@@ -11,8 +11,17 @@ shell: [:0]const u8,
 loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
 // Track all hotkeys for cleanup (hotkeys can belong to multiple modes)
 hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
+// Device aliases declared via `.device <name> <vendor> <product>`. Empty
+// when the user hasn't opted into per-device matching, in which case the
+// IOHIDManager monitor is never started.
+device_aliases: std.StringHashMapUnmanaged(DeviceAlias) = .empty,
 
 const Mappings = @This();
+
+pub const DeviceAlias = struct {
+    vendor: u32,
+    product: u32,
+};
 
 pub fn init(alloc: std.mem.Allocator) !Mappings {
     const default_shell = "/bin/bash";
@@ -46,6 +55,11 @@ pub fn deinit(self: *Mappings) void {
         var it = self.blacklist.keyIterator();
         while (it.next()) |key| self.allocator.free(key.*);
         self.blacklist.deinit(self.allocator);
+    }
+    {
+        var it = self.device_aliases.keyIterator();
+        while (it.next()) |key| self.allocator.free(key.*);
+        self.device_aliases.deinit(self.allocator);
     }
     self.allocator.free(self.shell);
 
@@ -81,6 +95,15 @@ pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     }
     const owned = try self.allocator.dupe(u8, key);
     try self.blacklist.put(self.allocator, owned, void{});
+}
+
+pub fn add_device_alias(self: *Mappings, name: []const u8, vendor: u32, product: u32) !void {
+    if (self.device_aliases.contains(name)) {
+        return error.DeviceAliasAlreadyExists;
+    }
+    const owned = try self.allocator.dupe(u8, name);
+    errdefer self.allocator.free(owned);
+    try self.device_aliases.put(self.allocator, owned, .{ .vendor = vendor, .product = product });
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -166,6 +189,22 @@ test "format" {
     defer alloc.free(formatted);
     try std.testing.expect(formatted.len > 0);
     try std.testing.expect(mode != null);
+}
+
+test "add_device_alias returns error on duplicate" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_device_alias("builtin", 0x05AC, 0x0342);
+
+    const result = mappings.add_device_alias("builtin", 0x04FE, 0x0021);
+    try std.testing.expectError(error.DeviceAliasAlreadyExists, result);
+
+    const entry = mappings.device_aliases.get("builtin").?;
+    try std.testing.expectEqual(@as(u32, 0x05AC), entry.vendor);
+    try std.testing.expectEqual(@as(u32, 0x0342), entry.product);
+    try std.testing.expectEqual(@as(usize, 1), mappings.device_aliases.count());
 }
 
 test "add_blacklist returns error on duplicate" {

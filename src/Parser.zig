@@ -192,6 +192,39 @@ fn match(self: *Parser, typ: Tokenizer.TokenType) bool {
     return false;
 }
 
+const SavedPosition = struct {
+    tokenizer_pos: usize,
+    tokenizer_line: usize,
+    tokenizer_cursor: usize,
+    tokenizer_rw: usize,
+    previous_token: ?Token,
+    next_token: ?Token,
+};
+
+/// Snapshot the tokenizer + parser cursor so a speculative parse can be
+/// rolled back. Used at decision points where the next bracket could be a
+/// device guard or the existing process list — peek two tokens, then
+/// commit or rewind.
+fn savePosition(self: *Parser) SavedPosition {
+    return .{
+        .tokenizer_pos = self.tokenizer.pos,
+        .tokenizer_line = self.tokenizer.line,
+        .tokenizer_cursor = self.tokenizer.cursor,
+        .tokenizer_rw = self.tokenizer.rw,
+        .previous_token = self.previous_token,
+        .next_token = self.next_token,
+    };
+}
+
+fn restorePosition(self: *Parser, pos: SavedPosition) void {
+    self.tokenizer.pos = pos.tokenizer_pos;
+    self.tokenizer.line = pos.tokenizer_line;
+    self.tokenizer.cursor = pos.tokenizer_cursor;
+    self.tokenizer.rw = pos.tokenizer_rw;
+    self.previous_token = pos.previous_token;
+    self.next_token = pos.next_token;
+}
+
 /// Process escape sequences in a string, replacing \\ with \ and \" with "
 fn processStringOwned(self: *Parser, str: []const u8) ![]const u8 {
     var result = std.ArrayList(u8).init(self.allocator);
@@ -291,6 +324,31 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         const token = self.peek() orelse self.previous();
         self.error_info = try ParseError.fromToken(self.allocator, token, "Expected key, key hex, or literal", self.current_file_path);
         return error.ParseErrorOccurred;
+    }
+
+    // Optional device guard: [device <alias>]. Sits between the key combo
+    // and the action separator. Disambiguates from the action-position
+    // process list (`[ "kitty" : ... ]`) because the action dispatch below
+    // consumes its own `[`.
+    if (self.peek()) |t| {
+        if (t.type == .Token_BeginList) {
+            // Save state so we can rewind if this turns out to be a process
+            // list (i.e. the existing syntax for hotkeys with no device
+            // guard but a process list, e.g. `key [ "app" : cmd ]`).
+            const saved = self.savePosition();
+            _ = self.advance(); // consume [
+            const peeked = self.peek();
+            const looks_like_device_guard = peeked != null and
+                peeked.?.type == .Token_Identifier and
+                std.mem.eql(u8, peeked.?.text, "device");
+            if (looks_like_device_guard) {
+                try self.parse_device_guard_body(mappings, hotkey);
+            } else {
+                // Not a device guard — restore so action dispatch handles
+                // the `[` as a process list.
+                self.restorePosition(saved);
+            }
+        }
     }
 
     if (self.match(.Token_Arrow)) {
@@ -1048,12 +1106,147 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected shell path after 'shell'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
+    } else if (std.mem.eql(u8, option, "device")) {
+        try self.parse_device_decl(mappings);
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell", .{option});
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell, device", .{option});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
         return error.ParseErrorOccurred;
     }
+}
+
+/// Parse the body of `[device <alias>]` after `[` has been consumed and
+/// `device` has been confirmed as the next token (caller verified). On
+/// success, sets `hotkey.device_guard` to an owned copy of the alias name.
+fn parse_device_guard_body(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
+    // The caller peeked the `device` identifier; consume it now.
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected 'device' keyword inside guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    // (text already verified == "device")
+
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected device alias name after 'device'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const alias_token = self.previous();
+    const alias_name = alias_token.text;
+
+    if (!mappings.device_aliases.contains(alias_name)) {
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown device alias '{s}'. Declare it with '.device {s} 0xVENDOR 0xPRODUCT' before referencing", .{ alias_name, alias_name });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, alias_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    if (!self.match(.Token_EndList)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ']' to close device guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    if (hotkey.device_guard != null) {
+        const token = alias_token;
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Multiple device guards on a single hotkey are not supported", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    hotkey.device_guard = try self.allocator.dupe(u8, alias_name);
+}
+
+/// Parse `.device <name> { vendor: 0x..., product: 0x... }`. The
+/// `.device` token has already been consumed by the caller. Field order
+/// is free; commas between fields are optional. Unknown field names are
+/// a parse error rather than a silent skip — keeps the door open for
+/// future extension (transport, serial, etc.) without ambiguity.
+fn parse_device_decl(self: *Parser, mappings: *Mappings) !void {
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected device alias name after '.device'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const name_token = self.previous();
+    const name = name_token.text;
+
+    if (!self.match(.Token_BeginBlock)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '{' after device alias name (use form: .device <name> { vendor: 0x..., product: 0x... })", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    var vendor: ?u32 = null;
+    var product: ?u32 = null;
+
+    while (!self.match(.Token_EndBlock)) {
+        if (!self.match(.Token_Identifier)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected field name (vendor / product) or '}'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        const field_token = self.previous();
+        const field_name = field_token.text;
+
+        if (!self.match(.Token_Colon)) {
+            const token = self.peek() orelse self.previous();
+            const msg = try std.fmt.allocPrint(self.allocator, "Expected ':' after field name '{s}'", .{field_name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        if (!self.match(.Token_Key_Hex)) {
+            const token = self.peek() orelse self.previous();
+            const msg = try std.fmt.allocPrint(self.allocator, "Expected hex value (e.g., 0x05AC) for field '{s}'", .{field_name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        const value = try self.parse_key_hex();
+
+        if (std.mem.eql(u8, field_name, "vendor")) {
+            if (vendor != null) {
+                self.error_info = try ParseError.fromToken(self.allocator, field_token, "Duplicate field 'vendor'", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+            vendor = value;
+        } else if (std.mem.eql(u8, field_name, "product")) {
+            if (product != null) {
+                self.error_info = try ParseError.fromToken(self.allocator, field_token, "Duplicate field 'product'", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+            product = value;
+        } else {
+            const msg = try std.fmt.allocPrint(self.allocator, "Unknown field '{s}' in .device block. Supported fields: vendor, product", .{field_name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, field_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        // Comma between fields is optional; whitespace/newline also OK.
+        _ = self.match(.Token_Comma);
+    }
+
+    if (vendor == null) {
+        self.error_info = try ParseError.fromToken(self.allocator, name_token, "Missing required field 'vendor' in .device block", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (product == null) {
+        self.error_info = try ParseError.fromToken(self.allocator, name_token, "Missing required field 'product' in .device block", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    mappings.add_device_alias(name, vendor.?, product.?) catch |err| {
+        if (err == error.DeviceAliasAlreadyExists) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Device alias '{s}' already declared", .{name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, name_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return err;
+    };
 }
 
 pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
@@ -1116,6 +1309,173 @@ test "init" {
     const alloc = std.testing.allocator;
     var parser = try Parser.init(alloc);
     defer parser.deinit();
+}
+
+test ".device declaration registers alias" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.device hhkb    { vendor: 0x04FE, product: 0x0021 }
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), mappings.device_aliases.count());
+    const builtin = mappings.device_aliases.get("builtin").?;
+    try std.testing.expectEqual(@as(u32, 0x05AC), builtin.vendor);
+    try std.testing.expectEqual(@as(u32, 0x0342), builtin.product);
+    const hhkb = mappings.device_aliases.get("hhkb").?;
+    try std.testing.expectEqual(@as(u32, 0x04FE), hhkb.vendor);
+    try std.testing.expectEqual(@as(u32, 0x0021), hhkb.product);
+}
+
+test ".device with field order swapped" {
+    // Field order is free.
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin { product: 0x0342, vendor: 0x05AC }
+    );
+    const e = mappings.device_aliases.get("builtin").?;
+    try std.testing.expectEqual(@as(u32, 0x05AC), e.vendor);
+    try std.testing.expectEqual(@as(u32, 0x0342), e.product);
+}
+
+test ".device without comma between fields" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin {
+        \\    vendor: 0x05AC
+        \\    product: 0x0342
+        \\}
+    );
+    const e = mappings.device_aliases.get("builtin").?;
+    try std.testing.expectEqual(@as(u32, 0x05AC), e.vendor);
+    try std.testing.expectEqual(@as(u32, 0x0342), e.product);
+}
+
+test ".device unknown field is a parse error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342, transport: 0x01 }
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".device missing required field is a parse error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC }
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test ".device duplicate is a parse error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.device builtin { vendor: 0x04FE, product: 0x0021 }
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test "[device <alias>] guard is captured on hotkey" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\ctrl - h [device builtin] : echo on-builtin
+        \\ctrl - h : echo anywhere
+    );
+
+    // Two distinct hotkeys for ctrl-h: one device-guarded, one not.
+    const default_mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 2), default_mode.hotkey_map.count());
+
+    var found_guarded = false;
+    var found_unguarded = false;
+    var it = default_mode.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hk = entry.key_ptr.*;
+        if (hk.device_guard) |g| {
+            try std.testing.expectEqualStrings("builtin", g);
+            found_guarded = true;
+        } else {
+            found_unguarded = true;
+        }
+    }
+    try std.testing.expect(found_guarded);
+    try std.testing.expect(found_unguarded);
+}
+
+test "[device <alias>] with unknown alias is a parse error" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const result = parser.parse(&mappings,
+        \\ctrl - h [device builtin] : echo
+    );
+    try std.testing.expectError(error.ParseErrorOccurred, result);
+}
+
+test "process list still parses (no device guard regression)" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\cmd - h [
+        \\    "kitty" : echo k
+        \\    *       : echo o
+        \\]
+    );
+    const default_mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), default_mode.hotkey_map.count());
 }
 
 test "Parse" {

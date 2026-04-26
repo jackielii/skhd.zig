@@ -9,6 +9,11 @@ pub usingnamespace @cImport({
     @cInclude("sys/wait.h");
     @cInclude("fcntl.h");
     @cInclude("IOKit/hidsystem/ev_keymap.h");
+    // IOHIDManager / IOHIDDevice / IOHIDValue: user-space HID monitor used
+    // by the .device feature to identify which keyboard sourced each
+    // keystroke. Read-only — no device seize.
+    @cInclude("IOKit/hid/IOHIDManager.h");
+    @cInclude("IOKit/hid/IOHIDKeys.h");
 });
 
 // Additional declarations

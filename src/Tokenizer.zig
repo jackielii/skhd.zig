@@ -42,6 +42,16 @@ pub const TokenType = enum {
     Token_BeginTuple,
     Token_EndTuple,
 
+    /// `{` / `}` brace block. Used by structured declarations like
+    /// `.device builtin { vendor: 0x05AC, product: 0x0342 }`. While
+    /// `block_depth > 0`, a bare `:` lexes as Token_Colon (a plain
+    /// separator) rather than the command-grabbing `:` used at top
+    /// level. This keeps the existing colon-grabs-to-newline behavior
+    /// intact for hotkey rules outside of blocks.
+    Token_BeginBlock,
+    Token_EndBlock,
+    Token_Colon,
+
     Token_Unknown,
 };
 
@@ -69,6 +79,10 @@ cursor: usize = 1,
 
 // last rune size
 rw: usize = 0,
+
+/// Number of currently-open `{` blocks. Inside a block, `:` lexes as
+/// Token_Colon instead of the command-grabbing top-level form.
+block_depth: usize = 0,
 
 const Tokenizer = @This();
 
@@ -117,6 +131,14 @@ pub fn get_token(self: *Tokenizer) ?Token {
         ']' => token.type = .Token_EndList,
         '(' => token.type = .Token_BeginTuple,
         ')' => token.type = .Token_EndTuple,
+        '{' => {
+            self.block_depth += 1;
+            token.type = .Token_BeginBlock;
+        },
+        '}' => {
+            if (self.block_depth > 0) self.block_depth -= 1;
+            token.type = .Token_EndBlock;
+        },
         '.' => {
             token.type = .Token_Option;
             // Don't include the . in the token text
@@ -149,6 +171,12 @@ pub fn get_token(self: *Tokenizer) ?Token {
             if (self.accept(":") != null) {
                 token.type = .Token_Decl;
                 token.text = "::";
+            } else if (self.block_depth > 0) {
+                // Inside a `{ ... }` block, `:` is a plain separator.
+                // Consume only the colon; the next call to get_token()
+                // will return whatever follows on its own.
+                token.type = .Token_Colon;
+                token.text = ":";
             } else {
                 self.skipWhitespace();
                 token.line = self.line;
@@ -405,6 +433,51 @@ test "format token" {
     try std.testing.expectEqual(@as(usize, 1), token.cursor);
     try std.testing.expectEqual(TokenType.Token_Identifier, token.type);
     try std.testing.expectEqualStrings("hello", token.text);
+}
+
+test "tokenize brace block with colon separators" {
+    const input =
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+    ;
+    var tokenizer = try init(input);
+
+    const expected = [_]struct { type: TokenType, text: []const u8 }{
+        .{ .type = .Token_Option, .text = "device" },
+        .{ .type = .Token_Identifier, .text = "builtin" },
+        .{ .type = .Token_BeginBlock, .text = "{" },
+        .{ .type = .Token_Identifier, .text = "vendor" },
+        .{ .type = .Token_Colon, .text = ":" },
+        .{ .type = .Token_Key_Hex, .text = "05AC" },
+        .{ .type = .Token_Comma, .text = "," },
+        .{ .type = .Token_Identifier, .text = "product" },
+        .{ .type = .Token_Colon, .text = ":" },
+        .{ .type = .Token_Key_Hex, .text = "0342" },
+        .{ .type = .Token_EndBlock, .text = "}" },
+    };
+    for (expected) |e| {
+        const tok = tokenizer.get_token();
+        try std.testing.expect(tok != null);
+        try std.testing.expectEqual(e.type, tok.?.type);
+        try std.testing.expectEqualStrings(e.text, tok.?.text);
+    }
+    try std.testing.expect(tokenizer.get_token() == null);
+}
+
+test "colon outside block still grabs command" {
+    // Sanity: outside `{}`, the existing colon-grabs-to-newline behavior
+    // is preserved. `cmd - h : echo hi` continues to lex as in v0.
+    const input = "cmd - h : echo hi";
+    var tokenizer = try init(input);
+
+    const t1 = tokenizer.get_token().?;
+    try std.testing.expectEqual(TokenType.Token_Modifier, t1.type);
+    const t2 = tokenizer.get_token().?;
+    try std.testing.expectEqual(TokenType.Token_Dash, t2.type);
+    const t3 = tokenizer.get_token().?;
+    try std.testing.expectEqual(TokenType.Token_Key, t3.type);
+    const t4 = tokenizer.get_token().?;
+    try std.testing.expectEqual(TokenType.Token_Command, t4.type);
+    try std.testing.expectEqualStrings("echo hi", t4.text);
 }
 
 test "tokenize option" {

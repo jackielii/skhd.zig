@@ -20,6 +20,11 @@ wildcard_command: ?ProcessCommand = null,
 // Use ArrayHashMap for process name -> command mapping
 mappings: std.StringArrayHashMapUnmanaged(ProcessCommand) = .empty,
 mode_list: std.AutoArrayHashMapUnmanaged(*Mode, void) = .empty,
+// Optional device alias name. When set, this hotkey only fires for events
+// whose source device matches the alias. When null, the hotkey is the
+// device-agnostic fallback (most-specific-wins lookup tries guarded rules
+// first, falls through to null-guarded).
+device_guard: ?[]const u8 = null,
 
 pub fn destroy(self: *Hotkey) void {
     var it = self.mappings.iterator();
@@ -32,6 +37,10 @@ pub fn destroy(self: *Hotkey) void {
     // Free wildcard command if any
     if (self.wildcard_command) |cmd| {
         cmd.deinit(self.allocator);
+    }
+
+    if (self.device_guard) |guard| {
+        self.allocator.free(guard);
     }
 
     self.mode_list.deinit(self.allocator);
@@ -61,18 +70,29 @@ pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
 pub const KeyPress = struct {
     flags: ModifierFlag,
     key: u32,
+    /// Source device alias name. null means "device-agnostic" (matches
+    /// rules with `device_guard == null`); non-null matches rules whose
+    /// `device_guard` equals this string.
+    device_guard: ?[]const u8 = null,
 };
 
 pub fn eql(a: *Hotkey, b: *Hotkey) bool {
     // Implement left/right modifier comparison logic like original skhd
     // Note: This is for HashMap equality check, both are from config
-    return compareLRMod(a.flags, b.flags, .alt) and
-        compareLRMod(a.flags, b.flags, .cmd) and
-        compareLRMod(a.flags, b.flags, .control) and
-        compareLRMod(a.flags, b.flags, .shift) and
-        a.flags.@"fn" == b.flags.@"fn" and
-        a.flags.nx == b.flags.nx and
-        a.key == b.key;
+    if (!compareLRMod(a.flags, b.flags, .alt)) return false;
+    if (!compareLRMod(a.flags, b.flags, .cmd)) return false;
+    if (!compareLRMod(a.flags, b.flags, .control)) return false;
+    if (!compareLRMod(a.flags, b.flags, .shift)) return false;
+    if (a.flags.@"fn" != b.flags.@"fn") return false;
+    if (a.flags.nx != b.flags.nx) return false;
+    if (a.key != b.key) return false;
+    return deviceGuardEql(a.device_guard, b.device_guard);
+}
+
+fn deviceGuardEql(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
 }
 
 fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd, control, shift }) bool {
@@ -118,7 +138,15 @@ pub const KeyboardLookupContext = struct {
 
     pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
         // Match keyboard event against config hotkey
-        return config.key == keyboard.key and hotkeyFlagsMatch(config.flags, keyboard.flags);
+        if (config.key != keyboard.key) return false;
+        if (!hotkeyFlagsMatch(config.flags, keyboard.flags)) return false;
+        // Device guard match: keyboard.device_guard is what the caller is
+        // looking for at this lookup pass. Two-pass lookup convention:
+        //   pass 1: keyboard.device_guard = <source device alias>  -> only
+        //           matches rules whose device_guard equals it
+        //   pass 2: keyboard.device_guard = null                   -> only
+        //           matches rules with no device_guard (fallback)
+        return deviceGuardEql(keyboard.device_guard, config.device_guard);
     }
 };
 

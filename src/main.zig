@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const track_alloc = @import("build_options").track_alloc;
 
 const c = @import("c.zig");
+const HidMonitor = @import("HidMonitor.zig");
 const service = @import("service.zig");
 const Skhd = @import("skhd.zig");
 const synthesize = @import("synthesize.zig");
@@ -117,6 +118,9 @@ pub fn main() !void {
             return;
         } else if (std.mem.eql(u8, args[i], "-r") or std.mem.eql(u8, args[i], "--reload")) {
             try service.reloadConfig(gpa);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--list-devices")) {
+            try listDevices(gpa);
             return;
         } else if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--no-hotload")) {
             no_hotload = true;
@@ -331,6 +335,90 @@ fn fileExists(path: []const u8) bool {
     return true;
 }
 
+/// Enumerate connected keyboard-class HID devices and print
+/// copy-pasteable `.device` declarations. Requires Input Monitoring
+/// permission to read device properties.
+fn listDevices(allocator: std.mem.Allocator) !void {
+    var hm = try HidMonitor.init(allocator);
+    defer hm.deinit();
+
+    hm.enumerateNow() catch |err| {
+        if (err == error.PermissionDenied) {
+            const stderr = std.io.getStdErr().writer();
+            try stderr.print(
+                \\Error: Input Monitoring permission required.
+                \\
+                \\Grant via: System Settings → Privacy & Security → Input Monitoring.
+                \\Add the skhd binary or skhd.app, then run `skhd --list-devices` again.
+                \\
+            , .{});
+            return;
+        }
+        return err;
+    };
+
+    const list = try hm.snapshotDevices(allocator);
+    defer allocator.free(list);
+
+    const stdout = std.io.getStdOut().writer();
+    if (list.len == 0) {
+        try stdout.print("No keyboard-class HID devices found.\n", .{});
+        return;
+    }
+
+    try stdout.print("Found {d} keyboard device(s):\n\n", .{list.len});
+    for (list, 0..) |entry, idx| {
+        var sugg_buf: [64]u8 = undefined;
+        const sugg = suggestAlias(&sugg_buf, entry.product_name, idx + 1);
+        try stdout.print("  {s}  (0x{x:0>4}:0x{x:0>4}, {s})\n", .{
+            if (entry.product_name.len > 0) entry.product_name else "(unnamed)",
+            entry.vendor,
+            entry.product,
+            @tagName(entry.transport),
+        });
+        try stdout.print("    .device {s} 0x{x:0>4} 0x{x:0>4}\n\n", .{ sugg, entry.vendor, entry.product });
+    }
+}
+
+/// Build a config-friendly alias name from a device's product string.
+/// Lowercases, drops non-alphanumerics, takes the first identifier-like
+/// run. Falls back to `deviceN` when the product string is empty or has
+/// no usable identifier characters.
+fn suggestAlias(buf: []u8, product_name: []const u8, idx: usize) []const u8 {
+    var n: usize = 0;
+    var saw_alnum = false;
+    for (product_name) |ch| {
+        if (n >= buf.len - 1) break;
+        if (std.ascii.isAlphanumeric(ch)) {
+            buf[n] = std.ascii.toLower(ch);
+            n += 1;
+            saw_alnum = true;
+        } else if (saw_alnum) {
+            // Stop at first non-alnum after we've collected something —
+            // gives "Apple Internal Keyboard" → "apple".
+            break;
+        }
+    }
+    if (n == 0 or !std.ascii.isAlphabetic(buf[0])) {
+        // Identifier must start with a letter; fall back to deviceN.
+        return std.fmt.bufPrint(buf, "device{d}", .{idx}) catch "device";
+    }
+    return buf[0..n];
+}
+
+test "suggestAlias from product names" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("apple", suggestAlias(&buf, "Apple Internal Keyboard", 1));
+    try std.testing.expectEqualStrings("hhkb", suggestAlias(&buf, "HHKB-Hybrid", 2));
+    try std.testing.expectEqualStrings("magic", suggestAlias(&buf, "Magic Keyboard", 3));
+    // Empty product name → numeric fallback.
+    try std.testing.expectEqualStrings("device4", suggestAlias(&buf, "", 4));
+    // Pure punctuation → numeric fallback.
+    try std.testing.expectEqualStrings("device5", suggestAlias(&buf, "---", 5));
+    // Leading digits get stripped (identifiers must start with a letter).
+    try std.testing.expectEqualStrings("device6", suggestAlias(&buf, "123 Device", 6));
+}
+
 fn printHelp() void {
     std.debug.print(
         \\skhd - Simple Hotkey Daemon for macOS
@@ -346,6 +434,7 @@ fn printHelp() void {
         \\  -k, --key <keyspec>    Synthesize a keypress
         \\  -t, --text <text>      Synthesize text input
         \\  -r, --reload           Reload config on running instance
+        \\      --list-devices     List connected HID keyboards (for `.device` aliases)
         \\  -v, --version          Print version
         \\      --help             Show this help message
         \\

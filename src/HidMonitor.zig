@@ -51,6 +51,30 @@ pub const Transport = enum {
     other,
 };
 
+/// Cached `mach_timebase_info()` for converting `IOHIDValueGetTimeStamp`
+/// (raw mach_absolute_time ticks) into nanoseconds. On Apple Silicon
+/// the ratio is typically 125/3 (~41.67 ns/tick); on Intel it's 1/1
+/// (ticks already equal nanoseconds). CGEventGetTimestamp returns
+/// nanoseconds pre-converted (despite Apple's docs implying otherwise),
+/// so we have to align HID timestamps to that unit before correlating.
+var timebase_numer: u32 = 0;
+var timebase_denom: u32 = 0;
+
+extern "c" fn mach_timebase_info(info: *mach_timebase_info_data) c_int;
+
+const mach_timebase_info_data = extern struct {
+    numer: u32,
+    denom: u32,
+};
+
+fn ticksToNanos(ticks: u64) u64 {
+    if (timebase_denom == 0) return ticks; // not initialised; fall back
+    // (ticks * numer) / denom — multiply first for precision. ticks is
+    // u64; even on Apple Silicon it won't overflow for any realistic
+    // uptime.
+    return (ticks * timebase_numer) / timebase_denom;
+}
+
 allocator: std.mem.Allocator,
 manager: c.IOHIDManagerRef,
 /// Ring of recent HID input events. Single-producer (HID callback on
@@ -70,6 +94,23 @@ devices: std.AutoHashMapUnmanaged(c.IOHIDDeviceRef, DeviceInfo),
 opened: bool,
 
 pub fn init(allocator: std.mem.Allocator) !*HidMonitor {
+    // One-time mach_timebase setup. Cheap to do here; the values are
+    // constant for the life of the process.
+    if (timebase_denom == 0) {
+        var info: mach_timebase_info_data = .{ .numer = 0, .denom = 0 };
+        if (mach_timebase_info(&info) == 0 and info.denom != 0) {
+            timebase_numer = info.numer;
+            timebase_denom = info.denom;
+            log.info("mach_timebase: numer={d} denom={d} ({d:.2} ns/tick)", .{
+                info.numer,
+                info.denom,
+                @as(f64, @floatFromInt(info.numer)) / @as(f64, @floatFromInt(info.denom)),
+            });
+        } else {
+            log.warn("mach_timebase_info failed; HID timestamps will not be unit-aligned with CGEvent. Correlation will likely miss.", .{});
+        }
+    }
+
     const self = try allocator.create(HidMonitor);
     errdefer allocator.destroy(self);
 
@@ -284,13 +325,16 @@ fn inputValueCallback(ctx: ?*anyopaque, _: c.IOReturn, _: ?*anyopaque, value: c.
     const device = c.IOHIDElementGetDevice(elem) orelse return;
     const info = self.devices.get(device) orelse return; // unknown device, skip
 
-    const ts = c.IOHIDValueGetTimeStamp(value);
+    // IOHIDValueGetTimeStamp returns raw mach_absolute_time ticks;
+    // CGEventGetTimestamp returns nanoseconds. Convert here so the ring
+    // buffer holds nanoseconds end-to-end.
+    const ts_ns = ticksToNanos(c.IOHIDValueGetTimeStamp(value));
     const usage_page = c.IOHIDElementGetUsagePage(elem);
     const usage = c.IOHIDElementGetUsage(elem);
     const v: i32 = @truncate(c.IOHIDValueGetIntegerValue(value));
 
     self.ring[self.ring_pos] = .{
-        .timestamp = ts,
+        .timestamp = ts_ns,
         .vendor = info.vendor,
         .product = info.product,
         .usage_page = usage_page,
@@ -298,6 +342,13 @@ fn inputValueCallback(ctx: ?*anyopaque, _: c.IOReturn, _: ?*anyopaque, value: c.
         .value = v,
     };
     self.ring_pos = (self.ring_pos + 1) % RING_SIZE;
+
+    // Diagnostic: surface every keyboard-page key event so the user can
+    // see whether IOHIDManager is actually capturing the same physical
+    // events that CGEventTap is later asked to attribute.
+    if (usage_page == kHIDPage_KeyboardOrKeypad and v != 0) {
+        log.debug("hid event: usage=0x{x:0>2} value={d} device=0x{x:0>4}:0x{x:0>4} ts={d}ns", .{ usage, v, info.vendor, info.product, ts_ns });
+    }
 }
 
 fn readDeviceInfo(allocator: std.mem.Allocator, device: c.IOHIDDeviceRef) !DeviceInfo {

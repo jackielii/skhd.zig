@@ -109,8 +109,14 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     log.info("Initial process: {s}", .{carbon_event.getProcessName()});
 
-    // Create event tap with keyboard and system defined events
-    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
+    // Create event tap with keyboard + system-defined events. Key-up is
+    // needed by the tap-hold state machine to commit tap-vs-hold and to
+    // synthesize the modifier release on source-up. The original skhd
+    // only tapped key-down because hotkeys are key-down-only; the cost
+    // of also tapping key-up is one extra callback per release, which
+    // the existing SKHD_EVENT_MARKER short-circuit and the early-return
+    // paths handle in a few nanoseconds.
+    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.kCGEventKeyUp) | (1 << c.NX_SYSDEFINED);
 
     // Lazy-init HidMonitor only if the user has declared `.device` aliases.
     // The monitor consumes Input Monitoring permission and a small CPU
@@ -141,7 +147,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
             h.recoverFromCrash() catch |err| {
                 log.warn("Hidutil crash recovery failed: {s}. Continuing.", .{@errorName(err)});
             };
-            log.info("Hidutil initialized for {d} remap declaration(s)", .{mappings.remaps.items.len});
+            log.info("Hidutil initialized for {d} remap declaration(s) (incl. auto-proxy)", .{mappings.remaps.items.len});
         }
     }
     errdefer if (hidutil) |h| h.deinit();
@@ -164,6 +170,17 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     }
     if (taphold_machines.items.len > 0) {
         log.info("Initialized {d} tap-hold state machine(s)", .{taphold_machines.items.len});
+        for (taphold_machines.items) |m| {
+            log.info("  taphold: src=VK 0x{x:0>2}  tap=VK 0x{x:0>2}  hold=VK 0x{x:0>2}  device='{s}'  timeout={d}ms", .{ m.source_vk, m.tap_vk, m.hold_vk, m.decl.device_alias, m.decl.timeout_ms });
+        }
+    }
+    // Loud warning when the runtime can't actually fire device-guarded
+    // rules because Input Monitoring is missing. With device aliases
+    // declared but the HID monitor not yet open, every CGEvent's
+    // resolveSourceDevice returns null and routeTapHold skips the rule —
+    // the user sees a "dead" caps_lock instead of tap=esc/hold=ctrl.
+    if (mappings.device_aliases.count() > 0 and hid_monitor == null) {
+        log.warn(".device aliases declared but HID monitor failed to init — per-device .remap rules will NOT fire. Grant Input Monitoring to skhd-dev.app in System Settings → Privacy & Security.", .{});
     }
 
     return Skhd{
@@ -401,8 +418,10 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // (typically Input Monitoring permission denied) is non-fatal: the
     // daemon keeps running, just without per-device attribution.
     if (self.hid_monitor) |hm| {
-        if (!hm.open()) {
-            log.warn("Per-device matching is disabled. Grant Input Monitoring in System Settings → Privacy & Security to enable .device features.", .{});
+        if (hm.open()) {
+            log.info("HID monitor opened — per-device matching active.", .{});
+        } else {
+            log.warn("HID monitor open FAILED — per-device .remap rules will NOT fire. Grant Input Monitoring in System Settings → Privacy & Security → Input Monitoring (add skhd-dev.app), then re-run.", .{});
         }
     }
 
@@ -410,9 +429,11 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // remap may change keycodes for the next keystroke immediately, and
     // we want our event tap intercepting those translated keystrokes.
     if (self.hidutil) |h| {
+        log.info("Applying {d} hidutil remap(s)...", .{self.mappings.remaps.items.len});
         h.applyRemaps(&self.mappings) catch |err| {
             log.err("Failed to apply hidutil remaps: {s}. Continuing — caps_lock and similar will use OS defaults.", .{@errorName(err)});
         };
+        log.info("Hidutil remaps applied. Source keys are now intercepted at HID layer.", .{});
     }
 
     // Watchdog reconciles the tap with TCC state every 1s. Catches runtime
@@ -453,6 +474,17 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
                 return event;
             };
         },
+        c.kCGEventKeyUp => {
+            // Key-up is only consumed by the tap-hold state machine
+            // (commit tap-vs-hold on source release, augment chord
+            // events with the hold modifier flag). When no machine
+            // claims the event we pass it through unchanged so apps
+            // continue to see normal key-up.
+            return self.handleKeyUp(event) catch |err| {
+                log.err("Error handling key up: {}", .{err});
+                return event;
+            };
+        },
         c.NX_SYSDEFINED => {
             self.tracer.traceSystemKey();
             return self.handleSystemKey(event) catch |err| {
@@ -460,7 +492,18 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
                 return event;
             };
         },
-        else => return event,
+        else => {
+            // Diagnostic: surface unhandled event types when tap-hold
+            // is configured. caps_lock-as-ctrl mapped via System
+            // Settings shows up here as kCGEventFlagsChanged (29),
+            // explaining why our F18-proxy approach fails when System
+            // Settings is also remapping caps.
+            if (self.taphold_machines.items.len > 0) {
+                const keycode: u32 = @intCast(c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventKeycode));
+                log.debug("untapped event: type={d} keycode=0x{x:0>2}", .{ typ, keycode });
+            }
+            return event;
+        },
     }
 }
 
@@ -502,6 +545,27 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     const eventkey = createEventKey(event, device_alias);
     const result = try self.processHotkey(&eventkey, event, process_name);
     return try self.handleHotkeyResult(result, event, eventkey, process_name);
+}
+
+/// Key-up handler: only the tap-hold state machines care about key-up.
+/// Pre-tap-hold versions of skhd never tapped key-up at all; this stays
+/// a fast path that short-circuits when no rule consumes the event.
+inline fn handleKeyUp(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
+    if (self.taphold_machines.items.len == 0) return event;
+
+    // Skip our own synthesized key-ups — they'd otherwise feed back
+    // through routeTapHold and confuse the state machine.
+    const marker = c.CGEventGetIntegerValueField(event, c.kCGEventSourceUserData);
+    if (marker == SKHD_EVENT_MARKER) return event;
+
+    const device_alias = self.resolveSourceDevice(event);
+    if (try self.routeTapHold(event, device_alias, false)) |action| {
+        return switch (action) {
+            .consume => @ptrFromInt(0),
+            .passthrough => event,
+        };
+    }
+    return event;
 }
 
 /// Process the result of a hotkey lookup and determine what to do with the event
@@ -622,13 +686,18 @@ inline fn resolveSourceDevice(self: *Skhd, event: c.CGEventRef) ?[]const u8 {
     const hm = self.hid_monitor orelse return null;
     if (self.mappings.device_aliases.count() == 0) return null;
     const ts = c.CGEventGetTimestamp(event);
-    const dev = hm.findRecentDevice(ts, CORRELATION_WINDOW_NS) orelse return null;
+    const dev = hm.findRecentDevice(ts, CORRELATION_WINDOW_NS) orelse {
+        log.debug("resolveSourceDevice: no HID match within {d}ns of CGEvent ts={d}", .{ CORRELATION_WINDOW_NS, ts });
+        return null;
+    };
     var it = self.mappings.device_aliases.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.vendor == dev.vendor and entry.value_ptr.product == dev.product) {
+            log.debug("resolveSourceDevice: matched alias '{s}' (0x{x:0>4}:0x{x:0>4})", .{ entry.key_ptr.*, dev.vendor, dev.product });
             return entry.key_ptr.*;
         }
     }
+    log.debug("resolveSourceDevice: HID device 0x{x:0>4}:0x{x:0>4} matches no declared alias", .{ dev.vendor, dev.product });
     return null;
 }
 

@@ -12,11 +12,20 @@ const TrackingAllocator = @import("TrackingAllocator.zig");
 const version = std.mem.trimRight(u8, @embedFile("VERSION"), "\n\r\t ");
 const log = std.log.scoped(.main);
 
-/// Default Zig only emits `err` in ReleaseFast/Small, which would suppress
-/// the session-start marker, watchdog notices, and other diagnostic lines we
-/// rely on from the deployed daemon's log file. Floor at `.warn` so anything
-/// we deliberately raise to warn-level survives in every build mode.
-pub const std_options: std.Options = .{ .log_level = .warn };
+/// Build-mode-aware log level. In Debug and ReleaseSafe (the modes you
+/// run interactively or for production debugging), surface every level
+/// down to `.info` so `-V` actually shows feature-init diagnostics. In
+/// ReleaseFast/Small, floor at `.warn` so the session-start marker,
+/// accessibility-revoke watchdog notices, and similar diagnostics still
+/// reach the deployed daemon's log file (Zig's default for those modes
+/// would be `.err`-only, which is too quiet).
+pub const std_options: std.Options = .{
+    .log_level = switch (builtin.mode) {
+        .Debug => .debug,
+        .ReleaseSafe => .info,
+        .ReleaseFast, .ReleaseSmall => .warn,
+    },
+};
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 

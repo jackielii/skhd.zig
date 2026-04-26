@@ -74,6 +74,10 @@ pub fn macVKForHidUsage(hid_usage: u32) ?u32 {
         0x68 => c.kVK_F13, 0x69 => c.kVK_F14, 0x6A => c.kVK_F15, 0x6B => c.kVK_F16,
         0x6C => c.kVK_F17, 0x6D => c.kVK_F18, 0x6E => c.kVK_F19, 0x6F => c.kVK_F20,
 
+        // Numpad-class proxies for caps_lock remapping.
+        0x67 => c.kVK_ANSI_KeypadEquals,
+        0x53 => c.kVK_ANSI_KeypadClear,
+
         else => null,
     };
 }
@@ -147,6 +151,14 @@ const Map = std.StaticStringMap(u32).initComptime(&.{
     // alphanumeric keys directly. Add more on demand.
     .{ "a", 0x04 }, .{ "b", 0x05 }, .{ "c", 0x06 },
     .{ "0", 0x27 }, .{ "1", 0x1E }, .{ "2", 0x1F },
+
+    // Numpad keys — useful as proxy targets for caps_lock remapping
+    // because macOS's caps-handling kernel layer doesn't seem to
+    // special-case them (unlike F-keys and modifiers). Most laptop
+    // users never type these, so intercepting them in the daemon is
+    // safe.
+    .{ "kp_equals", 0x67 },
+    .{ "kp_clear", 0x53 },
 });
 
 test "lookup returns expected HID usage codes" {

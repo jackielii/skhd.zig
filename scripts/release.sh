@@ -179,7 +179,12 @@ if ! grep -q "## \[$CURRENT_VERSION\]" CHANGELOG.md; then
 
 $GIT_LOG
 
-Please add the new entry after ## [Unreleased] and before the previous version entry. Use the current date." CHANGELOG.md
+Please add the new entry after ## [Unreleased] and before the previous version entry. Use the current date.
+
+IMPORTANT: Also update the link reference section at the bottom of the file:
+  1. Update the [Unreleased] link to compare against v$CURRENT_VERSION (i.e. v$CURRENT_VERSION...HEAD).
+  2. Add a new [$CURRENT_VERSION] link comparing the previous version to v$CURRENT_VERSION (i.e. v<previous>...v$CURRENT_VERSION).
+The entry will not render correctly on GitHub without these link references." CHANGELOG.md
 
     echo ""
     echo "CHANGELOG.md has been updated. Please review the changes."

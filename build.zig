@@ -160,20 +160,22 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // `zig build deploy-prod` — replace the prod binary inside the
-    // brew-installed /Applications/skhd.app with a fresh local build,
-    // re-sign with skhd-cert + prod bundle id, and restart the SMAppService
-    // daemon. Lets you exercise the prod path without cutting a release.
-    // Pass -Doptimize=ReleaseFast to match the brew binary's perf profile.
-    const deploy_cmd = b.addSystemCommand(&[_][]const u8{
+    // `zig build install-local` — stage the local build into the slot a
+    // brew install would occupy: replace the binary inside
+    // /Applications/skhd.app, re-sign with skhd-cert + prod bundle id, and
+    // restart the SMAppService daemon. Lets you exercise the packaged path
+    // (real bundle id, real launchd registration, real TCC slot) without
+    // cutting a release. Pass -Doptimize=ReleaseFast to match the brew
+    // binary's perf profile.
+    const install_local_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
-        "scripts/deploy-prod.sh",
+        "scripts/install-local.sh",
     });
-    deploy_cmd.addArg(installed_exe);
-    deploy_cmd.step.dependOn(b.getInstallStep());
+    install_local_cmd.addArg(installed_exe);
+    install_local_cmd.step.dependOn(b.getInstallStep());
 
-    const deploy_step = b.step("deploy-prod", "Replace /Applications/skhd.app's binary with the local build and restart prod service");
-    deploy_step.dependOn(&deploy_cmd.step);
+    const install_local_step = b.step("install-local", "Install the local build into /Applications/skhd.app and restart the service (test the packaged path without releasing)");
+    install_local_step.dependOn(&install_local_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
 
@@ -197,7 +199,12 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&bench_cmd.step);
 
-    // Allocation tracking executable
+    // Allocation tracking executable. Goes through the same dev .app + sign
+    // path as `zig build run` so TCC's accessibility grant covers it — bare
+    // Mach-O can't be granted on Tahoe. Same skhd-dev-cert + bundle id, so
+    // there's only one TCC slot to manage; the .app's inner binary swaps
+    // between the regular dev build and the alloc-tracking build depending
+    // on which step you run last.
     const alloc_exe = b.addExecutable(.{
         .name = "skhd-alloc",
         .root_source_file = b.path("src/main.zig"),
@@ -210,11 +217,33 @@ pub fn build(b: *std.Build) void {
     const alloc_options = b.addOptions();
     alloc_options.addOption(bool, track_alloc_option, true);
     alloc_exe.root_module.addOptions("build_options", alloc_options);
-    const alloc_cmd = b.addRunArtifact(alloc_exe);
+    b.installArtifact(alloc_exe);
+    const installed_alloc_exe = b.getInstallPath(.bin, alloc_exe.name);
+
+    const alloc_app_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/make-app.sh",
+    });
+    alloc_app_cmd.addArg(installed_alloc_exe);
+    alloc_app_cmd.addArg(installed_dev_app);
+    alloc_app_cmd.addArg(dev_bundle_id);
+    alloc_app_cmd.step.dependOn(b.getInstallStep());
+
+    const sign_alloc_app_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/codesign.sh",
+    });
+    sign_alloc_app_cmd.addArg(installed_dev_app);
+    sign_alloc_app_cmd.setEnvironmentVariable("SKHD_CERT", dev_cert_name);
+    sign_alloc_app_cmd.setEnvironmentVariable("SKHD_BUNDLE_ID", dev_bundle_id);
+    sign_alloc_app_cmd.step.dependOn(&alloc_app_cmd.step);
+
+    const alloc_cmd = b.addSystemCommand(&[_][]const u8{inner_exe});
+    alloc_cmd.step.dependOn(&sign_alloc_app_cmd.step);
     if (b.args) |args| {
         alloc_cmd.addArgs(args);
     }
-    const alloc_step = b.step("alloc", "Run skhd with allocation logging");
+    const alloc_step = b.step("alloc", "Run skhd with allocation logging (signed dev .app)");
     alloc_step.dependOn(&alloc_cmd.step);
 
     // Tests for main.zig

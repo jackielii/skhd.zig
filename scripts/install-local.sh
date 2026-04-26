@@ -1,17 +1,18 @@
 #!/bin/bash
-# Replace the prod skhd binary inside the brew-installed .app and restart
-# the SMAppService daemon. Lets you test the prod path (real bundle ID,
-# real launchd registration, real TCC slot) without going through a release.
+# Install the local skhd build into /Applications/skhd.app (the slot a brew
+# install would occupy) and restart the SMAppService daemon. Lets you test
+# the packaged path — real bundle ID, real launchd registration, real TCC
+# slot — without cutting a release.
 #
-# First deploy on a fresh box requires a one-time accessibility re-grant
-# because the local skhd-cert keypair is different from CI's; subsequent
-# deploys reuse the same local cert so the TCC entry stays valid.
+# First install on a fresh box requires a one-time accessibility re-grant
+# because the local skhd-cert keypair differs from CI's; subsequent installs
+# reuse the same local cert so the TCC entry stays valid.
 #
-# usage: deploy-prod.sh <built-binary>
+# usage: install-local.sh <built-binary>
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC_BINARY="${1:?usage: deploy-prod.sh <built-binary>}"
+SRC_BINARY="${1:?usage: install-local.sh <built-binary>}"
 
 PROD_LABEL="com.jackielii.skhd"
 DOMAIN="gui/$(id -u)"
@@ -25,7 +26,7 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 if [ ! -d "$APP_PATH" ]; then
     echo "Error: prod skhd.app not found at /Applications or brew opt path" >&2
-    echo "Install once via 'brew install jackielii/tap/skhd-zig' before using deploy-prod." >&2
+    echo "Install once via 'brew install jackielii/tap/skhd-zig' before using install-local." >&2
     exit 1
 fi
 

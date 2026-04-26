@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Daemon sources `PATH` from `$SHELL -ilc` at startup.** Hotkeys that exec `/opt/homebrew/bin/yabai`, `/opt/homebrew/bin/aerospace`, etc. previously failed under launchd's minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`). The interactive-login shell is queried once at startup so command lookups match what the user sees in their terminal.
 
 ### Internal
-- **`zig build deploy-prod`** swaps the binary in `/Applications/skhd.app`, re-signs with `skhd-cert`, and restarts the SMAppService daemon — for testing the prod code path without cutting a release.
+- **`zig build install-local`** stages the local build into `/Applications/skhd.app` (the slot a brew install would occupy), re-signs with `skhd-cert`, and restarts the SMAppService daemon — for testing the packaged path without cutting a release.
 
 ## [0.0.21] - 2026-04-26
 

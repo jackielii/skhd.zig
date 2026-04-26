@@ -39,7 +39,7 @@ hotloader: ?*Hotload = null,
 hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
-recovery_timer: c.CFRunLoopTimerRef = null,
+watchdog_timer: c.CFRunLoopTimerRef = null,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -113,15 +113,23 @@ pub fn deinit(self: *Skhd) void {
     if (self.hotloader) |hotloader| {
         hotloader.destroy();
     }
-    self.stopRecoveryTimer();
+    self.stopWatchdog();
     self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
 }
 
-fn startRecoveryTimer(self: *Skhd) void {
-    if (self.recovery_timer != null) return;
+/// Poll AXIsProcessTrusted on a 1s timer and reconcile the event tap with
+/// what TCC currently allows. The OS doesn't fire kCGEventTapDisabledBy*
+/// when accessibility is revoked at runtime, so the disabled-branch alone
+/// can't catch a revoke — the tap stays in the event chain as an active
+/// filter that swallows keystrokes. This watchdog is the only reliable
+/// signal: detect revoke and tear the tap down, detect re-grant and
+/// recreate it. AXIsProcessTrusted is cached and ~µs, so 1s polling is
+/// negligible overhead and never touches the per-event hot path.
+fn startWatchdog(self: *Skhd) void {
+    if (self.watchdog_timer != null) return;
     var ctx = c.CFRunLoopTimerContext{
         .version = 0,
         .info = self,
@@ -131,40 +139,53 @@ fn startRecoveryTimer(self: *Skhd) void {
     };
     const interval: f64 = 1.0;
     const fire_at = c.CFAbsoluteTimeGetCurrent() + interval;
-    self.recovery_timer = c.CFRunLoopTimerCreate(
+    self.watchdog_timer = c.CFRunLoopTimerCreate(
         c.kCFAllocatorDefault,
         fire_at,
         interval,
         0,
         0,
-        recoveryTimerCallback,
+        watchdogCallback,
         &ctx,
     );
-    if (self.recovery_timer == null) {
-        log.err("Failed to create accessibility recovery timer", .{});
+    if (self.watchdog_timer == null) {
+        log.err("Failed to create accessibility watchdog timer", .{});
         return;
     }
-    c.CFRunLoopAddTimer(c.CFRunLoopGetMain(), self.recovery_timer, c.kCFRunLoopCommonModes);
-    log.info("Watching for accessibility re-grant (poll every {d:.0}s)", .{interval});
+    c.CFRunLoopAddTimer(c.CFRunLoopGetMain(), self.watchdog_timer, c.kCFRunLoopCommonModes);
 }
 
-fn stopRecoveryTimer(self: *Skhd) void {
-    if (self.recovery_timer) |t| {
+fn stopWatchdog(self: *Skhd) void {
+    if (self.watchdog_timer) |t| {
         c.CFRunLoopTimerInvalidate(t);
         c.CFRelease(t);
-        self.recovery_timer = null;
+        self.watchdog_timer = null;
     }
 }
 
-fn recoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+fn watchdogCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const self = @as(*Skhd, @ptrCast(@alignCast(info)));
-    if (!service.hasAccessibilityPermissions()) return;
-    log.info("Accessibility re-granted — recreating event tap", .{});
-    self.event_tap.begin(keyHandler, self) catch |err| {
-        log.err("Failed to recreate event tap after re-grant: {}", .{err});
+    const trusted = service.hasAccessibilityPermissions();
+    const have_tap = self.event_tap.handle != null;
+
+    if (!trusted and have_tap) {
+        log.err("Accessibility revoked — detaching event tap so the keyboard stays responsive.", .{});
+        self.event_tap.deinit();
+        if (self.event_tap.handle != null) {
+            log.err("Event tap detach left handle non-null; keyboard may still be captured.", .{});
+        } else {
+            log.info("Event tap detached. Watchdog will recreate it when accessibility is re-granted.", .{});
+        }
         return;
-    };
-    self.stopRecoveryTimer();
+    }
+    if (trusted and !have_tap) {
+        log.info("Accessibility re-granted — recreating event tap.", .{});
+        self.event_tap.begin(keyHandler, self) catch |err| {
+            log.err("Failed to recreate event tap after re-grant: {} — will retry on next watchdog tick.", .{err});
+            return;
+        };
+        log.info("Event tap reactivated. Hotkeys restored.", .{});
+    }
 }
 
 pub fn run(self: *Skhd, enable_hotload: bool) !void {
@@ -203,11 +224,26 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
         try self.enableHotReload();
     }
 
-    // Set up event tap (but don't start run loop yet). Prompt first so that
-    // unknown bundles trigger the macOS Accessibility popup and System
-    // Settings deep-link — CGEventTap creation itself fails silently.
-    if (!service.promptForAccessibility()) {
-        log.warn("Accessibility not granted yet — System Settings should now show the prompt", .{});
+    // Set up event tap (but don't start run loop yet). Only ask the OS to
+    // show the Accessibility prompt when running as a launchd-managed daemon
+    // (SMAppService). Foreground runs (`zig build run`, `zig build alloc
+    // -- -V`, etc.) just check silently — popping a system dialog every
+    // time you iterate on a debug build is noise, and Tahoe's TCC
+    // mis-displays the path anyway when self-signed dev/prod bundles share
+    // a `com.jackielii.skhd*` identifier prefix.
+    const main = @import("main.zig");
+    const is_daemon = main.isLaunchdManaged();
+    const trusted = if (is_daemon)
+        service.promptForAccessibility()
+    else
+        service.hasAccessibilityPermissions();
+    if (!trusted) {
+        log.warn("Accessibility not granted for this bundle. {s}", .{
+            if (is_daemon)
+                "System Settings should now show the prompt."
+            else
+                "Foreground run — grant manually in System Settings → Privacy & Security → Accessibility, or run the daemon (install-local) to get the prompt.",
+        });
     }
     log.info("Starting event tap", .{});
     self.event_tap.begin(keyHandler, self) catch |err| {
@@ -258,6 +294,11 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
 
     log.info("Event tap created successfully. skhd is now running.", .{});
 
+    // Watchdog reconciles the tap with TCC state every 1s. Catches runtime
+    // accessibility revoke (which the OS doesn't surface via the disabled
+    // callback) and re-grant.
+    self.startWatchdog();
+
     // Now start the run loop - this will handle both event tap and FSEvents
     c.CFRunLoopRun();
 
@@ -273,17 +314,14 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
 
     switch (typ) {
         c.kCGEventTapDisabledByTimeout, c.kCGEventTapDisabledByUserInput => {
-            log.info("Restarting event-tap", .{});
+            // Legitimate timeout / user-input throttle: re-enable. Runtime
+            // accessibility revoke does not reach this branch (the OS stops
+            // delivering callbacks instead of sending the disabled event) —
+            // the watchdog timer catches that case.
+            log.info("Restarting event-tap (typ={d})", .{typ});
             c.CGEventTapEnable(self.event_tap.handle, true);
-            // If re-enable fails (e.g. accessibility revoked at runtime), the
-            // tap stays in the event chain as an active filter that can't
-            // forward events — the keyboard goes unresponsive. Tear it down
-            // immediately to free the chain, then poll for re-grant on a
-            // 1s timer; recreate the tap when accessibility comes back.
             if (!c.CGEventTapIsEnabled(self.event_tap.handle)) {
-                log.err("Event tap re-enable failed — accessibility likely revoked. Detaching and waiting for re-grant.", .{});
-                self.event_tap.deinit();
-                self.startRecoveryTimer();
+                log.err("CGEventTapEnable did not bring the tap back; watchdog will detach it on the next tick.", .{});
             }
             return event;
         },

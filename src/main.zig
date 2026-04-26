@@ -11,6 +11,12 @@ const TrackingAllocator = @import("TrackingAllocator.zig");
 const version = std.mem.trimRight(u8, @embedFile("VERSION"), "\n\r\t ");
 const log = std.log.scoped(.main);
 
+/// Default Zig only emits `err` in ReleaseFast/Small, which would suppress
+/// the session-start marker, watchdog notices, and other diagnostic lines we
+/// rely on from the deployed daemon's log file. Floor at `.warn` so anything
+/// we deliberately raise to warn-level survives in every build mode.
+pub const std_options: std.Options = .{ .log_level = .warn };
+
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn main() !void {
@@ -149,6 +155,13 @@ pub fn main() !void {
     try service.writePidFile(gpa);
     defer service.removePidFile(gpa);
 
+    // Capture stderr to ~/Library/Logs/skhd.log when launched as a daemon
+    // (SMAppService wires stderr to /dev/null). Skipped for `-V` so verbose
+    // runs always print to the invoking terminal/pipe, even if launchd
+    // somehow set XPC_SERVICE_NAME.
+    redirectDaemonStderr(gpa, verbose);
+    logSessionStart();
+
     inheritUserPath(gpa);
 
     // Initialize and run skhd
@@ -169,6 +182,69 @@ pub fn main() !void {
 
     // Pass the hotload flag to run
     skhd.run(!no_hotload) catch {};
+}
+
+/// True iff this process was spawned by launchd as an XPC service /
+/// LaunchAgent. The XPC framework sets `XPC_SERVICE_NAME` to the placeholder
+/// "0" for normal user-shell processes (so it's almost always *set* — the
+/// classic null-check is too loose); launchd overrides it with the real
+/// service label (e.g. `com.jackielii.skhd`) only for actual services.
+pub fn isLaunchdManaged() bool {
+    const name = std.posix.getenv("XPC_SERVICE_NAME") orelse return false;
+    return !std.mem.eql(u8, name, "0");
+}
+
+/// Redirect stderr to ~/Library/Logs/skhd.log when running under
+/// SMAppService — the LaunchAgent.plist doesn't set StandardErrorPath, so
+/// the daemon's stderr is /dev/null and every log.err / log.info is
+/// silently dropped. Foreground runs (terminal or `zig build` subprocess)
+/// keep stderr untouched so logs reach the user's terminal. `-V` always
+/// forces no-redirect — verbose mode is for humans watching the output
+/// live, never for log-file capture.
+///
+/// Detection signal: `XPC_SERVICE_NAME` is injected by launchd into every
+/// service it spawns. It's absent for direct CLI invocations and for
+/// processes started through `zig build`'s subprocess pipe — so it's a
+/// stricter "am I really a daemon" test than isatty(2), which gets fooled
+/// by the build system's stderr pipe.
+fn redirectDaemonStderr(allocator: std.mem.Allocator, verbose: bool) void {
+    if (verbose) return;
+    if (!isLaunchdManaged()) return;
+
+    const home = std.posix.getenv("HOME") orelse return;
+    const path = std.fmt.allocPrintZ(allocator, "{s}/Library/Logs/skhd.log", .{home}) catch return;
+    defer allocator.free(path);
+
+    const fd = c.open(path.ptr, c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, 0o644));
+    if (fd < 0) return;
+    defer _ = c.close(fd);
+
+    _ = c.dup2(fd, 2);
+}
+
+/// Mark the start of a new session in the log so it's easy to find where the
+/// current run begins after a respawn. Single line, ISO-8601 UTC timestamp,
+/// version, and PID.
+fn logSessionStart() void {
+    const ts = std.time.timestamp();
+    if (ts < 0) return;
+
+    const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
+    const epoch_day = epoch_secs.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_secs = epoch_secs.getDaySeconds();
+
+    log.warn("=== skhd {s} started at {d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z (PID {d}) ===", .{
+        version,
+        @as(u32, year_day.year),
+        @intFromEnum(month_day.month),
+        @as(u32, month_day.day_index) + 1,
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+        day_secs.getSecondsIntoMinute(),
+        @as(i32, @intCast(std.c.getpid())),
+    });
 }
 
 /// Augment PATH from the user's login shell so commands launched by hotkeys

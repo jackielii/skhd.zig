@@ -16,19 +16,25 @@ The easiest way to install skhd.zig:
 brew install jackielii/tap/skhd-zig
 ```
 
+> Upgrading from 0.0.17 or earlier? See [docs/UPGRADING.md](docs/UPGRADING.md). The 0.0.18 release switches to an `.app` bundle to keep accessibility permissions working on macOS Tahoe; one-time re-grant is required.
+
 ### Pre-built Binaries
 
 Download the latest release for your architecture:
 
-- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs
-- `skhd-x86_64-macos.tar.gz` - For Intel Macs
+- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs (contains `skhd.app`)
+- `skhd-x86_64-macos.tar.gz` - For Intel Macs (contains `skhd.app`)
 
 Extract and install:
 
 ```bash
 tar -xzf skhd-*.tar.gz
-sudo cp skhd /usr/local/bin/
+mv skhd.app /Applications/
+# Optional: expose the CLI on your PATH
+sudo ln -sfn /Applications/skhd.app/Contents/MacOS/skhd /usr/local/bin/skhd
 ```
+
+Then grant accessibility (see [Granting Accessibility](#granting-accessibility) below).
 
 ### Development Builds from GitHub Actions
 
@@ -50,12 +56,29 @@ If you need builds with different optimization levels (Debug, ReleaseSafe, Relea
 git clone https://github.com/jackielii/skhd.zig
 cd skhd.zig
 
-# Build in release mode
-zig build -Doptimize=ReleaseFast
+# Build the .app bundle and code-sign it
+# (required for Accessibility to persist on macOS Tahoe / Sequoia)
+zig build sign-app -Doptimize=ReleaseFast
 
-# Install (copy to /usr/local/bin)
-sudo cp zig-out/bin/skhd /usr/local/bin/
+# Install: symlink the bundle into /Applications, expose the CLI
+ln -sfn "$(pwd)/zig-out/skhd.app" /Applications/skhd.app
+sudo ln -sfn /Applications/skhd.app/Contents/MacOS/skhd /usr/local/bin/skhd
 ```
+
+For quick dev iteration without the bundle wrapper, `zig build` still produces a bare binary at `zig-out/bin/skhd`. The `.app` is only needed for the System Settings → Accessibility picker.
+
+The first run of `zig build sign-app` creates a self-signed `skhd-cert` certificate in your login keychain. See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) for details and troubleshooting.
+
+### Granting Accessibility
+
+skhd captures keyboard events via macOS Core Graphics, which requires Accessibility permission:
+
+1. Open **System Settings → Privacy & Security → Accessibility**
+2. Click **`+`**, navigate to `/Applications/skhd.app`, add it
+3. Toggle the entry on
+4. Run `skhd --restart-service` (or `skhd --start-service` if not yet running)
+
+You only need to do this once. The bundle's stable identifier (`com.jackielii.skhd`) means TCC entries persist across rebuilds and `brew upgrade`.
 
 ## Running as Service
 
@@ -81,7 +104,7 @@ skhd --uninstall-service
 
 The service will:
 - Start automatically on login
-- Create logs at `/tmp/skhd_$USER.log`
+- Write logs to `~/Library/Logs/skhd.log`
 - Use your config from `~/.config/skhd/skhdrc` or `~/.skhdrc`
 - Automatically reload on config changes
 
@@ -124,8 +147,9 @@ The service will:
 - `--start-service` - Start as service
 - `--restart-service` - Restart service
 - `--stop-service` - Stop service
+- `--status` - Daemon health (PID + event-tap status)
 - PID file management (`/tmp/skhd_$USER.pid`)
-- Service logging (`/tmp/skhd_$USER.log`)
+- Service logging (`~/Library/Logs/skhd.log`)
 
 ### Advanced Features
 

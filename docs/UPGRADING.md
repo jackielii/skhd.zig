@@ -1,6 +1,33 @@
-# Upgrading to skhd.zig 0.0.18 (macOS Tahoe compatibility)
+# Upgrading to skhd.zig 0.0.21 (macOS Tahoe compatibility)
 
-Version 0.0.18 ships with a wholesale rework of how skhd integrates with macOS, in response to a series of issues that surfaced on macOS 26 (Tahoe). If you are upgrading from 0.0.17 or earlier, please read the **Required actions** section before installing.
+> **0.0.21 fixes the actual root cause of "skhd doesn't start on reboot".** The 0.0.18 rework was correct on packaging and signing but missed the gatekeeper: macOS Background Tasks Manager (BTM) silently marked any hand-installed LaunchAgent as `disallowed`. 0.0.21 switches to `SMAppService`, which gets a proper `[enabled, allowed, notified]` BTM entry that auto-loads at every login.
+>
+> If you upgraded to 0.0.18–0.0.20 and skhd still doesn't always start after reboot, **0.0.21 is the fix you want**.
+
+## Migrating from 0.0.20 → 0.0.21
+
+```bash
+brew upgrade skhd-zig
+
+# Re-register via SMAppService. Run this from inside the .app — SMAppService
+# binds to the calling bundle path, and /Applications/skhd.app is what BTM
+# accepts cleanly:
+/Applications/skhd.app/Contents/MacOS/skhd --install-service
+
+# Verify
+skhd --status
+# Expect: Registration status: enabled
+#         Daemon running: Yes (PID …)
+#         Hotkeys functional: Yes (event tap active)
+```
+
+That's it. Your accessibility grant carries over (TCC entry is bundle-ID-keyed, the cert hasn't changed), and BTM now has a proper managed entry that auto-loads on every reboot.
+
+The old `disallowed` legacy BTM entry from previous versions is harmless once the new managed entry is in place — but you can clean it up via System Settings → General → Login Items & Extensions if you like.
+
+## Migrating from 0.0.17 or earlier (the original Tahoe rework)
+
+Version 0.0.18 introduced the `.app` bundle structure and `~/Library/Logs/skhd.log`. If you're coming from 0.0.17 or earlier you also need to perform the steps below before the SMAppService re-register above.
 
 ## What changed and why
 

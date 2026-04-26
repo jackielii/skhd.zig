@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21] - 2026-04-26
+
+### Fixed
+- **The actual root cause of "skhd doesn't always start after reboot" on macOS Tahoe.** Hand-installed LaunchAgents under `~/Library/LaunchAgents/` get registered with macOS's Background Tasks Manager (BTM, introduced in Sequoia, enforced in Tahoe) as `Type: legacy agent` with `Disposition: [enabled, disallowed, not notified]` — and BTM silently refuses to auto-load them at login until the user manually approves the agent in System Settings → General → Login Items & Extensions. The previous fixes (launchctl bootstrap migration, retry loops, plist paths) addressed real but secondary issues; BTM was the gatekeeper all along.
+
+### Changed
+- **`--install-service` now uses `SMAppService`** instead of writing to `~/Library/LaunchAgents/`. The bundled plist lives inside `skhd.app/Contents/Library/LaunchAgents/com.jackielii.skhd.plist` and registration goes through `SMAppService.agent(plistName:).register()`. BTM creates a proper managed entry (`Type: agent`, `Disposition: [enabled, allowed, notified]`) that auto-loads cleanly at every login.
+- **`--uninstall-service`** now unregisters via SMAppService. Both install and uninstall also clean up any pre-0.0.21 hand-installed plist at `~/Library/LaunchAgents/com.jackielii.skhd.plist` so the legacy and new managed entries don't race.
+- **`--status`** reads SMAppService registration state directly. Reports `Registration status: enabled` / `requires approval` / `not registered` so the user knows what BTM thinks.
+
+### Migration
+On upgrade from 0.0.20 or earlier, run `skhd --install-service` once (preferably from `/Applications/skhd.app/Contents/MacOS/skhd` so SMAppService treats `/Applications/skhd.app` as the registering bundle). The legacy `disallowed` BTM entry from previous versions is harmless after the new managed entry is in place but can be removed via System Settings → General → Login Items & Extensions if desired. See [docs/UPGRADING.md](docs/UPGRADING.md) for the full walkthrough.
+
 ## [0.0.20] - 2026-04-26
 
 Local-development quality-of-life release. No runtime changes.
@@ -342,7 +355,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.20...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.21...HEAD
+[0.0.21]: https://github.com/jackielii/skhd.zig/compare/v0.0.20...v0.0.21
 [0.0.20]: https://github.com/jackielii/skhd.zig/compare/v0.0.19...v0.0.20
 [0.0.19]: https://github.com/jackielii/skhd.zig/compare/v0.0.18...v0.0.19
 [0.0.18]: https://github.com/jackielii/skhd.zig/compare/v0.0.17...v0.0.18

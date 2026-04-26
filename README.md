@@ -20,15 +20,14 @@ brew install jackielii/tap/skhd-zig
 
 ### Pre-built Binaries
 
-Download the latest release for your architecture:
+Apple Silicon only (Intel builds paused as of v0.0.19; build from source for Intel):
 
-- `skhd-arm64-macos.tar.gz` - For Apple Silicon Macs (contains `skhd.app`)
-- `skhd-x86_64-macos.tar.gz` - For Intel Macs (contains `skhd.app`)
+- `skhd-arm64-macos.tar.gz` (contains `skhd.app`)
 
 Extract and install:
 
 ```bash
-tar -xzf skhd-*.tar.gz
+tar -xzf skhd-arm64-macos.tar.gz
 mv skhd.app /Applications/
 # Optional: expose the CLI on your PATH
 sudo ln -sfn /Applications/skhd.app/Contents/MacOS/skhd /usr/local/bin/skhd

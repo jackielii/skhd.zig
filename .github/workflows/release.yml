@@ -60,8 +60,11 @@ jobs:
         include:
           - os: macos-latest
             arch: arm64
-          - os: macos-13
-            arch: x86_64
+          # Intel x86_64 builds paused starting v0.0.19 (no demand, macos-13
+          # runners spend most time queued). To re-enable, uncomment the
+          # entry below and the matching SHA / sed blocks in update-homebrew.
+          # - os: macos-13
+          #   arch: x86_64
     runs-on: ${{ matrix.os }}
     
     steps:
@@ -185,19 +188,19 @@ jobs:
         # Download release assets to calculate SHA256
         cd ${{ github.workspace }}
         gh release download ${VERSION} --repo jackielii/skhd.zig --pattern "*.tar.gz"
-        
-        # Calculate SHA256 for both architectures
+
+        # Calculate SHA256 (arm64 only; Intel paused — see build-release matrix)
         ARM64_SHA=$(shasum -a 256 skhd-arm64-macos.tar.gz | awk '{print $1}')
-        X86_64_SHA=$(shasum -a 256 skhd-x86_64-macos.tar.gz | awk '{print $1}')
-        
         echo "arm64_sha=${ARM64_SHA}" >> $GITHUB_OUTPUT
-        echo "x86_64_sha=${X86_64_SHA}" >> $GITHUB_OUTPUT
+
+        # X86_64_SHA=$(shasum -a 256 skhd-x86_64-macos.tar.gz | awk '{print $1}')
+        # echo "x86_64_sha=${X86_64_SHA}" >> $GITHUB_OUTPUT
 
     - name: Update Formula
       env:
         VERSION: ${{ steps.release.outputs.version }}
         ARM64_SHA: ${{ steps.release.outputs.arm64_sha }}
-        X86_64_SHA: ${{ steps.release.outputs.x86_64_sha }}
+        # X86_64_SHA: ${{ steps.release.outputs.x86_64_sha }}  # Intel paused
       run: |
         cd homebrew-tap
 
@@ -205,17 +208,14 @@ jobs:
         # URL instead). No-op when missing.
         sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/skhd-zig.rb
 
-        # Update URLs. Match v<digits-and-dots> with an optional pre-release
-        # suffix (-preview, -rc1, etc.). Use ERE with -E so the alternation
-        # syntax is sane; the previous BRE character class
-        # `[0-9.(-preview)]\+` accidentally allowed any of those literal
-        # characters and only worked for plain semver tags.
-        sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-x86_64|download/v${VERSION}/skhd-x86_64|" Formula/skhd-zig.rb
+        # Update URL + sha256 for the arm64 release. Intel paused — see
+        # build-release matrix above; uncomment the x86_64 lines below to
+        # re-enable.
         sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-arm64|download/v${VERSION}/skhd-arm64|" Formula/skhd-zig.rb
-
-        # Update each architecture's sha256 (range from URL line to next sha256 line).
-        sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${X86_64_SHA}\"/" Formula/skhd-zig.rb
         sed -i "/arm64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${ARM64_SHA}\"/" Formula/skhd-zig.rb
+
+        # sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-x86_64|download/v${VERSION}/skhd-x86_64|" Formula/skhd-zig.rb
+        # sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${X86_64_SHA}\"/" Formula/skhd-zig.rb
 
     - name: Commit and push
       run: |

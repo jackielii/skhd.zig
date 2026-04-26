@@ -26,6 +26,10 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - **Plist `ThrottleInterval`** lowered from 30 s to 10 s for faster recovery from boot-time failures.
 - **`AccessibilityPermissionDenied` error message** now points at the `.app` bundle path (which Tahoe's picker accepts) instead of the inner binary.
 
+### Removed
+- **Intel (x86_64) prebuilt releases paused.** Apple Silicon only as of v0.0.18. Intel users can still build from source via `zig build sign-app`. Re-enable hooks documented in `.github/workflows/release.yml` and `Formula/skhd-zig.rb` (kept commented for easy restoration).
+- **Homebrew `brew services` integration.** Replaced by skhd's own `--install-service`, which produces a properly Tahoe-tuned launchd plist (retry loop, log path, ThrottleInterval, bundle-aware ProgramArguments). Migrate with `brew services stop skhd-zig 2>/dev/null && skhd --install-service && skhd --start-service`. The two agents would race for the event tap if both were enabled.
+
 ### Fixed
 - **Boot-time `CGEventTapCreate` race** — added a 10-attempt retry loop with 500 ms backoff. The daemon used to exit and wait the full `ThrottleInterval` when WindowServer/TCC weren't ready immediately at login.
 - **`scripts/codesign.sh` cert auto-creation** — fixed empty-password p12 import rejection on macOS Tahoe + OpenSSL 3.6, and the missing `extendedKeyUsage = codeSigning` that hid the cert from `find-identity -p codesigning`.

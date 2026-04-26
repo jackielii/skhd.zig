@@ -17,39 +17,55 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0   # full history
-        fetch-tags: true # ensure annotated tag *objects* (not just refs) are
-                         # fetched, otherwise `git tag -l --format='%(contents)'`
-                         # falls back to the pointed-to commit's message and
-                         # the release body becomes the commit message instead
-                         # of the tag annotation.
-    
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Force-fetch annotated tag objects
+      # actions/checkout@v4's `fetch-tags: true` reliably fetches the tag
+      # ref but does NOT always fetch the annotated tag *object* — when
+      # missing, `git tag -l --format='%(contents)' vX.Y.Z` silently falls
+      # back to the pointed-to commit's message and the release body ends
+      # up as a random commit message. Explicit fetch makes this reliable.
+      run: git fetch --tags --force origin
+
     - name: Create Release
       id: create_release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        # Extract release notes from the git tag message
-        TAG_MESSAGE=$(git tag -l --format='%(contents)' ${{ github.ref_name }})
-        
-        # If tag message is empty, fall back to changelog entry
-        if [ -z "$TAG_MESSAGE" ]; then
-          echo "Warning: No tag message found, extracting from CHANGELOG.md"
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"  # Remove 'v' prefix
-          TAG_MESSAGE=$(awk "/## \[$VERSION\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
+        TAG_NAME="${{ github.ref_name }}"
+        VERSION="${TAG_NAME#v}"
+
+        # Verify the tag is annotated. A lightweight tag would make
+        # `%(contents)` silently return the commit message — refuse the
+        # release rather than ship surprising notes.
+        TAG_TYPE=$(git cat-file -t "$TAG_NAME" 2>/dev/null || echo "missing")
+        if [ "$TAG_TYPE" = "tag" ]; then
+          NOTES=$(git tag -l --format='%(contents)' "$TAG_NAME")
+          echo "Using tag annotation as release notes."
+        else
+          echo "::warning::Tag $TAG_NAME has type '$TAG_TYPE' (expected 'tag') — falling back to CHANGELOG.md"
+          NOTES=""
         fi
-        
-        # Add installation instructions at the end
+
+        # Fall back to CHANGELOG.md when the tag annotation is missing.
+        if [ -z "$(echo "$NOTES" | tr -d '[:space:]')" ]; then
+          echo "Extracting release notes from CHANGELOG.md entry for $VERSION..."
+          NOTES=$(awk "/## \[$VERSION\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
+        fi
+
+        if [ -z "$(echo "$NOTES" | tr -d '[:space:]')" ]; then
+          echo "::error::No release notes found in tag annotation or CHANGELOG.md for $TAG_NAME"
+          exit 1
+        fi
+
         INSTALLATION_NOTES=$'## Installation\n\nInstall via Homebrew:\n```bash\nbrew install jackielii/tap/skhd-zig\n```\n\nor upgrade:\n```bash\nbrew upgrade jackielii/tap/skhd-zig\n```\n\n## Full Changelog\n\nSee [CHANGELOG.md](https://github.com/jackielii/skhd.zig/blob/main/CHANGELOG.md) for complete version history.'
-        
-        # Combine tag message with installation instructions
-        FULL_NOTES="$TAG_MESSAGE"$'\n\n'"$INSTALLATION_NOTES"
-        
-        # Create release with the extracted notes
-        gh release create ${{ github.ref_name }} \
+
+        FULL_NOTES="$NOTES"$'\n\n'"$INSTALLATION_NOTES"
+
+        gh release create "$TAG_NAME" \
           --repo ${{ github.repository }} \
-          --title "${{ github.ref_name }}" \
+          --title "$TAG_NAME" \
           --notes "$FULL_NOTES" \
           --draft
 

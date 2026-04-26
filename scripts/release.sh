@@ -15,6 +15,7 @@ NC='\033[0m' # No Color
 # Parse arguments
 BUMP_VERSION=true  # Default to true - always bump version
 BUMP_TYPE="patch"  # Default to patch bump
+NON_INTERACTIVE=false  # When true, skip all read prompts and assume yes
 while [[ $# -gt 0 ]]; do
     case $1 in
         --bump)
@@ -29,14 +30,47 @@ while [[ $# -gt 0 ]]; do
             BUMP_VERSION=false
             shift
             ;;
+        --yes|-y)
+            NON_INTERACTIVE=true
+            shift
+            ;;
         *)
-            echo "Usage: $0 [--bump major|minor|patch] [--no-bump]"
+            echo "Usage: $0 [--bump major|minor|patch] [--no-bump] [--yes|-y]"
             echo "  Default: bump patch version after release"
             echo "  Use --no-bump to skip version bump"
+            echo "  Use --yes/-y to run non-interactively (assume yes for all prompts;"
+            echo "  also fails fast if a step would normally need a manual decision,"
+            echo "  e.g. CHANGELOG missing or homebrew-tap fetch failure)"
             exit 1
             ;;
     esac
 done
+
+# Helper: prompt unless --yes is set. In non-interactive mode, just print the
+# message (so logs show what was skipped) and continue without reading stdin.
+confirm_or_skip() {
+    local message="$1"
+    if [ "$NON_INTERACTIVE" = true ]; then
+        echo "[--yes] auto-confirming: $message"
+        return 0
+    fi
+    echo -e "${YELLOW}$message${NC}"
+    read -r
+}
+
+# Helper: prompt for y/n confirmation, or auto-yes in non-interactive mode.
+# Returns 0 on yes, 1 on anything else.
+confirm_yn() {
+    local message="$1"
+    if [ "$NON_INTERACTIVE" = true ]; then
+        echo "[--yes] auto-confirming: $message"
+        return 0
+    fi
+    echo -e "${YELLOW}$message (y/n)${NC}"
+    local reply
+    read -r reply
+    [ "$reply" = "y" ]
+}
 
 CURRENT_VERSION=$(cat VERSION)
 TAG="v$CURRENT_VERSION"
@@ -66,8 +100,7 @@ if [ "$BUMP_VERSION" = true ]; then
 echo "  8. Bump version for next development cycle"
 fi
 echo ""
-echo -e "${YELLOW}Press Enter to start, or Ctrl+C to cancel${NC}"
-read -r
+confirm_or_skip "Press Enter to start, or Ctrl+C to cancel"
 echo ""
 
 # Step 1: Pre-flight checks
@@ -105,9 +138,7 @@ echo "Checking homebrew-tap formula is bundle-aware..."
 HEAD_FORMULA=$(curl -fsSL https://raw.githubusercontent.com/jackielii/homebrew-tap/main/Formula/skhd-zig.rb 2>/dev/null || true)
 if [ -z "$HEAD_FORMULA" ]; then
     echo -e "${YELLOW}Warning: could not fetch homebrew-tap formula${NC}"
-    echo "Continue anyway? (y/n)"
-    read -r CONFIRM
-    if [ "$CONFIRM" != "y" ]; then
+    if ! confirm_yn "Continue anyway?"; then
         exit 1
     fi
 elif ! echo "$HEAD_FORMULA" | grep -q 'File.directory?("skhd.app")'; then
@@ -152,8 +183,7 @@ Please add the new entry after ## [Unreleased] and before the previous version e
 
     echo ""
     echo "CHANGELOG.md has been updated. Please review the changes."
-    echo -e "${YELLOW}Press Enter to continue with the updated changelog, or Ctrl+C to cancel${NC}"
-    read -r
+    confirm_or_skip "Press Enter to continue with the updated changelog, or Ctrl+C to cancel"
 
     # Commit the changelog update
     git add CHANGELOG.md
@@ -201,10 +231,7 @@ echo "----------------------------------------"
 echo "$RELEASE_NOTES"
 echo "----------------------------------------"
 echo ""
-echo -e "${YELLOW}Do you want to proceed with creating tag $TAG with these release notes? (y/n)${NC}"
-read -r CONFIRM
-
-if [ "$CONFIRM" != "y" ]; then
+if ! confirm_yn "Do you want to proceed with creating tag $TAG with these release notes?"; then
     echo -e "${RED}Release cancelled${NC}"
     exit 1
 fi

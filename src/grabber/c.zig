@@ -152,6 +152,13 @@ pub const kIOHIDVendorIDKey: [*:0]const u8 = "VendorID";
 pub const kIOHIDProductIDKey: [*:0]const u8 = "ProductID";
 pub const kIOHIDPrimaryUsagePageKey: [*:0]const u8 = "PrimaryUsagePage";
 pub const kIOHIDPrimaryUsageKey: [*:0]const u8 = "PrimaryUsage";
+/// Per-device property: how long (in ms) Apple's keyboard firmware
+/// waits before treating a caps_lock press as a toggle. Default ~150.
+/// Setting it to 0 disables the firmware-level toggle entirely so
+/// caps_lock acts like any other key under our seize. Same trick
+/// Karabiner-Elements uses to suppress caps_lock-on-hold on built-in
+/// MacBook keyboards.
+pub const kIOHIDKeyboardCapsLockDelayOverrideKey: [*:0]const u8 = "HIDKeyboardCapsLockDelayOverride";
 
 // HID usage pages / usages relevant to seize matching.
 pub const kHIDPage_GenericDesktop: i32 = 0x01;
@@ -166,6 +173,8 @@ pub extern fn IOHIDManagerScheduleWithRunLoop(manager: IOHIDManagerRef, runLoop:
 pub extern fn IOHIDManagerUnscheduleFromRunLoop(manager: IOHIDManagerRef, runLoop: CFRunLoopRef, mode: CFStringRef) void;
 pub extern fn IOHIDManagerCopyDevices(manager: IOHIDManagerRef) ?*anyopaque; // CFSetRef
 pub extern fn CFSetGetCount(theSet: ?*anyopaque) CFIndex;
+pub extern fn CFSetGetValues(theSet: ?*anyopaque, values: [*]?*const anyopaque) void;
+pub extern fn IOHIDDeviceSetProperty(device: IOHIDDeviceRef, key: CFStringRef, property: CFTypeRef) Boolean;
 
 pub extern fn IOHIDValueGetElement(value: IOHIDValueRef) IOHIDElementRef;
 pub extern fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) CFIndex;

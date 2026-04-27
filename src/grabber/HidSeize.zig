@@ -187,10 +187,51 @@ pub fn start(self: *Self, mode: Mode) !void {
 
     const matched = c.IOHIDManagerCopyDevices(self.manager);
     const count: usize = if (matched) |s| @intCast(c.CFSetGetCount(s)) else 0;
-    if (matched) |s| c.CFRelease(s);
     log.info("seized matching devices (options=0x{x}, matched_count={d})", .{ self.open_options, count });
     if (count == 0) {
         log.warn("matching dictionary captured 0 devices — vendor/product mismatch?", .{});
+    }
+    if (mode == .seize and matched != null and count > 0) {
+        self.disableCapsLockDelayOnMatched(matched.?, count);
+    }
+    if (matched) |s| c.CFRelease(s);
+}
+
+/// Set HIDKeyboardCapsLockDelayOverride=0 on every matched device so
+/// the firmware-level "hold caps_lock for ~150ms to toggle" behavior
+/// can't fire while we're seizing. Without this, caps_lock-as-ctrl
+/// works at the FSM level but the OS's caps_lock state diverges
+/// (LED on, caps stuck) because the firmware toggle reaches
+/// IOHIDSystem through a side channel that seize doesn't intercept.
+fn disableCapsLockDelayOnMatched(self: *Self, set_ref: *anyopaque, count: usize) void {
+    const buf = self.allocator.alloc(?*const anyopaque, count) catch {
+        log.warn("OOM allocating device list for caps_lock_delay override", .{});
+        return;
+    };
+    defer self.allocator.free(buf);
+    c.CFSetGetValues(set_ref, buf.ptr);
+
+    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDKeyboardCapsLockDelayOverrideKey, c.kCFStringEncodingUTF8);
+    if (key == null) {
+        log.warn("CFStringCreateWithCString for caps_lock_delay key failed", .{});
+        return;
+    }
+    defer c.CFRelease(key);
+
+    var zero: i32 = 0;
+    const value = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &zero);
+    if (value == null) {
+        log.warn("CFNumberCreate for caps_lock_delay value failed", .{});
+        return;
+    }
+    defer c.CFRelease(value);
+
+    for (buf) |maybe_dev| {
+        const dev: c.IOHIDDeviceRef = @constCast(maybe_dev orelse continue);
+        const ok = c.IOHIDDeviceSetProperty(dev, key, value);
+        if (ok == 0) {
+            log.warn("IOHIDDeviceSetProperty(HIDKeyboardCapsLockDelayOverride=0) failed", .{});
+        }
     }
 }
 

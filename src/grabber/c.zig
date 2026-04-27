@@ -172,6 +172,35 @@ pub extern fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) CFIndex;
 pub extern fn IOHIDElementGetUsagePage(element: IOHIDElementRef) u32;
 pub extern fn IOHIDElementGetUsage(element: IOHIDElementRef) u32;
 
+// IOService / IOHIDSystem client. Used by HidSystem.zig to force
+// caps_lock state off after Apple's MacBook keyboard firmware toggles
+// it through a side channel that IOHIDManager seize doesn't capture.
+pub const mach_port_t = u32;
+pub const task_port_t = mach_port_t;
+pub const io_object_t = mach_port_t;
+pub const io_service_t = io_object_t;
+pub const io_connect_t = io_object_t;
+
+pub const kIOMainPortDefault: mach_port_t = 0;
+// IOHIDSystem's user-client connect type for parameter access (the
+// type used to call IOHIDSet/GetModifierLockState). Defined in
+// <IOKit/hidsystem/IOHIDShared.h>.
+pub const kIOHIDParamConnectType: u32 = 1;
+// Selector for IOHIDSet/GetModifierLockState. From <IOKit/hidsystem/IOLLEvent.h>.
+pub const NX_MODIFIERKEY_ALPHALOCK: c_int = 0;
+
+// `mach_task_self()` is a macro expanding to this global; export it
+// directly so we don't need a C wrapper.
+pub extern var mach_task_self_: mach_port_t;
+
+pub extern fn IOServiceMatching(name: [*:0]const u8) CFMutableDictionaryRef;
+pub extern fn IOServiceGetMatchingService(masterPort: mach_port_t, matching: CFDictionaryRef) io_service_t;
+pub extern fn IOServiceOpen(service: io_service_t, owningTask: task_port_t, type_: u32, connect: *io_connect_t) IOReturn;
+pub extern fn IOServiceClose(connect: io_connect_t) IOReturn;
+pub extern fn IOObjectRelease(object: io_object_t) IOReturn;
+pub extern fn IOHIDSetModifierLockState(handle: io_connect_t, selector: c_int, state: u8) IOReturn;
+pub extern fn IOHIDGetModifierLockState(handle: io_connect_t, selector: c_int, state: *u8) IOReturn;
+
 // libc bits (geteuid for the seize permission check).
 pub extern fn geteuid() c_uint;
 

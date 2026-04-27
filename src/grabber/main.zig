@@ -19,6 +19,7 @@ const posix = std.posix;
 const c = @import("c.zig");
 const protocol = @import("grabber_protocol");
 const HidSeize = @import("HidSeize.zig");
+const HidSystem = @import("HidSystem.zig");
 const Ipc = @import("Ipc.zig");
 const KbState = @import("KbState.zig");
 const RuleSet = @import("RuleSet.zig");
@@ -222,6 +223,14 @@ const Daemon = struct {
             log.warn("chmod {s} failed: {s}", .{ socket_path, @errorName(err) });
         };
 
+        // Best-effort open of IOHIDSystem. If this fails (unlikely as
+        // root) we keep running — only the caps_lock force-off
+        // behaviour is unavailable.
+        const hidsystem: ?HidSystem = HidSystem.init() catch |err| blk: {
+            log.warn("IOHIDSystem connect failed ({s}); caps_lock state won't be forced off", .{@errorName(err)});
+            break :blk null;
+        };
+
         return .{
             .allocator = allocator,
             .socket_path = socket_path,
@@ -231,6 +240,7 @@ const Daemon = struct {
                 .state = .{},
                 // vhidd pointer set on lazy connect.
                 .vhidd = undefined,
+                .hidsystem = hidsystem,
             },
             .layer_ctx = .{ .stream = null, .allocator = allocator },
         };
@@ -257,6 +267,7 @@ const Daemon = struct {
             c.CFRelease(fd);
             self.cf_listener = null;
         }
+        if (self.seize_ctx.hidsystem) |*h| h.deinit();
         self.ruleset.deinit();
         self.server.deinit();
         posix.unlink(self.socket_path) catch {};
@@ -435,6 +446,17 @@ const Daemon = struct {
         self.slots = slots;
         self.seize_ctx.slots = slots;
 
+        // Cache: do we have any caps_lock remap? Drives the per-event
+        // force-off in seizeInputCallback.
+        var caps_active = false;
+        for (slots) |*s| {
+            if (s.engine.rule.src_usage == 0x39) {
+                caps_active = true;
+                break;
+            }
+        }
+        self.seize_ctx.caps_remap_active = caps_active;
+
         const seize = try HidSeize.init(self.allocator, seizeInputCallback, &self.seize_ctx);
         errdefer seize.deinit();
         try seize.setMatches(matches.items);
@@ -454,6 +476,7 @@ const Daemon = struct {
         if (self.slots.len > 0) self.allocator.free(self.slots);
         self.slots = &.{};
         self.seize_ctx.slots = &.{};
+        self.seize_ctx.caps_remap_active = false;
         // Drop any virtual keys we left held so a re-apply starts clean.
         if (self.vhidd) |v| {
             v.postKeyboardReport(.{}, &.{}) catch {};
@@ -602,6 +625,15 @@ const SeizeCtx = struct {
     slots: []EngineSlot = &.{},
     forwarded: u64 = 0,
     skipped_other_pages: u64 = 0,
+    /// IOHIDSystem connection used to force caps_lock state off after
+    /// Apple firmware would otherwise toggle it. Null when the open
+    /// failed (we still process events; only the caps_lock-neutralize
+    /// behaviour is skipped).
+    hidsystem: ?HidSystem = null,
+    /// Cached: any active rule has src_usage = 0x39. When false, we
+    /// skip the per-event caps_lock force-off so we don't interfere
+    /// with users who haven't remapped caps_lock.
+    caps_remap_active: bool = false,
 };
 
 /// State for the layer-hold sink: a borrowed agent IPC stream + the
@@ -749,6 +781,16 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
         applyTapHoldTimer(slot, r.timer);
         if (r.disposition == .consumed) any_consumed = true;
     }
+
+    // Apple firmware caps_lock neutralization. When caps_lock is the
+    // source of an active remap rule, force the OS-level caps_lock
+    // state off on every caps_lock event from the seized keyboard —
+    // covers both the press (preemptive) and the release (which
+    // happens after the firmware's ~150ms toggle would have fired).
+    if (usage16 == 0x39 and cx.caps_remap_active) {
+        if (cx.hidsystem) |*hs| hs.setCapsLockState(false);
+    }
+
     if (any_consumed) return;
 
     emitToVhidd(@ptrCast(cx), taphold_event);
@@ -799,7 +841,12 @@ fn seizeTest(
     var ctx = SeizeCtx{
         .state = .{},
         .vhidd = &vhidd,
+        .hidsystem = HidSystem.init() catch |err| blk: {
+            log.warn("IOHIDSystem connect failed ({s}); caps_lock force-off skipped", .{@errorName(err)});
+            break :blk null;
+        },
     };
+    defer if (ctx.hidsystem) |*h| h.deinit();
 
     // Single inline rule for --seize-test. The slot must outlive the
     // run loop, so we keep it on the stack and slice into it.
@@ -810,6 +857,7 @@ fn seizeTest(
             .engine = TapHold.init(r, emitToVhidd, &ctx),
         };
         ctx.slots = slot_storage[0..1];
+        if (r.src_usage == 0x39) ctx.caps_remap_active = true;
     }
     defer for (ctx.slots) |*s| cancelTapHoldTimer(s);
 

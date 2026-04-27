@@ -36,10 +36,21 @@ pub const Event = struct {
     pressed: bool,
 };
 
+/// What to do when a tap-hold rule commits its hold action.
+pub const HoldAction = union(enum) {
+    /// Emit a HID page-7 usage (modifier or any key). Used for
+    /// caps_lock → ctrl, etc.
+    hid_usage: u16,
+    /// Push a named mode onto the agent. Used for layer holds like
+    /// `space → fn_layer`. Lifetime: the engine borrows the slice;
+    /// caller keeps it valid until the engine is dropped.
+    layer: []const u8,
+};
+
 pub const Rule = struct {
     src_usage: u16,
     tap_usage: u16,
-    hold_usage: u16,
+    hold: HoldAction,
     timeout_ms: u32 = 200,
     permissive_hold: bool = false,
     hold_on_other_key_press: bool = false,
@@ -60,6 +71,12 @@ pub const TimerAction = union(enum) {
 /// implementation is expected to update its KbState and post the
 /// resulting report to vhidd.
 pub const Sink = *const fn (ctx: ?*anyopaque, ev: Event) void;
+
+/// Sink for layer enter/exit events. Called when a layer-hold rule
+/// commits or releases. `entering = true` means push the named layer;
+/// `entering = false` means pop back to the previous mode (the owner
+/// implements that semantic — the engine doesn't track stack depth).
+pub const LayerSink = *const fn (ctx: ?*anyopaque, layer: []const u8, entering: bool) void;
 
 /// Disposition of an incoming event: pass = the engine doesn't care
 /// about this usage, owner should forward; consumed = engine handled
@@ -85,12 +102,32 @@ rule: Rule,
 state: State = .idle,
 sink: Sink,
 sink_ctx: ?*anyopaque,
+/// Optional layer sink — required if rule.hold is a layer; ignored
+/// otherwise. Owner's responsibility.
+layer_sink: ?LayerSink = null,
+layer_sink_ctx: ?*anyopaque = null,
 buffer: std.BoundedArray(Event, max_buffered_events) = .{},
 
 const Self = @This();
 
 pub fn init(rule: Rule, sink: Sink, sink_ctx: ?*anyopaque) Self {
     return .{ .rule = rule, .sink = sink, .sink_ctx = sink_ctx };
+}
+
+pub fn initWithLayerSink(
+    rule: Rule,
+    sink: Sink,
+    sink_ctx: ?*anyopaque,
+    layer_sink: LayerSink,
+    layer_sink_ctx: ?*anyopaque,
+) Self {
+    return .{
+        .rule = rule,
+        .sink = sink,
+        .sink_ctx = sink_ctx,
+        .layer_sink = layer_sink,
+        .layer_sink_ctx = layer_sink_ctx,
+    };
 }
 
 pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: TimerAction } {
@@ -192,13 +229,35 @@ fn commitTap(self: *Self) void {
 }
 
 fn emitHoldDown(self: *Self) void {
-    log.info("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} down", .{ self.rule.src_usage, self.rule.hold_usage });
-    self.emit(self.rule.hold_usage, true);
+    switch (self.rule.hold) {
+        .hid_usage => |u| {
+            log.info("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} down", .{ self.rule.src_usage, u });
+            self.emit(u, true);
+        },
+        .layer => |name| {
+            log.info("commit hold: src=0x{X:0>2} → enter layer '{s}'", .{ self.rule.src_usage, name });
+            if (self.layer_sink) |ls| {
+                ls(self.layer_sink_ctx, name, true);
+            } else {
+                log.warn("layer hold for '{s}' has no layer sink — drop", .{name});
+            }
+        },
+    }
 }
 
 fn emitHoldUp(self: *Self) void {
-    log.info("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} up", .{ self.rule.src_usage, self.rule.hold_usage });
-    self.emit(self.rule.hold_usage, false);
+    switch (self.rule.hold) {
+        .hid_usage => |u| {
+            log.info("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} up", .{ self.rule.src_usage, u });
+            self.emit(u, false);
+        },
+        .layer => |name| {
+            log.info("commit hold: src=0x{X:0>2} → exit layer '{s}'", .{ self.rule.src_usage, name });
+            if (self.layer_sink) |ls| {
+                ls(self.layer_sink_ctx, name, false);
+            }
+        },
+    }
 }
 
 fn emit(self: *Self, usage: u16, pressed: bool) void {
@@ -242,7 +301,7 @@ fn kbev(usage: u16, pressed: bool) Event {
 test "tap path: quick source up emits tap_down + tap_up" {
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold_usage = 0xE0 }, TestSink.callback, &sink);
+    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold = .{ .hid_usage = 0xE0 } }, TestSink.callback, &sink);
 
     const r1 = eng.feed(kbev(0x39, true));
     try std.testing.expectEqual(Disposition.consumed, r1.disposition);
@@ -262,7 +321,7 @@ test "tap path: quick source up emits tap_down + tap_up" {
 test "hold path: timer fires emits hold_down, source up emits hold_up" {
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold_usage = 0xE0 }, TestSink.callback, &sink);
+    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold = .{ .hid_usage = 0xE0 } }, TestSink.callback, &sink);
 
     _ = eng.feed(kbev(0x39, true));
     _ = eng.timerFired();
@@ -280,7 +339,7 @@ test "hold path: timer fires emits hold_down, source up emits hold_up" {
 test "default: other key passes through during pending without committing" {
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold_usage = 0xE0 }, TestSink.callback, &sink);
+    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold = .{ .hid_usage = 0xE0 } }, TestSink.callback, &sink);
 
     _ = eng.feed(kbev(0x39, true));
     const r = eng.feed(kbev(0x04, true)); // 'a' down
@@ -301,7 +360,7 @@ test "hold_on_other_key_press: other-key-down immediately commits hold" {
     var eng = init(.{
         .src_usage = 0x39,
         .tap_usage = 0x29,
-        .hold_usage = 0xE0,
+        .hold = .{ .hid_usage = 0xE0 },
         .hold_on_other_key_press = true,
     }, TestSink.callback, &sink);
 
@@ -320,7 +379,7 @@ test "permissive_hold: other-key tap during source-held commits hold + replays" 
     var eng = init(.{
         .src_usage = 0x39,
         .tap_usage = 0x29,
-        .hold_usage = 0xE0,
+        .hold = .{ .hid_usage = 0xE0 },
         .permissive_hold = true,
     }, TestSink.callback, &sink);
 
@@ -348,7 +407,7 @@ test "permissive_hold: source up before other-key up emits tap then replays" {
     var eng = init(.{
         .src_usage = 0x39,
         .tap_usage = 0x29,
-        .hold_usage = 0xE0,
+        .hold = .{ .hid_usage = 0xE0 },
         .permissive_hold = true,
     }, TestSink.callback, &sink);
 
@@ -366,7 +425,7 @@ test "permissive_hold: source up before other-key up emits tap then replays" {
 test "decided_hold: source up after timer emits hold_up exactly once" {
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold_usage = 0xE0 }, TestSink.callback, &sink);
+    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold = .{ .hid_usage = 0xE0 } }, TestSink.callback, &sink);
 
     _ = eng.feed(kbev(0x39, true));
     _ = eng.timerFired();
@@ -381,10 +440,56 @@ test "decided_hold: source up after timer emits hold_up exactly once" {
     try std.testing.expect(!sink.out.items[1].pressed);
 }
 
+test "layer hold: hold_on_other_key_press triggers layer enter+exit through layer sink" {
+    const LayerEvent = struct { layer: []const u8, entering: bool };
+    const LayerLog = struct {
+        events: std.ArrayList(LayerEvent),
+
+        fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
+            const s: *@This() = @ptrCast(@alignCast(ctx.?));
+            s.events.append(.{ .layer = layer, .entering = entering }) catch unreachable;
+        }
+    };
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var ll = LayerLog{ .events = std.ArrayList(LayerEvent).init(std.testing.allocator) };
+    defer ll.events.deinit();
+
+    var eng = initWithLayerSink(.{
+        .src_usage = 0x2C, // space
+        .tap_usage = 0x2C,
+        .hold = .{ .layer = "fn_layer" },
+        .hold_on_other_key_press = true,
+    }, TestSink.callback, &sink, LayerLog.cb, &ll);
+
+    // space down → pending
+    _ = eng.feed(kbev(0x2C, true));
+    try std.testing.expectEqual(@as(usize, 0), ll.events.items.len);
+
+    // 'h' down → hold_on_other_key_press commits the layer hold
+    _ = eng.feed(kbev(0x0B, true));
+    try std.testing.expectEqual(@as(usize, 1), ll.events.items.len);
+    try std.testing.expectEqualStrings("fn_layer", ll.events.items[0].layer);
+    try std.testing.expect(ll.events.items[0].entering);
+
+    // 'h' up — passes through, no further layer events
+    _ = eng.feed(kbev(0x0B, false));
+    try std.testing.expectEqual(@as(usize, 1), ll.events.items.len);
+
+    // space up → exit layer
+    _ = eng.feed(kbev(0x2C, false));
+    try std.testing.expectEqual(@as(usize, 2), ll.events.items.len);
+    try std.testing.expectEqualStrings("fn_layer", ll.events.items[1].layer);
+    try std.testing.expect(!ll.events.items[1].entering);
+
+    // No HID emits at all for the layer rule's hold path.
+    try std.testing.expectEqual(@as(usize, 0), sink.out.items.len);
+}
+
 test "non-source events while idle: pass through, FSM untouched" {
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold_usage = 0xE0 }, TestSink.callback, &sink);
+    var eng = init(.{ .src_usage = 0x39, .tap_usage = 0x29, .hold = .{ .hid_usage = 0xE0 } }, TestSink.callback, &sink);
 
     const r = eng.feed(kbev(0x04, true));
     try std.testing.expectEqual(Disposition.pass, r.disposition);

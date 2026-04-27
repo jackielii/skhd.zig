@@ -1278,25 +1278,23 @@ fn parse_remap_block_body(self: *Parser, mappings: *Mappings, src_token: Token, 
         self.error_info = try ParseError.fromToken(self.allocator, src_token, "Missing required field 'tap' in .remap block", self.current_file_path);
         return error.ParseErrorOccurred;
     }
+    var hold_layer: ?[]const u8 = null;
     if (hold_usage == null) {
-        // Layer-hold case (`hold : fn_layer`). Mode-based holds aren't
-        // wired into the grabber yet — accept the parse but warn so the
-        // user knows that specific rule won't apply at runtime.
-        if (hold_target_text.len > 0 and mappings.mode_map.contains(hold_target_text)) {
-            log.warn(
-                "ignoring .remap {{tap, hold: {s}}} on device {s} — layer holds are not yet implemented (D6+ scope); other rules in this config still apply",
-                .{ hold_target_text, alias_name },
-            );
-            return;
+        // Layer-hold case: `hold : <mode_name>` instead of a HID key.
+        // Look up the name in the mode_map; if it's not a known mode,
+        // surface a real error.
+        if (hold_target_text.len == 0 or !mappings.mode_map.contains(hold_target_text)) {
+            self.error_info = try ParseError.fromToken(self.allocator, src_token, "Missing required field 'hold' in .remap block. (For a plain remap with no tap-vs-hold, use the colon form: .remap KEY [device D] : TARGET)", self.current_file_path);
+            return error.ParseErrorOccurred;
         }
-        self.error_info = try ParseError.fromToken(self.allocator, src_token, "Missing required field 'hold' in .remap block. (For a plain remap with no tap-vs-hold, use the colon form: .remap KEY [device D] : TARGET)", self.current_file_path);
-        return error.ParseErrorOccurred;
+        hold_layer = hold_target_text;
     }
 
     mappings.add_taphold(.{
         .src_usage = src_usage,
         .tap_usage = tap_usage.?,
-        .hold_usage = hold_usage.?,
+        .hold_usage = hold_usage orelse 0,
+        .hold_layer = hold_layer,
         .device_alias = alias_name,
         .timeout_ms = timeout_ms,
         .permissive_hold = permissive_hold,

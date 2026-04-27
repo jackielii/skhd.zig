@@ -22,25 +22,47 @@ pub fn init(allocator: std.mem.Allocator) Self {
 pub fn deinit(self: *Self) void {
     var it = self.per_uid.valueIterator();
     while (it.next()) |rules_ptr| {
-        self.allocator.free(rules_ptr.*);
+        freeRules(self.allocator, rules_ptr.*);
     }
     self.per_uid.deinit(self.allocator);
     self.* = undefined;
 }
 
-/// Replace the rule list for `uid`. The grabber owns its own copy of
-/// the rules so the parsed-from-JSON arena can be freed.
+/// Replace the rule list for `uid`. Deep-copies each rule so the
+/// parsed-from-JSON arena can be freed by the caller — Rule has
+/// inline string slices (hold_layer) that would dangle otherwise.
 pub fn replaceForUid(self: *Self, uid: u32, rules: []const protocol.Rule) !void {
     if (self.per_uid.fetchRemove(uid)) |kv| {
-        self.allocator.free(kv.value);
+        freeRules(self.allocator, kv.value);
     }
     if (rules.len == 0) {
         log.info("uid={d}: cleared rule set", .{uid});
         return;
     }
-    const owned = try self.allocator.dupe(protocol.Rule, rules);
+    const owned = try self.allocator.alloc(protocol.Rule, rules.len);
+    errdefer self.allocator.free(owned);
+
+    var i: usize = 0;
+    errdefer while (i > 0) : (i -= 1) {
+        if (owned[i - 1].hold_layer) |l| self.allocator.free(l);
+    };
+    for (rules) |r| {
+        var copy = r;
+        if (r.hold_layer) |l| {
+            copy.hold_layer = try self.allocator.dupe(u8, l);
+        }
+        owned[i] = copy;
+        i += 1;
+    }
     try self.per_uid.put(self.allocator, uid, owned);
     log.info("uid={d}: stored {d} rule(s)", .{ uid, owned.len });
+}
+
+fn freeRules(allocator: std.mem.Allocator, rules: []protocol.Rule) void {
+    for (rules) |r| {
+        if (r.hold_layer) |l| allocator.free(l);
+    }
+    allocator.free(rules);
 }
 
 pub fn rulesForUid(self: *const Self, uid: u32) []const protocol.Rule {

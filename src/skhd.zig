@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const c = @import("c.zig");
 const agent_grabber_client = @import("agent_grabber_client.zig");
+const agent_layer_listener = @import("agent_layer_listener.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
@@ -42,6 +43,12 @@ hotload_enabled: bool = false,
 tracer: Tracer,
 carbon_event: *CarbonEvent,
 watchdog_timer: c.CFRunLoopTimerRef = null,
+/// Persistent IPC connection to skhd-grabber (for layer-hold pushes).
+/// null when there are no caps-class rules, or when we couldn't dial
+/// the grabber. The Client owns the socket fd; Listener wraps it as a
+/// CFRunLoop source. Both freed on deinit.
+grabber_client: ?*agent_grabber_client.Client = null,
+layer_listener: ?*agent_layer_listener.Listener = null,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -84,18 +91,6 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     // Log shell configuration
     log.info("Using shell: {s}", .{mappings.shell});
 
-    // Forward tap-hold rules to skhd-grabber so the system daemon can
-    // seize the matched device and run the FSM at the HID layer. We
-    // do this here (one-shot at startup) rather than attempting per-
-    // event coordination — caps_lock-class rules can't run in the
-    // user-agent CGEventTap because macOS Tahoe filters them at the
-    // kernel HID layer before the tap sees them. Tolerate "grabber
-    // not running" gracefully so users without the daemon installed
-    // still get the rest of their config (modes, hotkeys, etc.).
-    forwardTapholdsToGrabber(gpa, &mappings) catch |err| {
-        log.warn("could not forward .remap rules to skhd-grabber: {s}", .{@errorName(err)});
-    };
-
     // Initialize Carbon event handler for app switching
     var carbon_event = try CarbonEvent.init(gpa);
     errdefer carbon_event.deinit();
@@ -128,6 +123,11 @@ pub fn deinit(self: *Skhd) void {
         hotloader.destroy();
     }
     self.stopWatchdog();
+    if (self.layer_listener) |ll| ll.deinit();
+    if (self.grabber_client) |gc| {
+        gc.close();
+        self.allocator.destroy(gc);
+    }
     self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
@@ -137,26 +137,36 @@ pub fn deinit(self: *Skhd) void {
 /// Translate parsed `.remap { tap, hold, ... }` rules into the
 /// IPC schema and push them to skhd-grabber. Looks up each rule's
 /// device alias to attach the (vendor, product) match the grabber
-/// uses for IOHIDManager. No-ops cleanly when there are no rules.
+/// uses for IOHIDManager. Layer-hold rules carry `hold_layer` set
+/// to a mode name; HID-key holds carry `hold_usage` set instead.
+///
+/// If any rule is a layer rule, the agent keeps the IPC connection
+/// open and registers a CFFileDescriptor source so the grabber can
+/// push `mode_change` messages back when the layer hold commits or
+/// releases. Otherwise the connection is closed after `bye`.
 ///
 /// "Cannot reach grabber" is downgraded to a warning by the caller —
 /// users without `skhd --install-grabber` still get the rest of
 /// their config running.
-fn forwardTapholdsToGrabber(allocator: std.mem.Allocator, mappings: *const Mappings) !void {
-    if (mappings.tapholds.items.len == 0) return;
+fn forwardTapholdsToGrabber(self: *Skhd) !void {
+    if (self.mappings.tapholds.items.len == 0) return;
 
-    var rules = try std.ArrayList(grabber_protocol.Rule).initCapacity(allocator, mappings.tapholds.items.len);
+    var rules = try std.ArrayList(grabber_protocol.Rule).initCapacity(self.allocator, self.mappings.tapholds.items.len);
     defer rules.deinit();
 
-    for (mappings.tapholds.items) |th| {
-        const alias = mappings.device_aliases.get(th.device_alias) orelse {
+    var has_layer_rule = false;
+
+    for (self.mappings.tapholds.items) |th| {
+        const alias = self.mappings.device_aliases.get(th.device_alias) orelse {
             log.warn("taphold for src=0x{X:0>2}: device alias '{s}' not in alias map (skip)", .{ th.src_usage, th.device_alias });
             continue;
         };
+        if (th.hold_layer != null) has_layer_rule = true;
         try rules.append(.{
             .src_usage = th.src_usage,
             .tap_usage = th.tap_usage,
             .hold_usage = th.hold_usage,
+            .hold_layer = th.hold_layer,
             .device = .{ .vendor = alias.vendor, .product = alias.product },
             .timeout_ms = th.timeout_ms,
             .permissive_hold = th.permissive_hold,
@@ -167,15 +177,59 @@ fn forwardTapholdsToGrabber(allocator: std.mem.Allocator, mappings: *const Mappi
 
     if (rules.items.len == 0) return;
 
-    log.info("forwarding {d} tap-hold rule(s) to skhd-grabber at {s}", .{ rules.items.len, grabber_protocol.default_socket_path });
+    log.info(
+        "forwarding {d} tap-hold rule(s) to skhd-grabber at {s} (layer_listen={})",
+        .{ rules.items.len, grabber_protocol.default_socket_path, has_layer_rule },
+    );
 
-    var client = try agent_grabber_client.Client.connect(allocator, grabber_protocol.default_socket_path);
-    defer client.close();
+    const client = try self.allocator.create(agent_grabber_client.Client);
+    errdefer self.allocator.destroy(client);
+    client.* = try agent_grabber_client.Client.connect(self.allocator, grabber_protocol.default_socket_path);
+    errdefer client.close();
 
     try client.hello();
     try client.applyRules(rules.items);
-    try client.bye();
-    log.info("grabber acknowledged {d} rule(s)", .{rules.items.len});
+
+    if (has_layer_rule) {
+        // Keep the connection open — the grabber will push
+        // mode_change frames over it whenever a layer-hold rule
+        // commits/releases. Register the fd as a run-loop source.
+        self.grabber_client = client;
+        self.layer_listener = try agent_layer_listener.Listener.init(
+            self.allocator,
+            client.stream.handle,
+            modeChangePushed,
+            self,
+        );
+        log.info("grabber acknowledged {d} rule(s); layer listener installed", .{rules.items.len});
+    } else {
+        try client.bye();
+        client.close();
+        self.allocator.destroy(client);
+        log.info("grabber acknowledged {d} rule(s)", .{rules.items.len});
+    }
+}
+
+/// Run-loop callback fired by `agent_layer_listener` whenever the
+/// grabber pushes a mode_change. Empty `mode_name` means "exit current
+/// layer back to default".
+fn modeChangePushed(ctx: ?*anyopaque, mode_name: []const u8) void {
+    const self: *Skhd = @ptrCast(@alignCast(ctx orelse return));
+    if (mode_name.len == 0) {
+        if (self.mappings.mode_map.getPtr("default")) |m| {
+            self.current_mode = m;
+            log.info("layer push: exited to default", .{});
+        } else {
+            self.current_mode = null;
+        }
+        return;
+    }
+    if (self.mappings.mode_map.getPtr(mode_name)) |m| {
+        self.current_mode = m;
+        log.info("layer push: entered '{s}'", .{mode_name});
+    } else {
+        log.warn("layer push: unknown mode '{s}'", .{mode_name});
+    }
 }
 
 /// Poll AXIsProcessTrusted on a 1s timer and reconcile the event tap with
@@ -265,6 +319,18 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
 
     // Store a global reference for the signal handler
     global_skhd = self;
+
+    // Now that we hold a stable address for `self`, dial skhd-grabber
+    // and forward any caps-class rules. We defer this from init() to
+    // here so:
+    //  (1) the layer listener can use `self` as its callback context,
+    //  (2) the listener registers on the same CFRunLoop the event
+    //      tap is about to attach to,
+    //  (3) errors here can be downgraded to warnings without poisoning
+    //      Skhd construction.
+    self.forwardTapholdsToGrabber() catch |err| {
+        log.warn("could not forward .remap rules to skhd-grabber: {s}", .{@errorName(err)});
+    };
 
     // Check if config file is a regular file
     const stat = std.fs.cwd().statFile(self.config_file) catch |err| {

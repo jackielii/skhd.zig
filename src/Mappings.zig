@@ -48,8 +48,12 @@ pub const TapHoldDecl = struct {
     /// escape).
     tap_usage: u32,
     /// HID usage byte of the action committed on hold (e.g., lctrl).
-    /// Phase 4 will extend this to layer / mode names.
-    hold_usage: u32,
+    /// Zero when `hold_layer` is set instead.
+    hold_usage: u32 = 0,
+    /// Mode name to push on hold (e.g. "fn_layer"). null when this
+    /// rule's hold action is a HID usage. Owned by Mappings (duped
+    /// on insert, freed in deinit).
+    hold_layer: ?[]const u8 = null,
     /// Required device alias (same rationale as RemapDecl). Owned.
     device_alias: []const u8,
     /// Tap-vs-hold decision deadline in milliseconds. Default 200 if
@@ -106,7 +110,10 @@ pub fn deinit(self: *Mappings) void {
     }
     for (self.remaps.items) |r| self.allocator.free(r.device_alias);
     self.remaps.deinit(self.allocator);
-    for (self.tapholds.items) |t| self.allocator.free(t.device_alias);
+    for (self.tapholds.items) |t| {
+        self.allocator.free(t.device_alias);
+        if (t.hold_layer) |l| self.allocator.free(l);
+    }
     self.tapholds.deinit(self.allocator);
     self.allocator.free(self.shell);
 
@@ -173,8 +180,14 @@ pub fn add_taphold(self: *Mappings, decl: TapHoldDecl) !void {
     }
     const owned_alias = try self.allocator.dupe(u8, decl.device_alias);
     errdefer self.allocator.free(owned_alias);
+    const owned_layer: ?[]const u8 = if (decl.hold_layer) |l|
+        try self.allocator.dupe(u8, l)
+    else
+        null;
+    errdefer if (owned_layer) |l| self.allocator.free(l);
     var d = decl;
     d.device_alias = owned_alias;
+    d.hold_layer = owned_layer;
     try self.tapholds.append(self.allocator, d);
 }
 

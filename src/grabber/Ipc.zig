@@ -11,7 +11,18 @@ const RuleSet = @import("RuleSet.zig");
 
 const log = std.log.scoped(.grabber_ipc);
 
-pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream, ruleset: *RuleSet) !void {
+/// Result of one client session.
+pub const ServeResult = enum {
+    /// Client disconnected (sent bye, or closed) without leaving rules
+    /// active. Caller should drop the connection.
+    closed,
+    /// Client sent apply_rules with at least one rule. Caller may
+    /// take ownership of the connection (e.g. to push mode_change
+    /// messages back to the agent for layer holds) or close it.
+    rules_applied,
+};
+
+pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream, ruleset: *RuleSet) !ServeResult {
     // Per-session state: the protocol expects hello first; record the
     // client uid for subsequent messages and reject anything else
     // before hello.
@@ -24,7 +35,7 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream, ruleset: *Rul
 
     while (true) {
         const n = protocol.readFrame(stream, &buf) catch |err| switch (err) {
-            error.EndOfStream => return, // peer closed; end of session
+            error.EndOfStream => return .closed, // peer closed; end of session
             else => return err,
         };
 
@@ -60,10 +71,18 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream, ruleset: *Rul
                 try sendError(allocator, stream, "no_hello", "send hello before apply_rules");
                 return error.ProtocolViolation;
             }
-            try handleApplyRules(allocator, stream, obj, client_uid.?, ruleset);
+            const applied_count = try handleApplyRules(allocator, stream, obj, client_uid.?, ruleset);
+            // Hand control back to the daemon main loop right away so
+            // it can either transition into the seize loop (rules
+            // present) or wait for the next client. The agent may
+            // still keep its end of the connection open if it wants
+            // to receive mode_change pushes.
+            if (applied_count > 0) return .rules_applied;
+            // Empty apply_rules clears the rule set. Continue
+            // handling further messages on the same connection.
         } else if (std.mem.eql(u8, kind, "bye")) {
             try sendOk(allocator, stream);
-            return;
+            return .closed;
         } else {
             try sendError(allocator, stream, "unknown_type", kind);
             return error.UnknownMessageType;
@@ -105,7 +124,7 @@ fn handleApplyRules(
     obj: std.json.ObjectMap,
     uid: u32,
     ruleset: *RuleSet,
-) !void {
+) !usize {
     const rules_val = obj.get("rules") orelse {
         try sendError(allocator, stream, "bad_apply", "missing 'rules'");
         return error.BadApply;
@@ -151,6 +170,7 @@ fn handleApplyRules(
     }
 
     try sendOk(allocator, stream);
+    return rules_parsed.value.len;
 }
 
 fn sendOk(allocator: std.mem.Allocator, stream: std.net.Stream) !void {

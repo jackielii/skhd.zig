@@ -26,14 +26,24 @@ pub const Device = struct {
 
 /// A single tap-hold remap rule. Wire-stable: don't reorder/rename
 /// without bumping protocol_version.
+///
+/// Hold action is one of:
+/// - `hold_usage > 0`: emit that HID usage on hold (modifier-style),
+/// - `hold_layer != null`: switch the agent into that mode while held.
+///
+/// Exactly one must be set; both forms are mutually exclusive. This
+/// matches `.remap … { hold: <hid-key> | <mode_name> }` in the config.
 pub const Rule = struct {
     /// HID usage of the source key on usage page 0x07 (e.g. 0x39 for
     /// caps_lock).
     src_usage: u32,
     /// HID usage emitted on tap.
     tap_usage: u32,
-    /// HID usage emitted on hold.
-    hold_usage: u32,
+    /// HID usage emitted on hold. Zero when `hold_layer` is set.
+    hold_usage: u32 = 0,
+    /// Mode name to push on hold; null when `hold_usage` is set.
+    /// Owned by the wire payload's arena (parsed-from-JSON lifetime).
+    hold_layer: ?[]const u8 = null,
     /// Optional device filter; null means "all keyboards".
     device: ?Device = null,
     /// Tap-hold timeout in milliseconds.

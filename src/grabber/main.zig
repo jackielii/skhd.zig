@@ -195,29 +195,50 @@ pub fn main() !void {
                 continue;
             },
         };
-        defer conn.stream.close();
-
-        Ipc.serve(gpa, conn.stream, &ruleset) catch |err| {
+        // We deliberately don't `defer conn.stream.close()` here —
+        // when rules arrive we hand the still-open connection to
+        // runDaemonSeize so layer-hold rules can push mode_change
+        // back to the agent. The seize loop closes it on exit.
+        const result = Ipc.serve(gpa, conn.stream, &ruleset) catch |err| blk: {
             log.warn("client session ended: {s}", .{@errorName(err)});
+            break :blk Ipc.ServeResult.closed;
         };
 
-        // After processing the connection, if the agent gave us
-        // rules, transition out of the accept loop into seize+TapHold
-        // mode and run there until SIGTERM. D5 will replace this with
-        // proper hot-reload (kqueue-multiplexed accept + seize).
-        if (firstRulesInRuleSet(&ruleset)) |rules| {
-            log.info("apply_rules received — transitioning to seize loop with {d} rule(s)", .{rules.len});
-            // Drop the IPC socket before going into the seize run loop;
-            // re-applies require a daemon restart for now.
+        if (result == .rules_applied) {
+            const rules = firstRulesInRuleSet(&ruleset) orelse {
+                conn.stream.close();
+                continue;
+            };
+            const has_layer_rule = blk: {
+                for (rules) |r| if (r.hold_layer != null) break :blk true;
+                break :blk false;
+            };
+            log.info(
+                "apply_rules received — transitioning to seize loop ({d} rule(s), layer_push={})",
+                .{ rules.len, has_layer_rule },
+            );
+
+            // Drop the IPC listener socket — re-applies require a
+            // daemon restart for now. The accepted connection
+            // (conn.stream) lives on into runDaemonSeize for layer
+            // pushes.
             posix.unlink(socket_path) catch {};
             server.deinit();
             bound_socket_path = null;
-            runDaemonSeize(gpa, rules) catch |err| {
+
+            const agent_stream: ?std.net.Stream = if (has_layer_rule) conn.stream else null;
+            if (!has_layer_rule) conn.stream.close();
+            defer if (has_layer_rule) conn.stream.close();
+
+            runDaemonSeize(gpa, rules, agent_stream) catch |err| {
                 log.err("seize loop failed: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
             return;
         }
+
+        // No rules applied this session — close and keep accepting.
+        conn.stream.close();
     }
 
     log.info("shutting down", .{});
@@ -238,31 +259,53 @@ fn firstRulesInRuleSet(rs: *const RuleSet) ?[]const protocol.Rule {
 /// Run the seize + TapHold loop driven by IPC-supplied rules. Single-
 /// rule for now (uses the first entry in `rules`). Returns only on
 /// hard error; SIGTERM bypasses this via the signal handler's _exit.
-fn runDaemonSeize(allocator: std.mem.Allocator, rules: []const protocol.Rule) !void {
+///
+/// `agent_stream` is the live IPC connection from the agent that
+/// applied these rules. It's borrowed for the lifetime of this call
+/// — used to push `mode_change` messages back to the agent when a
+/// layer-hold rule commits/releases. May be null when no rule is a
+/// layer rule (no pushes needed).
+fn runDaemonSeize(
+    allocator: std.mem.Allocator,
+    rules: []const protocol.Rule,
+    agent_stream: ?std.net.Stream,
+) !void {
     if (rules.len == 0) return;
 
-    const r = rules[0];
-    if (rules.len > 1) {
-        log.warn("daemon currently uses only the first rule; {d} extra rule(s) ignored (multi-rule support is post-D5)", .{rules.len - 1});
-    }
-    const dev = r.device orelse {
-        log.err("rule has no device match — global seize not supported yet", .{});
-        return error.MissingDevice;
-    };
+    var has_layer_rule = false;
+    var matches = std.ArrayList(HidSeize.Match).init(allocator);
+    defer matches.deinit();
 
-    log.info(
-        "daemon seize: device 0x{X:0>4}:0x{X:0>4} rule src=0x{X:0>2} tap=0x{X:0>2} hold=0x{X:0>2} timeout={d}ms perm={} hokp={}",
-        .{
-            dev.vendor,
-            dev.product,
-            r.src_usage,
-            r.tap_usage,
-            r.hold_usage,
-            r.timeout_ms,
-            r.permissive_hold,
-            r.hold_on_other_key_press,
-        },
-    );
+    // Pre-flight: every rule needs a device match (global seize not
+    // supported yet). Dedup so we don't pass the same (vendor, product)
+    // twice to IOHIDManager.
+    for (rules) |rule| {
+        const dev = rule.device orelse {
+            log.err("rule src=0x{X:0>2} has no device match — global seize not supported yet", .{rule.src_usage});
+            return error.MissingDevice;
+        };
+        if (rule.hold_layer != null) has_layer_rule = true;
+        var seen = false;
+        for (matches.items) |m| {
+            if (m.vendor == dev.vendor and m.product == dev.product) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try matches.append(.{ .vendor = dev.vendor, .product = dev.product });
+    }
+    if (has_layer_rule and agent_stream == null) {
+        log.warn("layer-hold rule received but agent connection is closed — mode pushes will be dropped", .{});
+    }
+
+    log.info("daemon seize: {d} rule(s) across {d} device(s)", .{ rules.len, matches.items.len });
+    for (rules, 0..) |rule, i| {
+        const hold_str: []const u8 = if (rule.hold_layer) |l| l else "<hid_usage>";
+        log.info(
+            "  rule[{d}]: src=0x{X:0>2} tap=0x{X:0>2} hold={s} timeout={d}ms perm={} hokp={}",
+            .{ i, rule.src_usage, rule.tap_usage, hold_str, rule.timeout_ms, rule.permissive_hold, rule.hold_on_other_key_press },
+        );
+    }
 
     log.info("connecting to vhidd_server", .{});
     var vhidd = try Vhidd.Client.connect(allocator);
@@ -273,24 +316,53 @@ fn runDaemonSeize(allocator: std.mem.Allocator, rules: []const protocol.Rule) !v
     try vhidd.waitForBoolTrue(.virtual_hid_keyboard_ready, 5000);
     log.info("virtual keyboard ready", .{});
 
-    const taphold_rule: TapHold.Rule = .{
-        .src_usage = std.math.cast(u16, r.src_usage) orelse return error.SourceUsageOverflow,
-        .tap_usage = std.math.cast(u16, r.tap_usage) orelse return error.TapUsageOverflow,
-        .hold_usage = std.math.cast(u16, r.hold_usage) orelse return error.HoldUsageOverflow,
-        .timeout_ms = r.timeout_ms,
-        .permissive_hold = r.permissive_hold,
-        .hold_on_other_key_press = r.hold_on_other_key_press,
-        .retro_tap = r.retro_tap,
+    var layer_ctx = LayerPushCtx{
+        .stream = agent_stream,
+        .allocator = allocator,
     };
-
     var ctx = SeizeCtx{ .state = .{}, .vhidd = &vhidd };
-    var engine = TapHold.init(taphold_rule, emitToVhidd, &ctx);
-    ctx.engine = &engine;
-    defer cancelTapHoldTimer(&ctx);
+
+    // Allocate one slot per rule. Slots must outlive the run loop;
+    // free on exit. Each slot holds an engine and its pending timer.
+    const slots = try allocator.alloc(EngineSlot, rules.len);
+    defer {
+        for (slots) |*s| cancelTapHoldTimer(s);
+        allocator.free(slots);
+    }
+
+    for (rules, 0..) |rule, i| {
+        const is_layer = rule.hold_layer != null;
+        const hold_action: TapHold.HoldAction = if (rule.hold_layer) |layer_name| .{ .layer = layer_name } else .{
+            .hid_usage = std.math.cast(u16, rule.hold_usage) orelse return error.HoldUsageOverflow,
+        };
+        // For layer rules permissive_hold has a race against the
+        // agent's async mode swap. Degrade to hold_on_other_key_press
+        // semantics until we have synchronous mode-swap.
+        const th_rule: TapHold.Rule = .{
+            .src_usage = std.math.cast(u16, rule.src_usage) orelse return error.SourceUsageOverflow,
+            .tap_usage = std.math.cast(u16, rule.tap_usage) orelse return error.TapUsageOverflow,
+            .hold = hold_action,
+            .timeout_ms = rule.timeout_ms,
+            .permissive_hold = if (is_layer) false else rule.permissive_hold,
+            .hold_on_other_key_press = if (is_layer) true else rule.hold_on_other_key_press,
+            .retro_tap = rule.retro_tap,
+        };
+        slots[i] = .{
+            .seize_ctx = &ctx,
+            .engine = TapHold.initWithLayerSink(
+                th_rule,
+                emitToVhidd,
+                &ctx,
+                layerPushSink,
+                &layer_ctx,
+            ),
+        };
+    }
+    ctx.slots = slots;
 
     var seize = try HidSeize.init(allocator, seizeInputCallback, &ctx);
     defer seize.deinit();
-    try seize.setMatches(&.{.{ .vendor = dev.vendor, .product = dev.product }});
+    try seize.setMatches(matches.items);
     try seize.start(.seize);
 
     log.info("daemon seize active — handling events until SIGTERM", .{});
@@ -404,21 +476,59 @@ fn injectTestKey(allocator: std.mem.Allocator) !void {
     log.info("done", .{});
 }
 
+/// One TapHold engine + its currently-active CFRunLoopTimer. The
+/// timer's `info` points back at the slot so the timer callback can
+/// drive `engine.timerFired()` and apply the next action without
+/// scanning a list.
+const EngineSlot = struct {
+    seize_ctx: *SeizeCtx,
+    engine: TapHold,
+    timer: c.CFRunLoopTimerRef = null,
+};
+
 /// State carried into the HidSeize input value callback. We can't
 /// closure-capture, so callers stash whatever the callback needs into
 /// a struct and pass its address as the void* context.
 const SeizeCtx = struct {
     state: KbState,
     vhidd: *Vhidd.Client,
-    /// Optional tap-hold engine. nullptr for D3-style straight
-    /// pass-through; D4 hooks one engine per active rule.
-    engine: ?*TapHold = null,
-    /// Currently-active CFRunLoopTimer for the engine's pending
-    /// timeout. Owned here; freed on cancel / fire / shutdown.
-    th_timer: c.CFRunLoopTimerRef = null,
+    /// One slot per active rule. Empty in --inject-test-key /
+    /// --seize-test pass-through paths; populated in the daemon
+    /// loop after apply_rules.
+    slots: []EngineSlot = &.{},
     forwarded: u64 = 0,
     skipped_other_pages: u64 = 0,
 };
+
+/// State for the layer-hold sink: a borrowed agent IPC stream + the
+/// allocator we use to build outbound JSON payloads.
+const LayerPushCtx = struct {
+    stream: ?std.net.Stream,
+    allocator: std.mem.Allocator,
+};
+
+/// TapHold layer sink: write a `mode_change` message back to the
+/// agent over the live IPC connection. Failures are logged but
+/// don't propagate — the seize loop must keep running even if the
+/// agent has disconnected. (D6 will detect that and reset state.)
+fn layerPushSink(ctx_ptr: ?*anyopaque, layer: []const u8, entering: bool) void {
+    const lctx: *LayerPushCtx = @ptrCast(@alignCast(ctx_ptr orelse return));
+    const stream = lctx.stream orelse {
+        log.warn("layer transition '{s}' entering={} dropped — no agent connection", .{ layer, entering });
+        return;
+    };
+
+    // On exit, an empty mode name tells the agent "fall back to
+    // default". Push the layer name on enter so multi-layer setups
+    // can target named modes individually.
+    const target: []const u8 = if (entering) layer else "";
+    protocol.writeMessage(stream, lctx.allocator, .{
+        .@"type" = "mode_change",
+        .mode = target,
+    }) catch |err| {
+        log.warn("mode_change push failed: {s}", .{@errorName(err)});
+    };
+}
 
 /// Sink for both real HID events and TapHold-synthesized events.
 /// Aggregates the transition into KbState and posts a vhidd report.
@@ -437,46 +547,44 @@ fn emitToVhidd(ctx_ptr: ?*anyopaque, ev: TapHold.Event) void {
     cx.forwarded += 1;
 }
 
-fn applyTapHoldTimer(cx: *SeizeCtx, action: TapHold.TimerAction) void {
+fn applyTapHoldTimer(slot: *EngineSlot, action: TapHold.TimerAction) void {
     switch (action) {
         .none => {},
-        .cancel => cancelTapHoldTimer(cx),
+        .cancel => cancelTapHoldTimer(slot),
         .start_in_ms => |ms| {
-            cancelTapHoldTimer(cx);
-            cx.th_timer = makeTapHoldTimer(ms, cx);
-            c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), cx.th_timer, c.kCFRunLoopDefaultMode);
+            cancelTapHoldTimer(slot);
+            slot.timer = makeTapHoldTimer(ms, slot);
+            c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), slot.timer, c.kCFRunLoopDefaultMode);
         },
     }
 }
 
-fn cancelTapHoldTimer(cx: *SeizeCtx) void {
-    if (cx.th_timer != null) {
-        c.CFRelease(cx.th_timer);
-        cx.th_timer = null;
+fn cancelTapHoldTimer(slot: *EngineSlot) void {
+    if (slot.timer != null) {
+        c.CFRelease(slot.timer);
+        slot.timer = null;
     }
 }
 
 fn tapHoldTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
-    const cx: *SeizeCtx = @ptrCast(@alignCast(info orelse return));
-    if (cx.engine) |engine| {
-        const action = engine.timerFired();
-        // The timer that just fired is now expired — drop our handle
-        // before applying any new timer action so we don't try to
-        // CFRelease a freed-by-runloop reference if the engine asks
-        // for cancel.
-        if (cx.th_timer != null) {
-            c.CFRelease(cx.th_timer);
-            cx.th_timer = null;
-        }
-        applyTapHoldTimer(cx, action);
+    const slot: *EngineSlot = @ptrCast(@alignCast(info orelse return));
+    const action = slot.engine.timerFired();
+    // The timer that just fired is now expired — drop our handle
+    // before applying any new timer action so we don't try to
+    // CFRelease a freed-by-runloop reference if the engine asks
+    // for cancel.
+    if (slot.timer != null) {
+        c.CFRelease(slot.timer);
+        slot.timer = null;
     }
+    applyTapHoldTimer(slot, action);
 }
 
-fn makeTapHoldTimer(after_ms: u32, ctx: *SeizeCtx) c.CFRunLoopTimerRef {
+fn makeTapHoldTimer(after_ms: u32, slot: *EngineSlot) c.CFRunLoopTimerRef {
     const fire_date = c.CFAbsoluteTimeGetCurrent() + @as(f64, @floatFromInt(after_ms)) / 1000.0;
     var context: c.CFRunLoopTimerContext = .{
         .version = 0,
-        .info = ctx,
+        .info = slot,
         .retain = null,
         .release = null,
         .copyDescription = null,
@@ -523,11 +631,13 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
         .pressed = ev.pressed,
     };
 
-    if (cx.engine) |engine| {
-        const r = engine.feed(taphold_event);
-        applyTapHoldTimer(cx, r.timer);
-        if (r.disposition == .consumed) return;
+    var any_consumed = false;
+    for (cx.slots) |*slot| {
+        const r = slot.engine.feed(taphold_event);
+        applyTapHoldTimer(slot, r.timer);
+        if (r.disposition == .consumed) any_consumed = true;
     }
+    if (any_consumed) return;
 
     emitToVhidd(@ptrCast(cx), taphold_event);
 }
@@ -550,9 +660,13 @@ fn seizeTest(
         @tagName(mode),
     });
     if (rule) |r| {
+        const hold_str: []const u8 = switch (r.hold) {
+            .hid_usage => "<hid_usage>",
+            .layer => |n| n,
+        };
         log.info(
-            "  taphold rule: src=0x{X:0>2} tap=0x{X:0>2} hold=0x{X:0>2} timeout={d}ms perm={} hokp={}",
-            .{ r.src_usage, r.tap_usage, r.hold_usage, r.timeout_ms, r.permissive_hold, r.hold_on_other_key_press },
+            "  taphold rule: src=0x{X:0>2} tap=0x{X:0>2} hold={s} timeout={d}ms perm={} hokp={}",
+            .{ r.src_usage, r.tap_usage, hold_str, r.timeout_ms, r.permissive_hold, r.hold_on_other_key_press },
         );
     }
 
@@ -575,16 +689,17 @@ fn seizeTest(
         .vhidd = &vhidd,
     };
 
-    // Engine has to live somewhere; if we have a rule, allocate it
-    // on the stack and point ctx.engine at it. The sink is the same
-    // emit-into-KbState path the pass-through uses, so synthesized
-    // tap/hold events are indistinguishable from real key events.
-    var engine_storage: TapHold = undefined;
+    // Single inline rule for --seize-test. The slot must outlive the
+    // run loop, so we keep it on the stack and slice into it.
+    var slot_storage: [1]EngineSlot = undefined;
     if (rule) |r| {
-        engine_storage = TapHold.init(r, emitToVhidd, &ctx);
-        ctx.engine = &engine_storage;
+        slot_storage[0] = .{
+            .seize_ctx = &ctx,
+            .engine = TapHold.init(r, emitToVhidd, &ctx),
+        };
+        ctx.slots = slot_storage[0..1];
     }
-    defer cancelTapHoldTimer(&ctx);
+    defer for (ctx.slots) |*s| cancelTapHoldTimer(s);
 
     var seize = try HidSeize.init(allocator, seizeInputCallback, &ctx);
     defer seize.deinit();
@@ -677,7 +792,7 @@ fn parseRule(s: []const u8) !TapHold.Rule {
     return .{
         .src_usage = std.math.cast(u16, src) orelse return error.SourceUsageOverflow,
         .tap_usage = std.math.cast(u16, tap) orelse return error.TapUsageOverflow,
-        .hold_usage = std.math.cast(u16, hold) orelse return error.HoldUsageOverflow,
+        .hold = .{ .hid_usage = std.math.cast(u16, hold) orelse return error.HoldUsageOverflow },
         .timeout_ms = timeout,
     };
 }

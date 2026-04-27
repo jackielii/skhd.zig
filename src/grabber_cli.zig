@@ -61,6 +61,35 @@ fn resolveScript(allocator: std.mem.Allocator, rel: []const u8) ![]const u8 {
 }
 
 pub fn installGrabber(allocator: std.mem.Allocator) !void {
+    // Pre-check: the dext is what makes vhidd injection possible.
+    // Without it, the grabber starts but its first connect attempt
+    // to the vhidd_server fails — same diagnostics as
+    // `--grabber-status`, but flagged here too so the user finds out
+    // before launchd starts looping the daemon.
+    if (!(try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice"))) {
+        std.debug.print(
+            \\error: Karabiner-DriverKit-VirtualHIDDevice (dext) is not loaded.
+            \\
+            \\skhd-grabber injects HID events through this dext. Install it from
+            \\  https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice
+            \\then approve it in System Settings > Privacy & Security and re-run
+            \\this command.
+            \\
+        , .{});
+        return error.DextMissing;
+    }
+    if (!(try processRunning(allocator, "Karabiner-VirtualHIDDevice-Daemon"))) {
+        std.debug.print(
+            \\error: Karabiner-VirtualHIDDevice-Daemon is not running.
+            \\
+            \\This userland helper bridges skhd-grabber's IPC to the dext. It
+            \\should auto-start with the dext install. To kickstart it manually:
+            \\  sudo launchctl kickstart -k system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon
+            \\
+        , .{});
+        return error.VhiddDaemonMissing;
+    }
+
     const script = resolveScript(allocator, install_script_rel) catch {
         std.debug.print(
             "error: {s} not found. Run --install-grabber from the repo root.\n",
@@ -96,6 +125,24 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     child.stderr_behavior = .Inherit;
     const term = try child.spawnAndWait();
     if (term != .Exited or term.Exited != 0) return error.InstallFailed;
+
+    // Tahoe TCC quirk: IOHIDManager seize needs Input Monitoring,
+    // and the launchd-managed binary doesn't trigger the approval
+    // dialog on its own. The user has to add the binary to the
+    // Input Monitoring list by hand the first time.
+    std.debug.print(
+        \\
+        \\Next step: grant Input Monitoring to the grabber binary.
+        \\
+        \\1. Open System Settings > Privacy & Security > Input Monitoring.
+        \\2. Click '+' and add: /usr/local/libexec/skhd-grabber
+        \\3. Toggle the entry on.
+        \\4. Re-kick the daemon so it picks up the grant:
+        \\     sudo launchctl kickstart -k system/com.jackielii.skhd.grabber
+        \\
+        \\Verify with:  skhd --grabber-status
+        \\
+    , .{});
 }
 
 /// Path of the system LaunchDaemon plist installed by the

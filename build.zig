@@ -85,18 +85,58 @@ pub fn build(b: *std.Build) void {
 
     // skhd-grabber: system daemon (root) for caps_lock-class tap-hold.
     // Plain Mach-O — installed by `skhd --install-grabber` to
-    // /usr/local/libexec/skhd-grabber and started by launchd. Links the
-    // same Apple frameworks for now (D2/D3 will need IOKit + CF for
-    // seize and Karabiner vhidd injection).
+    // /usr/local/libexec/skhd-grabber and started by launchd. Needs
+    // IOKit (D3 seize + run loop) and CoreFoundation (matching dicts).
     const grabber_exe = b.addExecutable(.{
         .name = "skhd-grabber",
         .root_source_file = b.path("src/grabber/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    linkFrameworks(grabber_exe);
+    grabber_exe.linkFramework("IOKit");
+    grabber_exe.linkFramework("CoreFoundation");
     grabber_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     b.installArtifact(grabber_exe);
+
+    // `zig build grabber-app` — build the grabber binary, wrap it in
+    // skhd-grabber-dev.app, and code-sign with the local dev cert.
+    //
+    // Why a .app bundle? macOS Tahoe's TCC keys Input Monitoring (and
+    // other HID-related) grants on bundle ID for .app bundles. A bare
+    // Mach-O is keyed by cdhash + path, which gets invalidated every
+    // rebuild and doesn't even render in System Settings → Input
+    // Monitoring (so the user can't toggle approval). Wrapping the
+    // grabber in a bundle gives it a stable ID, makes it visible in
+    // the privacy panel, and survives `zig build` recompiles. Same
+    // pattern skhd-dev.app uses for the agent.
+    //
+    // The actual binary inside the bundle is signed with skhd-dev-cert
+    // and identifier com.jackielii.skhd.grabber.dev. Run as:
+    //   sudo zig-out/skhd-grabber-dev.app/Contents/MacOS/skhd-grabber [args]
+    const grabber_dev_cert = "skhd-dev-cert";
+    const grabber_dev_bundle_id = "com.jackielii.skhd.grabber.dev";
+    const installed_grabber_app = b.getInstallPath(.prefix, "skhd-grabber-dev.app");
+
+    const grabber_app_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/make-grabber-app.sh",
+    });
+    grabber_app_cmd.addArg(b.getInstallPath(.bin, grabber_exe.name));
+    grabber_app_cmd.addArg(installed_grabber_app);
+    grabber_app_cmd.addArg(grabber_dev_bundle_id);
+    grabber_app_cmd.step.dependOn(b.getInstallStep());
+
+    const sign_grabber_app_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/codesign.sh",
+    });
+    sign_grabber_app_cmd.addArg(installed_grabber_app);
+    sign_grabber_app_cmd.setEnvironmentVariable("SKHD_CERT", grabber_dev_cert);
+    sign_grabber_app_cmd.setEnvironmentVariable("SKHD_BUNDLE_ID", grabber_dev_bundle_id);
+    sign_grabber_app_cmd.step.dependOn(&grabber_app_cmd.step);
+
+    const grabber_app_step = b.step("grabber-app", "Build skhd-grabber-dev.app (signed bundle for TCC-stable Input Monitoring grants)");
+    grabber_app_step.dependOn(&sign_grabber_app_cmd.step);
 
     const installed_exe = b.getInstallPath(.bin, exe.name);
     const installed_app = b.getInstallPath(.prefix, "skhd.app");
@@ -310,6 +350,7 @@ pub fn build(b: *std.Build) void {
         "src/grabber_protocol.zig",
         "src/grabber/RuleSet.zig",
         "src/grabber/Vhidd.zig",
+        "src/grabber/KbState.zig",
         // "src/Hotload.zig", // Skip hot load test for local test only
     };
 

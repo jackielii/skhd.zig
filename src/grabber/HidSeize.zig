@@ -1,0 +1,206 @@
+//! IOHIDManager-based seize for the grabber.
+//!
+//! Opens a set of (vendor, product) keyboards with
+//! `kIOHIDOptionsTypeSeizeDevice`. While seized, those devices'
+//! input events bypass the normal HID stack — only this process's
+//! input value callback receives them. The grabber then either
+//! transforms (D4: tap-hold) or passes them straight through to the
+//! Karabiner virtual HID device (D3: this module).
+//!
+//! Requires root: `IOHIDDeviceOpen(seize)` returns
+//! `kIOReturnNotPrivileged` for non-root callers.
+//!
+//! Thread model: callbacks fire on the CFRunLoop thread we schedule
+//! against. The caller is expected to drive that run loop on the
+//! main thread.
+
+const std = @import("std");
+const builtin = @import("builtin");
+
+const c = @import("c.zig");
+
+const log = std.log.scoped(.hid_seize);
+
+pub const Match = struct {
+    vendor: u32,
+    product: u32,
+};
+
+/// One HID input value, decoded from `IOHIDValueRef`. Only what the
+/// pass-through path actually needs.
+pub const Event = struct {
+    usage_page: u32,
+    usage: u32,
+    /// 1 for keydown / modifier set; 0 for keyup / modifier clear.
+    /// Booleans abstract over IOHIDValueGetIntegerValue's CFIndex.
+    pressed: bool,
+};
+
+pub const Callback = *const fn (ctx: ?*anyopaque, event: Event) void;
+
+/// Singleton state. IOKit callbacks are C function pointers with no
+/// closure capture, so they need to find their way back to whatever
+/// owns the manager. We use one process-wide HidSeize anyway, so a
+/// global is the simplest representation.
+var instance: ?*Self = null;
+
+allocator: std.mem.Allocator,
+manager: c.IOHIDManagerRef,
+callback: Callback,
+callback_ctx: ?*anyopaque,
+running: bool = false,
+/// Open options actually applied to IOHIDManagerOpen. Tracked so
+/// stop() can mirror the same options on close.
+open_options: u32 = 0,
+
+const Self = @This();
+
+pub fn init(allocator: std.mem.Allocator, callback: Callback, callback_ctx: ?*anyopaque) !*Self {
+    if (instance != null) return error.AlreadyInitialized;
+
+    const manager = c.IOHIDManagerCreate(c.kCFAllocatorDefault, c.kIOHIDOptionsTypeNone);
+    if (manager == null) return error.IOHIDManagerCreateFailed;
+    errdefer c.CFRelease(manager);
+
+    const self = try allocator.create(Self);
+    errdefer allocator.destroy(self);
+
+    self.* = .{
+        .allocator = allocator,
+        .manager = manager,
+        .callback = callback,
+        .callback_ctx = callback_ctx,
+    };
+    instance = self;
+    return self;
+}
+
+pub fn deinit(self: *Self) void {
+    if (self.running) self.stop();
+    c.CFRelease(self.manager);
+    instance = null;
+    self.allocator.destroy(self);
+}
+
+/// Build a CFArray of dictionaries, one per match, and apply it as
+/// the manager's matching filter. Must be called before `start`.
+pub fn setMatches(self: *Self, matches: []const Match) !void {
+    if (self.running) return error.AlreadyRunning;
+
+    const dicts = c.CFArrayCreateMutable(c.kCFAllocatorDefault, @intCast(matches.len), &c.kCFTypeArrayCallBacks);
+    if (dicts == null) return error.CFArrayCreateFailed;
+    defer c.CFRelease(dicts);
+
+    for (matches) |m| {
+        const dict = c.CFDictionaryCreateMutable(
+            c.kCFAllocatorDefault,
+            2,
+            &c.kCFTypeDictionaryKeyCallBacks,
+            &c.kCFTypeDictionaryValueCallBacks,
+        );
+        if (dict == null) return error.CFDictionaryCreateFailed;
+        defer c.CFRelease(dict);
+
+        const vendor_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDVendorIDKey, c.kCFStringEncodingUTF8);
+        defer c.CFRelease(vendor_key);
+        const product_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDProductIDKey, c.kCFStringEncodingUTF8);
+        defer c.CFRelease(product_key);
+
+        var vendor: i32 = @intCast(m.vendor);
+        var product: i32 = @intCast(m.product);
+
+        const vendor_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &vendor);
+        defer c.CFRelease(vendor_num);
+        const product_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &product);
+        defer c.CFRelease(product_num);
+
+        c.CFDictionarySetValue(dict, vendor_key, vendor_num);
+        c.CFDictionarySetValue(dict, product_key, product_num);
+
+        c.CFArrayAppendValue(dicts, dict);
+    }
+
+    c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
+}
+
+/// Schedule the manager on the current run loop and open it.
+///
+/// `mode = .seize` opens with `kIOHIDOptionsTypeSeizeDevice` so the
+/// matched keyboards' events bypass the kernel HID stack and only
+/// flow into our `callback`.
+///
+/// `mode = .observe` opens passively — the kernel still sees the
+/// device's events and routes them to the foreground app; we get a
+/// copy via the callback. Used for diagnostics: confirms our matching
+/// + run-loop wiring before troubleshooting seize-specific issues.
+pub const Mode = enum { seize, observe };
+
+pub fn start(self: *Self, mode: Mode) !void {
+    if (self.running) return;
+
+    c.IOHIDManagerRegisterInputValueCallback(self.manager, valueCallback, self);
+    c.IOHIDManagerScheduleWithRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
+
+    self.open_options = switch (mode) {
+        .seize => c.kIOHIDOptionsTypeSeizeDevice,
+        .observe => c.kIOHIDOptionsTypeNone,
+    };
+    const r = c.IOHIDManagerOpen(self.manager, self.open_options);
+    if (r != c.kIOReturnSuccess) {
+        c.IOHIDManagerUnscheduleFromRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
+        log.err("IOHIDManagerOpen seize failed: 0x{X:0>8}", .{@as(u32, @bitCast(r))});
+        return switch (r) {
+            c.kIOReturnNotPrivileged => error.NotPrivileged,
+            // kIOReturnNotPermitted: macOS TCC layer denied the
+            // operation — usually means the binary needs to be
+            // approved in System Settings → Privacy & Security →
+            // Input Monitoring. The first attempt triggers the
+            // approval dialog; subsequent runs are silent.
+            c.kIOReturnNotPermitted => error.NotPermitted,
+            c.kIOReturnExclusiveAccess => error.DeviceAlreadySeized,
+            else => error.IOHIDManagerOpenFailed,
+        };
+    }
+
+    self.running = true;
+
+    const matched = c.IOHIDManagerCopyDevices(self.manager);
+    const count: usize = if (matched) |s| @intCast(c.CFSetGetCount(s)) else 0;
+    if (matched) |s| c.CFRelease(s);
+    log.info("seized matching devices (options=0x{x}, matched_count={d})", .{ self.open_options, count });
+    if (count == 0) {
+        log.warn("matching dictionary captured 0 devices — vendor/product mismatch?", .{});
+    }
+}
+
+pub fn stop(self: *Self) void {
+    if (!self.running) return;
+    _ = c.IOHIDManagerClose(self.manager, self.open_options);
+    c.IOHIDManagerUnscheduleFromRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
+    self.running = false;
+    log.info("released seize", .{});
+}
+
+fn valueCallback(
+    ctx: ?*anyopaque,
+    result: c.IOReturn,
+    sender: ?*anyopaque,
+    value: c.IOHIDValueRef,
+) callconv(.C) void {
+    _ = sender;
+    if (result != c.kIOReturnSuccess) return;
+    const self: *Self = @ptrCast(@alignCast(ctx orelse return));
+
+    const element = c.IOHIDValueGetElement(value);
+    if (element == null) return;
+
+    const usage_page = c.IOHIDElementGetUsagePage(element);
+    const usage = c.IOHIDElementGetUsage(element);
+    const int_value = c.IOHIDValueGetIntegerValue(value);
+
+    self.callback(self.callback_ctx, .{
+        .usage_page = usage_page,
+        .usage = usage,
+        .pressed = int_value != 0,
+    });
+}

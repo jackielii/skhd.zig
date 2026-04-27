@@ -15,11 +15,15 @@ NC='\033[0m' # No Color
 echo "Code signing skhd..."
 
 # Resolve target: accept either a bare Mach-O binary or a .app bundle.
+# For .app bundles we read CFBundleExecutable from Info.plist so the
+# script works for both skhd.app and skhd-grabber.app (different inner
+# binary names).
 if [ -d "$TARGET_PATH" ] && [[ "$TARGET_PATH" == *.app ]]; then
     APP_PATH="$TARGET_PATH"
-    INNER_BINARY="$APP_PATH/Contents/MacOS/skhd"
+    EXEC_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo "skhd")
+    INNER_BINARY="$APP_PATH/Contents/MacOS/$EXEC_NAME"
     if [ ! -f "$INNER_BINARY" ]; then
-        echo -e "${RED}Error: $APP_PATH does not contain Contents/MacOS/skhd${NC}"
+        echo -e "${RED}Error: $APP_PATH does not contain Contents/MacOS/$EXEC_NAME${NC}"
         exit 1
     fi
 elif [ -f "$TARGET_PATH" ]; then

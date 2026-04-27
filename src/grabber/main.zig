@@ -1167,9 +1167,18 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     // through vhidd's consumer / apple-vendor / generic-desktop
     // reports. Mirrors Karabiner's `fn_function_keys_manipulator`
     // default mapping for built-in MacBook keyboards.
+    //
+    // Exception: when fn is held, Apple's default is to flip the
+    // F-row interpretation back to plain F1..F12. So if the OS-
+    // level fn flag is set, fall through to the normal emit path
+    // (which sends the keyboard usage straight to vhidd).
     if (raw_usage16 >= 0x3A and raw_usage16 <= 0x45) {
-        translateFRow(cx, raw_usage16, ev.pressed);
-        return;
+        const flags = c.CGEventSourceFlagsState(c.kCGEventSourceStateHIDSystemState);
+        if ((flags & c.kCGEventFlagMaskSecondaryFn) == 0) {
+            translateFRow(cx, raw_usage16, ev.pressed);
+            return;
+        }
+        // fn held → fall through to keyboard-page emit below.
     }
 
     // Apply colon-form `.remap` rewrites BEFORE the slots see the

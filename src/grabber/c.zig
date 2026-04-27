@@ -256,6 +256,11 @@ pub const CGEventFlags = u64;
 pub const CGEventSourceStateID = c_int;
 pub const kCGEventSourceStateHIDSystemState: CGEventSourceStateID = 1;
 pub const kCGEventFlagMaskAlphaShift: CGEventFlags = 0x10000;
+/// fn (the "function" / globe key on Apple keyboards). Set in
+/// CGEventFlags when fn is held. We use this to bypass the F-row
+/// media-key translation: `fn+F12` should produce F12 on the
+/// keyboard like default Apple behavior, not volume_up.
+pub const kCGEventFlagMaskSecondaryFn: CGEventFlags = 0x800000;
 pub extern fn CGEventSourceFlagsState(stateID: CGEventSourceStateID) CGEventFlags;
 
 // libc bits (geteuid for the seize permission check).

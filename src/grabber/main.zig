@@ -458,6 +458,12 @@ const Daemon = struct {
         // must release it before calling HidSeize.init again.
         self.teardownSeize();
 
+        // Build slots and seize as locals first. Don't expose to
+        // `self` until everything's wired up — otherwise a failure
+        // partway through (e.g. seize.start returning NotPermitted
+        // because TCC denied us) leaves self.slots pointing at memory
+        // that errdefer just freed, and the next teardownSeize crashes
+        // iterating it.
         const slots = try self.allocator.alloc(EngineSlot, rules.len);
         errdefer self.allocator.free(slots);
 
@@ -485,8 +491,16 @@ const Daemon = struct {
                 ),
             };
         }
+
+        const seize = try HidSeize.init(self.allocator, seizeInputCallback, &self.seize_ctx);
+        errdefer seize.deinit();
+        try seize.setMatches(matches.items);
+        try seize.start(.seize);
+
+        // Past the failure boundary: commit ownership atomically.
         self.slots = slots;
         self.seize_ctx.slots = slots;
+        self.seize = seize;
 
         // Cache: do we have any caps_lock remap? Drives the per-event
         // force-off in seizeInputCallback.
@@ -514,12 +528,6 @@ const Daemon = struct {
             };
             self.seize_ctx.remap_table[rm.src_usage] = dst16;
         }
-
-        const seize = try HidSeize.init(self.allocator, seizeInputCallback, &self.seize_ctx);
-        errdefer seize.deinit();
-        try seize.setMatches(matches.items);
-        try seize.start(.seize);
-        self.seize = seize;
 
         log.info("seize active — re-apply by sending another apply_rules over the IPC socket", .{});
     }

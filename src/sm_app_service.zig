@@ -81,13 +81,16 @@ pub fn status(service: Service) Status {
 /// failure with the localized error message logged.
 pub fn register(service: Service) !void {
     const sel = c.sel_registerName("registerAndReturnError:");
+    // Use u8 instead of c.BOOL: on arm64-darwin BOOL translates to bool
+    // (Zig type), on x86_64-darwin it translates to i8 (signed char). Both
+    // are 1-byte on the Darwin ABI, so u8 marshals correctly on either.
     const msg = @extern(
-        *const fn (c.id, c.SEL, *c.id) callconv(.C) c.BOOL,
+        *const fn (c.id, c.SEL, *c.id) callconv(.C) u8,
         .{ .name = "objc_msgSend" },
     );
     var err: c.id = null;
     const ok = msg(service, sel, &err);
-    if (!ok) {
+    if (ok == 0) {
         if (err) |e| logNSError("SMAppService.register", e) else log.err("SMAppService.register failed (no error info)", .{});
         return error.RegisterFailed;
     }
@@ -97,12 +100,12 @@ pub fn register(service: Service) !void {
 pub fn unregister(service: Service) !void {
     const sel = c.sel_registerName("unregisterAndReturnError:");
     const msg = @extern(
-        *const fn (c.id, c.SEL, *c.id) callconv(.C) c.BOOL,
+        *const fn (c.id, c.SEL, *c.id) callconv(.C) u8,
         .{ .name = "objc_msgSend" },
     );
     var err: c.id = null;
     const ok = msg(service, sel, &err);
-    if (!ok) {
+    if (ok == 0) {
         if (err) |e| logNSError("SMAppService.unregister", e) else log.err("SMAppService.unregister failed (no error info)", .{});
         return error.UnregisterFailed;
     }

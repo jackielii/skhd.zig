@@ -309,6 +309,7 @@ pub fn build(b: *std.Build) void {
         "src/synthesize.zig",
         "src/grabber_protocol.zig",
         "src/grabber/RuleSet.zig",
+        "src/grabber/Vhidd.zig",
         // "src/Hotload.zig", // Skip hot load test for local test only
     };
 

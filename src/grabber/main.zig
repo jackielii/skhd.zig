@@ -19,6 +19,7 @@ const posix = std.posix;
 const protocol = @import("grabber_protocol");
 const Ipc = @import("Ipc.zig");
 const RuleSet = @import("RuleSet.zig");
+const Vhidd = @import("Vhidd.zig");
 
 const log = std.log.scoped(.grabber);
 
@@ -72,6 +73,12 @@ pub fn main() !void {
             return;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             printHelp();
+            return;
+        } else if (std.mem.eql(u8, a, "--inject-test-key")) {
+            injectTestKey(gpa) catch |err| {
+                log.err("inject-test-key failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
             return;
         } else {
             std.debug.print("error: unknown argument: {s}\n", .{a});
@@ -189,6 +196,45 @@ fn handleSignal(_: c_int) callconv(.C) void {
     std.c._exit(0);
 }
 
+/// Connect to vhidd_server, initialize the virtual keyboard, wait for
+/// the ready signal, then send Escape keydown + keyup. Used to verify
+/// the Karabiner DriverKit injection path end-to-end (D2 phase).
+fn injectTestKey(allocator: std.mem.Allocator) !void {
+    log.info("connecting to vhidd_server…", .{});
+    var client = try Vhidd.Client.connect(allocator);
+    defer client.close();
+
+    log.info("initializing virtual keyboard…", .{});
+    try client.initializeKeyboard(.{});
+
+    log.info("waiting for virtual_hid_keyboard_ready=true…", .{});
+    try client.waitForBoolTrue(.virtual_hid_keyboard_ready, 5000);
+    log.info("keyboard ready", .{});
+
+    // Brief settle; in practice the ready signal is enough but Apple
+    // Silicon DriverKit sometimes needs a beat before injection lands
+    // reliably (matches the example client's 100ms post-ready sleep).
+    std.time.sleep(100 * std.time.ns_per_ms);
+
+    // 'a' (HID 0x04). Picked over Escape because Escape is invisible in
+    // most terminals — 'a' shows up on screen so injection success is
+    // self-evident. The test only proves the wire path; the choice of
+    // key is irrelevant.
+    const test_usage: u16 = 0x04;
+    log.info("posting keydown (a, HID 0x{X:0>2})", .{test_usage});
+    try client.postKeyboardReport(.{}, &.{test_usage});
+
+    std.time.sleep(50 * std.time.ns_per_ms);
+
+    log.info("posting keyup (empty)", .{});
+    try client.postKeyboardReport(.{}, &.{});
+
+    // Small post-write grace period before close so the kernel has
+    // time to deliver our final keyup before we tear the socket down.
+    std.time.sleep(50 * std.time.ns_per_ms);
+    log.info("done", .{});
+}
+
 fn printHelp() void {
     std.debug.print(
         \\skhd-grabber - system daemon for caps-class tap-hold remaps
@@ -201,6 +247,11 @@ fn printHelp() void {
         \\  --foreground           Run in foreground (logs to stderr)
         \\  -v, --version          Print version
         \\  -h, --help             Show this help
+        \\
+        \\Debug:
+        \\  --inject-test-key      Connect to Karabiner vhidd_server, init the
+        \\                         virtual keyboard, send a single Escape
+        \\                         keydown/up. Verifies the D2 injection path.
         \\
         \\This daemon is normally started by launchd via
         \\  /Library/LaunchDaemons/com.jackielii.skhd.grabber.plist

@@ -22,7 +22,6 @@ const HidSeize = @import("HidSeize.zig");
 const HidSystem = @import("HidSystem.zig");
 const Ipc = @import("Ipc.zig");
 const KbState = @import("KbState.zig");
-const RuleSet = @import("RuleSet.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -174,11 +173,34 @@ pub fn main() !void {
 /// slots are all rebuilt from scratch on each apply_rules — that's
 /// the simple-and-correct policy until rule churn is high enough
 /// that a diff-and-patch path would be a meaningful win.
+/// One agent-grabber connection. The grabber keeps the socket open
+/// for the lifetime of the agent, both for `mode_change` push and
+/// for EOS detection: when the agent dies, our CFFileDescriptor on
+/// `fd` fires and the daemon drops this subscription, falling back
+/// to whatever earlier subscription was sitting underneath.
+///
+/// Heap-allocated so callbacks have a stable address.
+const Subscription = struct {
+    daemon: *Daemon,
+    fd: c_int,
+    uid: u32,
+    stream: std.net.Stream,
+    rules: []protocol.Rule,
+    remaps: []protocol.Remap,
+    cf_fd: c.CFFileDescriptorRef,
+    cf_source: c.CFRunLoopSourceRef,
+};
+
 const Daemon = struct {
     allocator: std.mem.Allocator,
     socket_path: []const u8,
     server: std.net.Server,
-    ruleset: RuleSet,
+
+    /// One per live agent connection. Most-recently-pushed apply_rules
+    /// from the active console uid wins. When a subscription's socket
+    /// goes EOS we drop it and fall back to the next-most-recent.
+    /// Heap-allocated entries so callbacks have stable addresses.
+    subscriptions: std.ArrayListUnmanaged(*Subscription) = .empty,
 
     /// CFFileDescriptor wrapping `server.stream.handle`. Drives the
     /// listener callback off the same CFRunLoop that handles HID
@@ -193,10 +215,6 @@ const Daemon = struct {
     seize: ?*HidSeize = null,
     /// Slot array owned by the Daemon, sized to the current rule list.
     slots: []EngineSlot = &.{},
-    /// Live agent connection used to push mode_change for layer holds.
-    /// Replaced on each apply_rules; the previous one (if any) is
-    /// closed.
-    agent_layer_conn: ?std.net.Stream = null,
 
     /// Stable-address state for callbacks. Kept on the Daemon so the
     /// CFFileDescriptor / CFRunLoopTimer / IOHIDManager callbacks have
@@ -204,15 +222,14 @@ const Daemon = struct {
     seize_ctx: SeizeCtx,
     layer_ctx: LayerPushCtx,
 
-    /// Active console user (foreground session). Rules from agents
-    /// running in *other* sessions get stored in the RuleSet but
-    /// not applied — only this uid's rules drive seize/vhidd. Null
-    /// means "no console user" (login window, etc.); seize stays
-    /// torn down. D5: fast-user-switching support.
+    /// Active console user (foreground session). Subscriptions from
+    /// agents running in *other* sessions get stored but not applied
+    /// — only this uid's most-recent subscription drives seize/vhidd.
+    /// Null means "no console user" (login window). D5.
     active_uid: ?u32 = null,
     /// CFRunLoopTimer that re-queries the console user every few
-    /// seconds. On change, applyLatestRules rebuilds from the new
-    /// uid's stored rules (or tears down if they have none).
+    /// seconds. On change, applyLatestRules re-evaluates which
+    /// subscription should be active.
     console_user_timer: c.CFRunLoopTimerRef = null,
 
     pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) !Daemon {
@@ -253,7 +270,6 @@ const Daemon = struct {
             .allocator = allocator,
             .socket_path = socket_path,
             .server = server,
-            .ruleset = RuleSet.init(allocator),
             .seize_ctx = .{
                 .state = .{},
                 // vhidd pointer set on lazy connect.
@@ -273,10 +289,13 @@ const Daemon = struct {
             self.allocator.destroy(v);
             self.vhidd = null;
         }
-        if (self.agent_layer_conn) |s| {
-            s.close();
-            self.agent_layer_conn = null;
+        // Drop every live subscription — closes their sockets, frees
+        // their owned rules, releases CFFileDescriptors.
+        while (self.subscriptions.items.len > 0) {
+            const s = self.subscriptions.pop().?;
+            self.freeSubscription(s);
         }
+        self.subscriptions.deinit(self.allocator);
         if (self.cf_listener_source) |src| {
             c.CFRunLoopRemoveSource(c.CFRunLoopGetCurrent(), src, c.kCFRunLoopDefaultMode);
             c.CFRelease(src);
@@ -288,10 +307,24 @@ const Daemon = struct {
             self.cf_listener = null;
         }
         if (self.seize_ctx.hidsystem) |*h| h.deinit();
-        self.ruleset.deinit();
         self.server.deinit();
         posix.unlink(self.socket_path) catch {};
         bound_socket_path = null;
+    }
+
+    /// Release everything a Subscription owns. Called from
+    /// handleConnectionClose and from deinit. Safe even if the
+    /// CFFileDescriptor already invalidated itself.
+    fn freeSubscription(self: *Daemon, s: *Subscription) void {
+        c.CFRunLoopRemoveSource(c.CFRunLoopGetCurrent(), s.cf_source, c.kCFRunLoopDefaultMode);
+        c.CFRelease(s.cf_source);
+        c.CFFileDescriptorInvalidate(s.cf_fd);
+        c.CFRelease(s.cf_fd);
+        s.stream.close();
+        for (s.rules) |r| if (r.hold_layer) |l| self.allocator.free(l);
+        self.allocator.free(s.rules);
+        self.allocator.free(s.remaps);
+        self.allocator.destroy(s);
     }
 
     pub fn run(self: *Daemon) void {
@@ -345,49 +378,132 @@ const Daemon = struct {
             return;
         };
 
-        const result = Ipc.serve(self.allocator, conn.stream, &self.ruleset) catch |err| blk: {
+        const result = Ipc.serve(self.allocator, conn.stream) catch |err| blk: {
             log.warn("client session ended: {s}", .{@errorName(err)});
             break :blk Ipc.ServeResult.closed;
         };
 
         switch (result) {
             .closed => conn.stream.close(),
-            .rules_applied => |sender_uid| {
-                if (self.active_uid == null or sender_uid != self.active_uid.?) {
-                    log.info("rules from uid={d} stored but not applied (active console user is {?d})", .{ sender_uid, self.active_uid });
+            .rules_applied => |applied| {
+                self.addSubscription(conn.stream, applied) catch |err| {
+                    log.err("addSubscription failed: {s}", .{@errorName(err)});
+                    applied.free(self.allocator);
                     conn.stream.close();
                     return;
-                }
-                self.applyLatestRules(conn.stream) catch |err| {
+                };
+                self.applyLatestRules() catch |err| {
                     log.err("applyLatestRules failed: {s}", .{@errorName(err)});
-                    conn.stream.close();
                 };
             },
         }
     }
 
-    /// (Re)build vhidd / seize / engine slots from the active console
-    /// user's stored rules. `maybe_agent_conn` is the connection that
-    /// just sent apply_rules (used as the layer-push target if any
-    /// rule is a layer-hold rule); null when called from a console-
-    /// user change event, in which case there's no live agent
-    /// connection and layer push is silenced until that user's agent
-    /// reconnects.
-    fn applyLatestRules(self: *Daemon, maybe_agent_conn: ?std.net.Stream) !void {
-        const uid = self.active_uid orelse {
-            log.info("no active console user — keeping seize torn down", .{});
+    /// Take ownership of a fresh apply_rules: wrap in a Subscription
+    /// (with a CFFileDescriptor watching the socket for EOS) and add
+    /// to the stack. The most recent subscription wins for active
+    /// rules; on EOS its entry is dropped and the next-most-recent
+    /// takes over. Subscriptions from non-active uids stay parked in
+    /// the list — silenced now, candidate for "active" if the
+    /// console user switches.
+    fn addSubscription(self: *Daemon, stream: std.net.Stream, applied: Ipc.AppliedRules) !void {
+        const sub = try self.allocator.create(Subscription);
+        errdefer self.allocator.destroy(sub);
+        sub.* = .{
+            .daemon = self,
+            .fd = stream.handle,
+            .uid = applied.uid,
+            .stream = stream,
+            .rules = applied.rules,
+            .remaps = applied.remaps,
+            .cf_fd = undefined,
+            .cf_source = undefined,
+        };
+
+        var ctx: c.CFFileDescriptorContext = .{
+            .version = 0,
+            .info = sub,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+        const cf_fd = c.CFFileDescriptorCreate(
+            c.kCFAllocatorDefault,
+            stream.handle,
+            0,
+            subscriptionCallback,
+            &ctx,
+        );
+        if (cf_fd == null) return error.CFFileDescriptorCreateFailed;
+        errdefer c.CFRelease(cf_fd);
+
+        const src = c.CFFileDescriptorCreateRunLoopSource(c.kCFAllocatorDefault, cf_fd, 0);
+        if (src == null) {
+            c.CFFileDescriptorInvalidate(cf_fd);
+            return error.RunLoopSourceCreateFailed;
+        }
+        errdefer c.CFRelease(src);
+
+        sub.cf_fd = cf_fd;
+        sub.cf_source = src;
+
+        c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), src, c.kCFRunLoopDefaultMode);
+        c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
+
+        try self.subscriptions.append(self.allocator, sub);
+        log.info("subscription added: uid={d} rules={d} remaps={d} (total subs={d})", .{ applied.uid, applied.rules.len, applied.remaps.len, self.subscriptions.items.len });
+    }
+
+    /// Called from subscriptionCallback when an agent's socket goes
+    /// EOS or returns an unrecoverable error. Removes the entry and
+    /// re-evaluates active rules (which falls back to the prior
+    /// most-recent subscription, or tears down if none remain for
+    /// the active uid).
+    fn handleConnectionClose(self: *Daemon, sub: *Subscription) void {
+        var idx: ?usize = null;
+        for (self.subscriptions.items, 0..) |s, i| {
+            if (s == sub) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx) |i| _ = self.subscriptions.orderedRemove(i);
+        log.info("subscription closed: uid={d} (total subs={d})", .{ sub.uid, self.subscriptions.items.len });
+        self.freeSubscription(sub);
+        self.applyLatestRules() catch |err| {
+            log.warn("apply after close failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    /// Most recent subscription owned by the active console user, or
+    /// null if no subscription matches (login window, or only
+    /// background-user agents are connected). D5: lets fast-user-
+    /// switching toggle who drives seize without dropping anyone's
+    /// stored rules.
+    fn activeSubscription(self: *Daemon) ?*Subscription {
+        const uid = self.active_uid orelse return null;
+        var i = self.subscriptions.items.len;
+        while (i > 0) : (i -= 1) {
+            const s = self.subscriptions.items[i - 1];
+            if (s.uid == uid) return s;
+        }
+        return null;
+    }
+
+    /// (Re)build vhidd / seize / engine slots from the active
+    /// subscription's rules. Called whenever the active state
+    /// changes: a new agent connected, an existing one disconnected,
+    /// or the console user switched. The active subscription's
+    /// stream becomes the layer-push target.
+    fn applyLatestRules(self: *Daemon) !void {
+        const sub = self.activeSubscription() orelse {
+            log.info("no active subscription — keeping seize torn down", .{});
             self.teardownSeize();
-            if (maybe_agent_conn) |conn| conn.close();
+            self.layer_ctx.stream = null;
             return;
         };
-        const rules = self.ruleset.rulesForUid(uid);
-        const remaps = self.ruleset.remapsForUid(uid);
-        if (rules.len == 0 and remaps.len == 0) {
-            log.info("uid={d}: no rules to apply — releasing seize", .{uid});
-            self.teardownSeize();
-            if (maybe_agent_conn) |conn| conn.close();
-            return;
-        }
+        const rules = sub.rules;
+        const remaps = sub.remaps;
 
         var has_layer_rule = false;
         var matches = std.ArrayList(HidSeize.Match).init(self.allocator);
@@ -405,7 +521,6 @@ const Daemon = struct {
         for (rules) |rule| {
             const dev = rule.device orelse {
                 log.err("rule src=0x{X:0>2} has no device match — global seize not supported yet", .{rule.src_usage});
-                if (maybe_agent_conn) |conn| conn.close();
                 return error.MissingDevice;
             };
             if (rule.hold_layer != null) has_layer_rule = true;
@@ -442,16 +557,11 @@ const Daemon = struct {
             self.seize_ctx.vhidd = v;
         }
 
-        // Swap layer push target — close the previous agent
-        // connection so the agent's old listener cleans up.
-        if (self.agent_layer_conn) |old| old.close();
-        if (has_layer_rule and maybe_agent_conn != null) {
-            self.agent_layer_conn = maybe_agent_conn;
-        } else {
-            self.agent_layer_conn = null;
-            if (maybe_agent_conn) |conn| conn.close();
-        }
-        self.layer_ctx.stream = self.agent_layer_conn;
+        // Layer push target = the active subscription's stream
+        // (always live now thanks to per-connection tracking — the
+        // grabber doesn't close subscriptions out from under their
+        // owners any more).
+        self.layer_ctx.stream = if (has_layer_rule) sub.stream else null;
 
         // Tear down old seize + slots before allocating new ones.
         // HidSeize is the singleton (one-process IOHIDManager); we
@@ -611,7 +721,7 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
     // because this rebuild isn't triggered by an agent message —
     // when the new user's agent next sends apply_rules, that path
     // wires up layer push.
-    d.applyLatestRules(null) catch |err| {
+    d.applyLatestRules() catch |err| {
         log.warn("rebuild after console user change failed: {s}", .{@errorName(err)});
     };
 }
@@ -626,6 +736,50 @@ fn listenerCallback(
     d.handleListener();
     // CFFileDescriptor is one-shot: re-arm so the next pending
     // accept fires another callback.
+    c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
+}
+
+/// CFFileDescriptor callback for an active Subscription's socket.
+/// Fires either when the agent writes to us (which it shouldn't —
+/// the post-apply_rules direction is server → client only) or when
+/// the OS marks the fd readable due to EOS (peer closed). Either
+/// way we attempt a 1-byte read; 0-byte recv → EOS → drop the sub.
+/// A successful read of unexpected bytes is logged but kept alive.
+fn subscriptionCallback(
+    cf_fd: c.CFFileDescriptorRef,
+    callback_types: c.CFOptionFlags,
+    info: ?*anyopaque,
+) callconv(.C) void {
+    _ = callback_types;
+    const sub: *Subscription = @ptrCast(@alignCast(info orelse return));
+
+    // macOS MSG flags: MSG_PEEK=0x2, MSG_DONTWAIT=0x80. Hand-rolled
+    // because std.posix.MSG isn't exposed on Zig 0.14 darwin.
+    const MSG_PEEK: u32 = 0x2;
+    const MSG_DONTWAIT: u32 = 0x80;
+    var byte: [1]u8 = undefined;
+    const n = posix.recv(sub.fd, &byte, MSG_PEEK | MSG_DONTWAIT) catch |err| switch (err) {
+        error.WouldBlock => {
+            c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
+            return;
+        },
+        else => {
+            log.info("subscription recv error ({s}) — dropping", .{@errorName(err)});
+            sub.daemon.handleConnectionClose(sub);
+            return;
+        },
+    };
+    if (n == 0) {
+        // Peer closed cleanly.
+        sub.daemon.handleConnectionClose(sub);
+        return;
+    }
+    // Unexpected stray data from agent. Drain it and stay armed —
+    // the agent shouldn't send anything after apply_rules but we
+    // tolerate it rather than tear down.
+    log.warn("subscription uid={d}: unexpected {d} byte(s) from agent — discarding", .{ sub.uid, n });
+    var drain: [256]u8 = undefined;
+    _ = posix.recv(sub.fd, &drain, MSG_DONTWAIT) catch {};
     c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
 }
 

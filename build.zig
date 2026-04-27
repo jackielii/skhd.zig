@@ -373,7 +373,6 @@ pub fn build(b: *std.Build) void {
         "src/EventTap.zig",
         "src/synthesize.zig",
         "src/grabber_protocol.zig",
-        "src/grabber/RuleSet.zig",
         "src/grabber/Vhidd.zig",
         "src/grabber/KbState.zig",
         "src/grabber/TapHold.zig",

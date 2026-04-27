@@ -286,26 +286,25 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
     try client.hello();
     try client.applyRules(rules.items, remaps.items);
 
+    // Always keep the connection open + watch it for EOS, regardless
+    // of whether this config has layer rules. The grabber's per-
+    // connection rule tracking relies on EOS detection to drop a
+    // dead agent's rules; if we close immediately when there are no
+    // layer rules, the grabber would assume we're alive forever and
+    // never fall back when this agent dies.
+    self.grabber_client = client;
+    self.layer_listener = try agent_layer_listener.Listener.init(
+        self.allocator,
+        client.stream.handle,
+        modeChangePushed,
+        self,
+    );
+    self.layer_listener.?.on_disconnect = grabberDisconnected;
+    self.layer_listener.?.on_disconnect_ctx = self;
     if (has_layer_rule) {
-        // Keep the connection open — the grabber will push
-        // mode_change frames over it whenever a layer-hold rule
-        // commits/releases. Register the fd as a run-loop source.
-        self.grabber_client = client;
-        self.layer_listener = try agent_layer_listener.Listener.init(
-            self.allocator,
-            client.stream.handle,
-            modeChangePushed,
-            self,
-        );
-        // Wire reconnect: if the grabber dies, schedule a retry.
-        self.layer_listener.?.on_disconnect = grabberDisconnected;
-        self.layer_listener.?.on_disconnect_ctx = self;
         log.info("grabber acknowledged {d} rule(s); layer listener installed", .{rules.items.len});
     } else {
-        try client.bye();
-        client.close();
-        self.allocator.destroy(client);
-        log.info("grabber acknowledged {d} rule(s)", .{rules.items.len});
+        log.info("grabber acknowledged {d} rule(s); listener active for EOS", .{rules.items.len});
     }
     // Successful forward: cancel any pending reconnect timer from a
     // prior outage.

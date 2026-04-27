@@ -52,6 +52,10 @@ running: bool = false,
 /// Open options actually applied to IOHIDManagerOpen. Tracked so
 /// stop() can mirror the same options on close.
 open_options: u32 = 0,
+/// Owned copy of the matches passed to setMatches. Reused by
+/// disableCapsLockDelayOnMatches to filter event-system services
+/// to just the ones we seized.
+owned_matches: []Match = &.{},
 
 const Self = @This();
 
@@ -77,6 +81,7 @@ pub fn init(allocator: std.mem.Allocator, callback: Callback, callback_ctx: ?*an
 
 pub fn deinit(self: *Self) void {
     if (self.running) self.stop();
+    if (self.owned_matches.len > 0) self.allocator.free(self.owned_matches);
     c.CFRelease(self.manager);
     instance = null;
     self.allocator.destroy(self);
@@ -95,6 +100,13 @@ pub fn deinit(self: *Self) void {
 /// directly to the OS unchanged — F-row default actions keep working.
 pub fn setMatches(self: *Self, matches: []const Match) !void {
     if (self.running) return error.AlreadyRunning;
+
+    if (self.owned_matches.len > 0) self.allocator.free(self.owned_matches);
+    self.owned_matches = try self.allocator.dupe(Match, matches);
+    errdefer {
+        self.allocator.free(self.owned_matches);
+        self.owned_matches = &.{};
+    }
 
     const dicts = c.CFArrayCreateMutable(c.kCFAllocatorDefault, @intCast(matches.len), &c.kCFTypeArrayCallBacks);
     if (dicts == null) return error.CFArrayCreateFailed;
@@ -191,48 +203,65 @@ pub fn start(self: *Self, mode: Mode) !void {
     if (count == 0) {
         log.warn("matching dictionary captured 0 devices — vendor/product mismatch?", .{});
     }
-    if (mode == .seize and matched != null and count > 0) {
-        self.disableCapsLockDelayOnMatched(matched.?, count);
-    }
     if (matched) |s| c.CFRelease(s);
+
+    if (mode == .seize) {
+        self.disableCapsLockDelayOnMatches(self.owned_matches);
+    }
 }
 
-/// Set HIDKeyboardCapsLockDelayOverride=0 on every matched device so
-/// the firmware-level "hold caps_lock for ~150ms to toggle" behavior
-/// can't fire while we're seizing. Without this, caps_lock-as-ctrl
-/// works at the FSM level but the OS's caps_lock state diverges
-/// (LED on, caps stuck) because the firmware toggle reaches
-/// IOHIDSystem through a side channel that seize doesn't intercept.
-fn disableCapsLockDelayOnMatched(self: *Self, set_ref: *anyopaque, count: usize) void {
-    const buf = self.allocator.alloc(?*const anyopaque, count) catch {
-        log.warn("OOM allocating device list for caps_lock_delay override", .{});
-        return;
-    };
-    defer self.allocator.free(buf);
-    c.CFSetGetValues(set_ref, buf.ptr);
-
-    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDKeyboardCapsLockDelayOverrideKey, c.kCFStringEncodingUTF8);
-    if (key == null) {
-        log.warn("CFStringCreateWithCString for caps_lock_delay key failed", .{});
+/// Set HIDKeyboardCapsLockDelayOverride=0 on every event-system
+/// service. Disables Apple's firmware-level "hold caps_lock for ~150ms
+/// to toggle" behavior — without this the toggle still fires through
+/// a side channel that IOHIDManager seize doesn't capture, so
+/// caps_lock-as-ctrl works at the FSM level but the OS's caps_lock
+/// state diverges (LED on, caps stuck).
+///
+/// Going through `IOHIDEventSystemClient` (private API) is what
+/// Karabiner does — `IOHIDDeviceSetProperty` returns success but the
+/// property is silently rejected, and `hidutil property --set`
+/// likewise doesn't persist. The event-system path takes effect.
+///
+/// We don't try to filter by vendor/product (event-system services
+/// don't expose those keys reliably) — setting the property on
+/// services that don't accept it is a no-op, and any keyboard where
+/// it does apply benefits from the same behavior we'd want.
+fn disableCapsLockDelayOnMatches(self: *Self, matches: []const Match) void {
+    _ = self;
+    _ = matches;
+    const evs = c.IOHIDEventSystemClientCreateSimpleClient(c.kCFAllocatorDefault);
+    if (evs == null) {
+        log.warn("IOHIDEventSystemClientCreateSimpleClient failed — caps_lock firmware toggle stays enabled", .{});
         return;
     }
-    defer c.CFRelease(key);
+    defer c.CFRelease(evs);
+
+    const services = c.IOHIDEventSystemClientCopyServices(evs);
+    if (services == null) {
+        log.warn("IOHIDEventSystemClientCopyServices returned null", .{});
+        return;
+    }
+    defer c.CFRelease(services);
+
+    const delay_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDKeyboardCapsLockDelayOverrideKey, c.kCFStringEncodingUTF8);
+    if (delay_key == null) return;
+    defer c.CFRelease(delay_key);
 
     var zero: i32 = 0;
-    const value = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &zero);
-    if (value == null) {
-        log.warn("CFNumberCreate for caps_lock_delay value failed", .{});
-        return;
-    }
-    defer c.CFRelease(value);
+    const zero_cf = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &zero);
+    if (zero_cf == null) return;
+    defer c.CFRelease(zero_cf);
 
-    for (buf) |maybe_dev| {
-        const dev: c.IOHIDDeviceRef = @constCast(maybe_dev orelse continue);
-        const ok = c.IOHIDDeviceSetProperty(dev, key, value);
-        if (ok == 0) {
-            log.warn("IOHIDDeviceSetProperty(HIDKeyboardCapsLockDelayOverride=0) failed", .{});
-        }
+    var applied: usize = 0;
+    const total = c.CFArrayGetCount(services);
+    var i: c.CFIndex = 0;
+    while (i < total) : (i += 1) {
+        const raw = c.CFArrayGetValueAtIndex(services, i) orelse continue;
+        const svc: c.IOHIDServiceClientRef = @constCast(raw);
+        const ok = c.IOHIDServiceClientSetProperty(svc, delay_key, zero_cf);
+        if (ok != 0) applied += 1;
     }
+    log.info("HIDKeyboardCapsLockDelayOverride=0 applied to {d}/{d} service(s)", .{ applied, total });
 }
 
 pub fn stop(self: *Self) void {

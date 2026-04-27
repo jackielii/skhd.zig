@@ -176,6 +176,24 @@ pub extern fn CFSetGetCount(theSet: ?*anyopaque) CFIndex;
 pub extern fn CFSetGetValues(theSet: ?*anyopaque, values: [*]?*const anyopaque) void;
 pub extern fn IOHIDDeviceSetProperty(device: IOHIDDeviceRef, key: CFStringRef, property: CFTypeRef) Boolean;
 
+// Private IOHIDEventSystemClient API. These symbols are in
+// IOKit.framework but live in the private header
+// <IOKit/hidsystem/IOHIDEventSystemClient.h>. Karabiner-Elements uses
+// them — without this path the standard `IOHIDDeviceSetProperty(...,
+// HIDKeyboardCapsLockDelayOverride, 0)` returns success but the
+// property doesn't persist (firmware caps_lock toggle keeps firing).
+pub const IOHIDEventSystemClientRef = ?*anyopaque;
+pub const IOHIDServiceClientRef = ?*anyopaque;
+
+pub extern fn IOHIDEventSystemClientCreateSimpleClient(allocator: CFAllocatorRef) IOHIDEventSystemClientRef;
+pub extern fn IOHIDEventSystemClientCopyServices(client: IOHIDEventSystemClientRef) CFArrayRef;
+pub extern fn IOHIDServiceClientGetRegistryID(service: IOHIDServiceClientRef) u64;
+pub extern fn IOHIDServiceClientSetProperty(service: IOHIDServiceClientRef, key: CFStringRef, property: CFTypeRef) Boolean;
+pub extern fn IOHIDServiceClientCopyProperty(service: IOHIDServiceClientRef, key: CFStringRef) CFTypeRef;
+pub extern fn CFArrayGetCount(theArray: CFArrayRef) CFIndex;
+pub extern fn CFArrayGetValueAtIndex(theArray: CFArrayRef, idx: CFIndex) ?*const anyopaque;
+pub extern fn CFNumberGetValue(number: CFNumberRef, type_: CFNumberType, valuePtr: *anyopaque) Boolean;
+
 pub extern fn IOHIDValueGetElement(value: IOHIDValueRef) IOHIDElementRef;
 pub extern fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) CFIndex;
 pub extern fn IOHIDElementGetUsagePage(element: IOHIDElementRef) u32;

@@ -331,20 +331,21 @@ fn runDaemonSeize(
     }
 
     for (rules, 0..) |rule, i| {
-        const is_layer = rule.hold_layer != null;
         const hold_action: TapHold.HoldAction = if (rule.hold_layer) |layer_name| .{ .layer = layer_name } else .{
             .hid_usage = std.math.cast(u16, rule.hold_usage) orelse return error.HoldUsageOverflow,
         };
-        // For layer rules permissive_hold has a race against the
-        // agent's async mode swap. Degrade to hold_on_other_key_press
-        // semantics until we have synchronous mode-swap.
         const th_rule: TapHold.Rule = .{
             .src_usage = std.math.cast(u16, rule.src_usage) orelse return error.SourceUsageOverflow,
             .tap_usage = std.math.cast(u16, rule.tap_usage) orelse return error.TapUsageOverflow,
             .hold = hold_action,
             .timeout_ms = rule.timeout_ms,
-            .permissive_hold = if (is_layer) false else rule.permissive_hold,
-            .hold_on_other_key_press = if (is_layer) true else rule.hold_on_other_key_press,
+            // Layer rules buffer non-source events automatically (the
+            // engine handles it). permissive_hold and
+            // hold_on_other_key_press here are passed through verbatim
+            // — the engine knows to treat them differently for layer
+            // vs. modifier holds.
+            .permissive_hold = rule.permissive_hold,
+            .hold_on_other_key_press = rule.hold_on_other_key_press,
             .retro_tap = rule.retro_tap,
         };
         slots[i] = .{

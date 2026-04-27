@@ -21,17 +21,25 @@ pub const ParseError = struct {
 
     pub fn deinit(self: *ParseError) void {
         self.allocator.free(self.message);
+        if (self.token_text) |t| self.allocator.free(t);
     }
 
     pub fn fromToken(allocator: std.mem.Allocator, token: Token, message: []const u8, file_path: ?[]const u8) !ParseError {
         const msg_copy = try allocator.dupe(u8, message);
+        errdefer allocator.free(msg_copy);
+        // Dupe the token text — `token.text` is a slice into the
+        // tokenizer's input buffer, which can be freed before the
+        // error gets logged (e.g. an error from a `.load`'d file
+        // whose content buffer goes out of scope before the top-
+        // level caller prints the error).
+        const text_copy = try allocator.dupe(u8, token.text);
         return ParseError{
             .allocator = allocator,
             .message = msg_copy,
             .line = token.line,
             .column = token.cursor,
             .file_path = file_path,
-            .token_text = token.text,
+            .token_text = text_copy,
         };
     }
 

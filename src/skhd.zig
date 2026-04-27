@@ -70,8 +70,14 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         return err;
     };
 
-    // Process any .load directives
-    try parser.processLoadDirectives(&mappings);
+    // Process any .load directives. Surface include-file parse
+    // errors with their file:line, same as the top-level file.
+    parser.processLoadDirectives(&mappings) catch |err| {
+        if (parser.error_info) |parse_err| {
+            log.err("skhd: {}", .{parse_err});
+        }
+        return err;
+    };
 
     // Initialize with default mode if exists
     var current_mode: ?*Mode = null;

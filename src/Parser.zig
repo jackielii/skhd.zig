@@ -1089,15 +1089,51 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         const duped_path = try self.allocator.dupe(u8, abs_path);
         try mappings.loaded_files.append(self.allocator, duped_path);
 
-        // Create a new parser for the included file
+        // Create a new parser for the included file. We hand it the
+        // parent's `.define` and process-group maps by value-move so
+        // included files can use commands declared in the parent
+        // (e.g. `@anybar_color` defined in the top-level skhdrc and
+        // referenced from a `.load`'d file). After parsing, move the
+        // maps back so the parent owns any new entries the included
+        // file added.
         var included_parser = try Parser.init(self.allocator);
-        defer included_parser.deinit();
+        included_parser.command_defs = self.command_defs;
+        included_parser.process_groups = self.process_groups;
+        self.command_defs = .empty;
+        self.process_groups = .empty;
+        defer {
+            // Move maps back to the parent before the included
+            // parser's deinit so we don't double-free their entries.
+            self.command_defs = included_parser.command_defs;
+            self.process_groups = included_parser.process_groups;
+            included_parser.command_defs = .empty;
+            included_parser.process_groups = .empty;
+            included_parser.deinit();
+        }
 
-        // Parse the included file
-        try included_parser.parseWithPath(mappings, content, resolved_path);
+        // Parse the included file. Use `duped_path` (owned by
+        // mappings.loaded_files for the rest of the run) rather than
+        // `resolved_path` (freed at end of this iteration) so any
+        // ParseError.file_path slice points at long-lived memory.
+        // Hoist parse errors to our own error_info so the top-level
+        // caller (Skhd.init) logs the actual file:line:reason instead
+        // of a bare "ParseErrorOccurred".
+        included_parser.parseWithPath(mappings, content, duped_path) catch |err| {
+            if (included_parser.error_info) |info| {
+                self.error_info = info;
+                included_parser.error_info = null;
+            }
+            return err;
+        };
 
         // Recursively process any load directives in the included file
-        try included_parser.processLoadDirectives(mappings);
+        included_parser.processLoadDirectives(mappings) catch |err| {
+            if (included_parser.error_info) |info| {
+                self.error_info = info;
+                included_parser.error_info = null;
+            }
+            return err;
+        };
     }
 }
 

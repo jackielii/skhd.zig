@@ -107,6 +107,10 @@ sink_ctx: ?*anyopaque,
 layer_sink: ?LayerSink = null,
 layer_sink_ctx: ?*anyopaque = null,
 buffer: std.BoundedArray(Event, max_buffered_events) = .{},
+/// Whether any non-source key event has been seen since this rule
+/// last entered pending. Drives `retro_tap` (emit tap on release if
+/// nothing else was pressed during the hold).
+other_key_seen: bool = false,
 
 const Self = @This();
 
@@ -137,6 +141,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
         .idle => {
             if (is_source and ev.pressed) {
                 self.state = .pending;
+                self.other_key_seen = false;
                 return .{ .disposition = .consumed, .timer = .{ .start_in_ms = self.rule.timeout_ms } };
             }
             // Source key-up while idle (e.g. stuck-key recovery): nothing
@@ -158,6 +163,9 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                 return .{ .disposition = .consumed, .timer = .none };
             }
 
+            // Track for retro_tap.
+            self.other_key_seen = true;
+
             // Other key arrived while pending.
             if (self.rule.hold_on_other_key_press and ev.pressed) {
                 // Eager commit: the moment another key is pressed,
@@ -168,18 +176,24 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                 return .{ .disposition = .pass, .timer = .cancel };
             }
 
-            if (self.rule.permissive_hold) {
-                // Buffer everything; the next other-key-up tells us
-                // it was tapped during the source hold → commit hold.
+            // Layer rules always buffer non-source events through the
+            // pending window so the typing order is preserved when we
+            // commit. permissive_hold buffers too, but additionally
+            // treats a nested tap as proof of intent-to-hold (used by
+            // modifier-style rules; doesn't fit layer holds well).
+            if (self.isLayer() or self.rule.permissive_hold) {
                 self.buffer.append(ev) catch {
-                    log.warn("permissive_hold buffer overflow — flushing as tap", .{});
+                    log.warn("buffer overflow — flushing as tap", .{});
                     self.commitTap();
                     return .{ .disposition = .pass, .timer = .cancel };
                 };
-                if (!ev.pressed) {
-                    // Other key was tapped (down + up) while source
-                    // held → commit hold, replay buffered events
-                    // under the held mod.
+                if (self.rule.permissive_hold and !self.isLayer() and !ev.pressed) {
+                    // Modifier-style permissive_hold: nested down+up
+                    // commits hold and replays the inner key under
+                    // the modifier. Layer holds skip this — it
+                    // misclassifies natural typing roll-overs (where
+                    // user presses next letter before releasing the
+                    // layer key) as deliberate layer use.
                     self.emitHoldDown();
                     self.state = .decided_hold;
                     self.flushBuffer();
@@ -198,6 +212,17 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                 if (!ev.pressed) {
                     // Hold finished.
                     self.emitHoldUp();
+                    // QMK retro_tap: if no other key was pressed
+                    // during the entire hold window, fall back to
+                    // emitting the tap action on release. Lets a
+                    // user who accidentally over-held the source key
+                    // still get the character (or whatever the tap
+                    // action is) without losing it.
+                    if (self.rule.retro_tap and !self.other_key_seen) {
+                        log.info("retro_tap: no other key seen — emit tap on release", .{});
+                        self.emit(self.rule.tap_usage, true);
+                        self.emit(self.rule.tap_usage, false);
+                    }
                     self.state = .idle;
                     return .{ .disposition = .consumed, .timer = .none };
                 }
@@ -206,6 +231,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                 return .{ .disposition = .consumed, .timer = .none };
             }
             // Anything else just flows through under the held mod.
+            self.other_key_seen = true;
             return .{ .disposition = .pass, .timer = .none };
         },
     }
@@ -217,6 +243,10 @@ pub fn timerFired(self: *Self) TimerAction {
     self.state = .decided_hold;
     self.flushBuffer();
     return .none;
+}
+
+fn isLayer(self: *const Self) bool {
+    return std.meta.activeTag(self.rule.hold) == .layer;
 }
 
 fn commitTap(self: *Self) void {
@@ -484,6 +514,135 @@ test "layer hold: hold_on_other_key_press triggers layer enter+exit through laye
 
     // No HID emits at all for the layer rule's hold path.
     try std.testing.expectEqual(@as(usize, 0), sink.out.items.len);
+}
+
+test "layer hold: timer-only commit, buffered events replayed in order on tap" {
+    const LayerEvent = struct { layer: []const u8, entering: bool };
+    const LayerLog = struct {
+        events: std.ArrayList(LayerEvent),
+
+        fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
+            const s: *@This() = @ptrCast(@alignCast(ctx.?));
+            s.events.append(.{ .layer = layer, .entering = entering }) catch unreachable;
+        }
+    };
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var ll = LayerLog{ .events = std.ArrayList(LayerEvent).init(std.testing.allocator) };
+    defer ll.events.deinit();
+
+    // Layer rule with neither permissive_hold nor hold_on_other_key_press
+    // explicitly set — should still buffer non-source events because
+    // layer rules always do, and replay on commit.
+    var eng = initWithLayerSink(.{
+        .src_usage = 0x2C, // space
+        .tap_usage = 0x2C,
+        .hold = .{ .layer = "fn_layer" },
+        .timeout_ms = 200,
+    }, TestSink.callback, &sink, LayerLog.cb, &ll);
+
+    _ = eng.feed(kbev(0x2C, true)); // space down → pending
+
+    // Quick prose-typing: 'h' down + 'h' up while space is briefly held.
+    _ = eng.feed(kbev(0x0B, true));
+    _ = eng.feed(kbev(0x0B, false));
+    // No layer transition yet — just buffered.
+    try std.testing.expectEqual(@as(usize, 0), ll.events.items.len);
+    try std.testing.expectEqual(@as(usize, 0), sink.out.items.len);
+
+    // Space released before timeout → tap path. Buffer replays after
+    // tap_up so the kernel sees: space, h.
+    _ = eng.feed(kbev(0x2C, false));
+    try std.testing.expectEqual(@as(usize, 0), ll.events.items.len); // never entered layer
+    try std.testing.expectEqual(@as(usize, 4), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0x2C), sink.out.items[0].usage); // tap down (space)
+    try std.testing.expect(sink.out.items[0].pressed);
+    try std.testing.expectEqual(@as(u32, 0x2C), sink.out.items[1].usage); // tap up
+    try std.testing.expect(!sink.out.items[1].pressed);
+    try std.testing.expectEqual(@as(u32, 0x0B), sink.out.items[2].usage); // 'h' down replay
+    try std.testing.expectEqual(@as(u32, 0x0B), sink.out.items[3].usage); // 'h' up replay
+}
+
+test "layer hold: timer fires after buffered events → enter layer + replay" {
+    const LayerEvent = struct { layer: []const u8, entering: bool };
+    const LayerLog = struct {
+        events: std.ArrayList(LayerEvent),
+
+        fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
+            const s: *@This() = @ptrCast(@alignCast(ctx.?));
+            s.events.append(.{ .layer = layer, .entering = entering }) catch unreachable;
+        }
+    };
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var ll = LayerLog{ .events = std.ArrayList(LayerEvent).init(std.testing.allocator) };
+    defer ll.events.deinit();
+
+    var eng = initWithLayerSink(.{
+        .src_usage = 0x2C,
+        .tap_usage = 0x2C,
+        .hold = .{ .layer = "fn_layer" },
+    }, TestSink.callback, &sink, LayerLog.cb, &ll);
+
+    _ = eng.feed(kbev(0x2C, true));
+    _ = eng.feed(kbev(0x0B, true)); // 'h' buffered
+    _ = eng.timerFired();
+    // After timer: layer entered, buffer replayed.
+    try std.testing.expectEqual(@as(usize, 1), ll.events.items.len);
+    try std.testing.expect(ll.events.items[0].entering);
+    try std.testing.expectEqual(@as(usize, 1), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0x0B), sink.out.items[0].usage);
+}
+
+test "retro_tap: source held past timeout with no other key, on release emits tap" {
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var eng = init(.{
+        .src_usage = 0x39,
+        .tap_usage = 0x29,
+        .hold = .{ .hid_usage = 0xE0 },
+        .retro_tap = true,
+    }, TestSink.callback, &sink);
+
+    _ = eng.feed(kbev(0x39, true)); // source down → pending
+    _ = eng.timerFired();             // → decided_hold, hold_down emitted
+    try std.testing.expectEqual(@as(usize, 1), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[0].usage);
+    try std.testing.expect(sink.out.items[0].pressed);
+
+    _ = eng.feed(kbev(0x39, false)); // source up
+    // Output: hold_up, then retro tap_down + tap_up.
+    try std.testing.expectEqual(@as(usize, 4), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[1].usage); // hold up
+    try std.testing.expect(!sink.out.items[1].pressed);
+    try std.testing.expectEqual(@as(u32, 0x29), sink.out.items[2].usage); // tap down
+    try std.testing.expect(sink.out.items[2].pressed);
+    try std.testing.expectEqual(@as(u32, 0x29), sink.out.items[3].usage); // tap up
+    try std.testing.expect(!sink.out.items[3].pressed);
+}
+
+test "retro_tap: other key seen during hold suppresses retro tap on release" {
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var eng = init(.{
+        .src_usage = 0x39,
+        .tap_usage = 0x29,
+        .hold = .{ .hid_usage = 0xE0 },
+        .retro_tap = true,
+    }, TestSink.callback, &sink);
+
+    _ = eng.feed(kbev(0x39, true));
+    _ = eng.timerFired();
+    _ = eng.feed(kbev(0x04, true));  // 'a' down — observed during hold
+    _ = eng.feed(kbev(0x04, false));
+    _ = eng.feed(kbev(0x39, false));
+
+    // Output: hold_down, hold_up. No retro tap because 'a' was pressed.
+    try std.testing.expectEqual(@as(usize, 2), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[0].usage);
+    try std.testing.expect(sink.out.items[0].pressed);
+    try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[1].usage);
+    try std.testing.expect(!sink.out.items[1].pressed);
 }
 
 test "non-source events while idle: pass through, FSM untouched" {

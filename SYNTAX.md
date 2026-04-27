@@ -157,6 +157,7 @@ Configuration directives follow this syntax:
 directive = '.shell' <string> |
             '.blacklist' '[' <string_list> ']' |
             '.load' <string> |
+            '.path' <string> | '.path' '[' <string_list> ']' |
             '.define' <identifier> '[' <string_list> ']' |
             '.define' <identifier> ':' <command_template>
 
@@ -181,6 +182,29 @@ string_list = <string> | <string> ',' <string_list>
 ```bash
 .load "~/.config/skhd/extra.skhdrc"
 ```
+
+### Extra PATH entries
+At startup skhd inherits PATH from the user's login shell (`~/.zprofile`,
+`~/.bash_profile`, fish's `config.fish`, etc.) so commands installed by
+Homebrew and similar work out of the box. For tools whose location isn't in
+the shell's PATH — most commonly version-manager shims like mise/asdf/nvm —
+declare the directory with `.path`:
+
+```bash
+.path "$HOME/.local/share/mise/shims"
+.path "~/.cargo/bin"
+
+# Or list form:
+.path [
+    "/opt/custom/bin"
+    "$HOME/bin"
+]
+```
+
+`.path` entries are prepended to PATH (declaration order preserved), so they
+take precedence over shell-inherited locations. `~` and `$HOME` are
+expanded; other `$VAR` forms are not — use absolute paths for everything
+else.
 
 ### Process Groups (New in skhd.zig!)
 ```bash

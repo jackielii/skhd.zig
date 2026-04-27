@@ -9,6 +9,10 @@ mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
 blacklist: std.StringHashMapUnmanaged(void) = .empty,
 shell: [:0]const u8,
 loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
+// Extra PATH entries declared via `.path` directives. Prepended to PATH at
+// startup so commands launched by hotkeys can find user-installed tools that
+// aren't in the shell-inherited PATH (e.g. mise/asdf/nvm shims).
+paths: std.ArrayListUnmanaged([]const u8) = .empty,
 // Track all hotkeys for cleanup (hotkeys can belong to multiple modes)
 hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
 
@@ -55,6 +59,11 @@ pub fn deinit(self: *Mappings) void {
     }
     self.loaded_files.deinit(self.allocator);
 
+    for (self.paths.items) |path| {
+        self.allocator.free(path);
+    }
+    self.paths.deinit(self.allocator);
+
     self.* = undefined;
 }
 
@@ -81,6 +90,15 @@ pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     }
     const owned = try self.allocator.dupe(u8, key);
     try self.blacklist.put(self.allocator, owned, void{});
+}
+
+/// Append an entry from a `.path` directive. Caller passes the
+/// already-expanded absolute path; expansion (e.g. `~` → `$HOME`) happens at
+/// parse time so the stored value is what setenv will use directly.
+pub fn add_path(self: *Mappings, path: []const u8) !void {
+    const owned = try self.allocator.dupe(u8, path);
+    errdefer self.allocator.free(owned);
+    try self.paths.append(self.allocator, owned);
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {

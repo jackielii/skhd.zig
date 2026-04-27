@@ -168,6 +168,8 @@ pub fn main() !void {
     var skhd = try Skhd.init(gpa, resolved_config_file, verbose, profile);
     defer skhd.deinit();
 
+    applyConfigPaths(gpa, skhd.mappings.paths.items);
+
     if (verbose) {
         log.info("Using config file: {s}", .{resolved_config_file});
         if (no_hotload) {
@@ -346,6 +348,34 @@ fn inheritUserPath(allocator: std.mem.Allocator) void {
         return;
     }
     log.warn("PATH inherited from {s}: {s}", .{ shell, captured });
+}
+
+/// Prepend `.path` directive entries to PATH. Called after inheritUserPath so
+/// the layering is:
+///   `<.path entries, in declaration order> : <inherited PATH>`
+/// Explicit user entries take precedence over what shell inheritance found,
+/// which matters for tool-version-managers (mise/asdf shims) where the user
+/// wants the shim dir resolved before any system tool of the same name.
+fn applyConfigPaths(allocator: std.mem.Allocator, entries: []const []const u8) void {
+    if (entries.len == 0) return;
+
+    const current = std.posix.getenv("PATH") orelse "";
+
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+
+    for (entries) |entry| {
+        buf.appendSlice(entry) catch return;
+        buf.append(':') catch return;
+    }
+    buf.appendSlice(current) catch return;
+    buf.append(0) catch return;
+
+    if (c.setenv("PATH", @ptrCast(buf.items.ptr), 1) != 0) {
+        log.warn("PATH apply: setenv failed", .{});
+        return;
+    }
+    log.warn("PATH after .path directives: {s}", .{buf.items[0 .. buf.items.len - 1]});
 }
 
 /// Resolve config file path following XDG spec

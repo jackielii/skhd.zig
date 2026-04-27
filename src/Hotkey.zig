@@ -122,6 +122,22 @@ pub const KeyboardLookupContext = struct {
     }
 };
 
+/// Wildcard-modifier lookup context for capture-mode layer rules.
+/// Matches a config hotkey by key code alone, ignoring the keyboard
+/// event's modifier flags — but ONLY if the config rule itself has
+/// no declared modifiers (so explicit-modifier rules still need an
+/// exact match elsewhere). The caller is expected to OR the user's
+/// modifiers into the forward target after a wildcard match.
+pub const WildcardLookupContext = struct {
+    pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
+        return key.key;
+    }
+
+    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
+        return config.key == keyboard.key and config.flags.isEmpty();
+    }
+};
+
 /// Compare hotkey flags, handling left/right modifier logic
 /// config = hotkey from config file, keyboard = event from keyboard
 pub fn hotkeyFlagsMatch(config: ModifierFlag, keyboard: ModifierFlag) bool {

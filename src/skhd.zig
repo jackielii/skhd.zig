@@ -1016,12 +1016,35 @@ pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey
     return result;
 }
 
+/// Wildcard fallback for capture (layer) modes: same key, but the
+/// lookup ignores the keyboard's modifiers and only matches a config
+/// hotkey that itself was declared without explicit modifiers. Used
+/// to get QMK-style layer transparency: `fn_layer < h | left` should
+/// also fire for `shift+h`, `ctrl+h`, etc., with the user's actual
+/// modifiers carried through to the forwarded keystroke.
+pub inline fn findWildcardHotkey(_: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
+    const ctx = Hotkey.WildcardLookupContext{};
+    return mode.hotkey_map.getKeyAdapted(eventkey, ctx);
+}
+
 /// Process a hotkey - single lookup that handles both forwarding and execution
 inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !HotkeyResult {
     const mode = self.current_mode orelse return .not_found;
 
     self.tracer.traceHotkeyLookup();
-    const found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
+    var found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
+
+    // Capture-mode layer transparency: if no exact-modifier match
+    // exists, try the wildcard lookup (matches the same key code
+    // against any rule with no declared modifiers). When this hits,
+    // we OR the user's actual modifiers into the forwarded output
+    // below so e.g. `fn_layer < h | left` also handles `lctrl+h`
+    // → `lctrl+left`.
+    var via_wildcard = false;
+    if (found_hotkey == null and mode.capture) {
+        found_hotkey = self.findWildcardHotkey(mode, eventkey.*);
+        via_wildcard = (found_hotkey != null);
+    }
 
     if (found_hotkey == null) {
         self.tracer.traceHotkeyFound(false);
@@ -1051,9 +1074,19 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
     if (hotkey.find_command_for_process(process_name)) |process_cmd| {
         switch (process_cmd) {
             .forwarded => |target_key| {
-                try self.logKeyPress("Forwarding key '{s}' for process {s}", target_key, .{process_name});
+                // QMK-style layer transparency: when a wildcard
+                // (no-modifier) layer rule fires, OR the user's
+                // actual modifiers into the forward target so
+                // shift+h → shift+left, ctrl+h → ctrl+left, etc.
+                // Without the wildcard match (i.e. an explicit
+                // modifier rule fired), use the rule's target as-is.
+                const effective_target: Hotkey.KeyPress = if (via_wildcard) .{
+                    .flags = target_key.flags.merge(eventkey.flags),
+                    .key = target_key.key,
+                } else target_key;
+                try self.logKeyPress("Forwarding key '{s}' for process {s}", effective_target, .{process_name});
                 self.tracer.traceKeyForwarded();
-                try forwardKey(target_key, event);
+                try forwardKey(effective_target, event);
                 return .consumed;
             },
             .command => |cmd| {
@@ -1344,6 +1377,103 @@ test "processHotkey respects passthrough in capture mode" {
     {
         const keypress = Hotkey.KeyPress{ .key = 0x02, .flags = ModifierFlag{ .cmd = true } }; // Cmd+D (not defined)
         const result = try skhd.processHotkey(&keypress, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.not_found, result);
+    }
+}
+
+test "capture-mode wildcard: no-modifier rule matches any-modifier press" {
+    // QMK-style layer transparency. `fn_layer < h | left` (no
+    // modifier) should also fire when shift, ctrl, etc. are held —
+    // and the user's modifiers should be carried through to the
+    // forwarded keystroke.
+    const alloc = std.testing.allocator;
+
+    const config =
+        \\:: fn_layer @
+        \\fn_layer < 0x04 | 0x7B
+    ; // 0x04 = 'h' (macOS keycode), 0x7B = left arrow
+
+    var skhd = try createTestSkhdFromConfig(alloc, config);
+    defer skhd.deinit();
+
+    skhd.current_mode = skhd.mappings.mode_map.getPtr("fn_layer");
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    // No modifier — exact match (also wildcard, but exact wins).
+    {
+        const kp = Hotkey.KeyPress{ .key = 0x04, .flags = .{} };
+        const result = try skhd.processHotkey(&kp, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.consumed, result);
+    }
+    // shift held — exact lookup misses, wildcard hits.
+    {
+        const kp = Hotkey.KeyPress{ .key = 0x04, .flags = .{ .shift = true } };
+        const result = try skhd.processHotkey(&kp, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.consumed, result);
+    }
+    // ctrl held — same.
+    {
+        const kp = Hotkey.KeyPress{ .key = 0x04, .flags = .{ .control = true } };
+        const result = try skhd.processHotkey(&kp, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.consumed, result);
+    }
+}
+
+test "capture-mode wildcard: explicit-modifier rule wins over wildcard" {
+    // If both a wildcard and an explicit-modifier rule exist for
+    // the same key, the explicit one matches its exact modifier
+    // combo and the wildcard handles everything else.
+    const alloc = std.testing.allocator;
+
+    const config =
+        \\:: fn_layer @
+        \\fn_layer < 0x04 | 0x7B
+        \\fn_layer < shift - 0x04 | 0x7C
+    ; // 0x7B = left, 0x7C = right
+
+    var skhd = try createTestSkhdFromConfig(alloc, config);
+    defer skhd.deinit();
+
+    skhd.current_mode = skhd.mappings.mode_map.getPtr("fn_layer");
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    // shift+0x04 hits the explicit rule (→ right, no shift).
+    {
+        const kp = Hotkey.KeyPress{ .key = 0x04, .flags = .{ .shift = true } };
+        const result = try skhd.processHotkey(&kp, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.consumed, result);
+    }
+    // ctrl+0x04 falls through to wildcard.
+    {
+        const kp = Hotkey.KeyPress{ .key = 0x04, .flags = .{ .control = true } };
+        const result = try skhd.processHotkey(&kp, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.consumed, result);
+    }
+}
+
+test "non-capture mode: wildcard does NOT fire" {
+    // Default mode should keep strict-match semantics so users who
+    // wrote `q : something` don't suddenly get matches on shift+q.
+    const alloc = std.testing.allocator;
+
+    const config =
+        \\0x04 | 0x7B
+    ;
+
+    var skhd = try createTestSkhdFromConfig(alloc, config);
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    // Exact match: fires.
+    {
+        const kp = Hotkey.KeyPress{ .key = 0x04, .flags = .{} };
+        const result = try skhd.processHotkey(&kp, mock_event, "test");
+        try std.testing.expectEqual(HotkeyResult.consumed, result);
+    }
+    // shift held: default mode (non-capture), wildcard does NOT fire.
+    {
+        const kp = Hotkey.KeyPress{ .key = 0x04, .flags = .{ .shift = true } };
+        const result = try skhd.processHotkey(&kp, mock_event, "test");
         try std.testing.expectEqual(HotkeyResult.not_found, result);
     }
 }

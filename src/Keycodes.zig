@@ -59,6 +59,18 @@ pub const ModifierFlag = packed struct(u32) {
         const m2: u32 = @bitCast(other);
         return @bitCast(m1 | m2);
     }
+
+    /// True when no modifier bits are set (excluding the
+    /// `passthrough` flag, which is a routing marker rather than a
+    /// modifier and shouldn't gate wildcard matching). Used by
+    /// capture-mode layer lookup: a forward rule with no declared
+    /// modifiers acts as a "transparent" wildcard.
+    pub fn isEmpty(self: ModifierFlag) bool {
+        var copy = self;
+        copy.passthrough = false;
+        const m: u32 = @bitCast(copy);
+        return m == 0;
+    }
     pub fn format(self: *const ModifierFlag, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
 

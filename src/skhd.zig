@@ -1016,6 +1016,29 @@ pub fn reloadConfig(self: *Skhd) !void {
         self.current_mode = null;
     }
 
+    // Re-apply hidutil for any colon-form `.remap` rules in the new
+    // config. Without this, edits to .remap directives wouldn't take
+    // effect on hot reload — the OS-level UserKeyMapping would still
+    // reflect the previous parse. Lazy-init the Hidutil owner if the
+    // previous config had no remaps but the new one does.
+    if (self.hidutil == null and self.mappings.remaps.items.len > 0) {
+        self.hidutil = Hidutil.init(self.allocator) catch |err| blk: {
+            log.warn("Hidutil init on reload failed: {s}. .remap colon-form ignored.", .{@errorName(err)});
+            break :blk null;
+        };
+    }
+    if (self.hidutil) |h| {
+        // Clear whatever's installed before re-applying; this also
+        // covers the case where the new config removed every remap
+        // (then we just clear and stay quiescent).
+        h.restoreAll();
+        if (self.mappings.remaps.items.len > 0) {
+            h.applyRemaps(&self.mappings) catch |err| {
+                log.err("Failed to re-apply hidutil remaps on reload: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
     // Note: We don't re-enable hot reload here because this function
     // might be called from within the hotload callback. Instead, we'll
     // update the watched files list when hot reload is already enabled.

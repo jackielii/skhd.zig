@@ -138,6 +138,20 @@ pub fn build(b: *std.Build) void {
     const grabber_app_step = b.step("grabber-app", "Build skhd-grabber-dev.app (signed bundle for TCC-stable Input Monitoring grants)");
     grabber_app_step.dependOn(&sign_grabber_app_cmd.step);
 
+    // `zig build run-grabber` — build + sign the bundle, then exec it
+    // under sudo with --foreground. The bundle path is the entry point
+    // because TCC keys Input Monitoring on it; running the bare binary
+    // gets denied silently after the next rebuild invalidates its cdhash.
+    // Extra args after `--` flow through (e.g. `zig build run-grabber --
+    // --socket-path /tmp/x.sock`).
+    const grabber_inner_exe = b.pathJoin(&.{ installed_grabber_app, "Contents", "MacOS", "skhd-grabber" });
+    const run_grabber_cmd = b.addSystemCommand(&[_][]const u8{ "sudo", grabber_inner_exe, "--foreground" });
+    run_grabber_cmd.step.dependOn(&sign_grabber_app_cmd.step);
+    if (b.args) |args| run_grabber_cmd.addArgs(args);
+
+    const run_grabber_step = b.step("run-grabber", "Build skhd-grabber-dev.app and run it under sudo --foreground");
+    run_grabber_step.dependOn(&run_grabber_cmd.step);
+
     const installed_exe = b.getInstallPath(.bin, exe.name);
     const installed_app = b.getInstallPath(.prefix, "skhd.app");
 

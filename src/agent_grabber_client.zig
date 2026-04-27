@@ -53,12 +53,18 @@ pub const Client = struct {
         try expectOk(self);
     }
 
-    /// Send the full set of caps-class rules in one apply_rules call.
-    /// Replaces whatever the grabber held for this uid.
-    pub fn applyRules(self: *Client, rules: []const protocol.Rule) !void {
+    /// Send the full set of caps-class rules and colon-form remaps in
+    /// one apply_rules call. Replaces whatever the grabber held for
+    /// this uid.
+    pub fn applyRules(
+        self: *Client,
+        rules: []const protocol.Rule,
+        remaps: []const protocol.Remap,
+    ) !void {
         try protocol.writeMessage(self.stream, self.allocator, .{
             .@"type" = "apply_rules",
             .rules = rules,
+            .remaps = remaps,
         });
         try expectOk(self);
     }

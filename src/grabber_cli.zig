@@ -163,7 +163,7 @@ pub fn grabberTestRule(allocator: std.mem.Allocator, socket_path: []const u8) !v
     defer client.close();
 
     try client.hello();
-    try client.applyRules(&sample_rules);
+    try client.applyRules(&sample_rules, &.{});
     try client.bye();
 
     std.debug.print(

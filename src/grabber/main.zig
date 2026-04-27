@@ -346,7 +346,7 @@ const Daemon = struct {
     /// here; on exit it's either kept (layer rules present) or
     /// closed.
     fn applyLatestRules(self: *Daemon, agent_conn: std.net.Stream) !void {
-        const rules = firstRulesInRuleSet(&self.ruleset) orelse {
+        const view = firstRulesInRuleSet(&self.ruleset) orelse {
             // Empty rule set after apply: tear everything down so we
             // stop seizing devices.
             log.info("apply_rules cleared the rule set — releasing seize", .{});
@@ -354,10 +354,21 @@ const Daemon = struct {
             agent_conn.close();
             return;
         };
+        const rules = view.rules;
+        const remaps = view.remaps;
 
         var has_layer_rule = false;
         var matches = std.ArrayList(HidSeize.Match).init(self.allocator);
         defer matches.deinit();
+
+        const addMatch = struct {
+            fn call(list: *std.ArrayList(HidSeize.Match), dev: protocol.Device) !void {
+                for (list.items) |m| {
+                    if (m.vendor == dev.vendor and m.product == dev.product) return;
+                }
+                try list.append(.{ .vendor = dev.vendor, .product = dev.product });
+            }
+        }.call;
 
         for (rules) |rule| {
             const dev = rule.device orelse {
@@ -366,23 +377,22 @@ const Daemon = struct {
                 return error.MissingDevice;
             };
             if (rule.hold_layer != null) has_layer_rule = true;
-            var seen = false;
-            for (matches.items) |m| {
-                if (m.vendor == dev.vendor and m.product == dev.product) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (!seen) try matches.append(.{ .vendor = dev.vendor, .product = dev.product });
+            try addMatch(&matches, dev);
+        }
+        for (remaps) |rm| {
+            try addMatch(&matches, rm.device);
         }
 
-        log.info("apply_rules: {d} rule(s) across {d} device(s) layer_push={}", .{ rules.len, matches.items.len, has_layer_rule });
+        log.info("apply_rules: {d} rule(s), {d} remap(s) across {d} device(s) layer_push={}", .{ rules.len, remaps.len, matches.items.len, has_layer_rule });
         for (rules, 0..) |rule, i| {
             const hold_str: []const u8 = if (rule.hold_layer) |l| l else "<hid_usage>";
             log.info(
                 "  rule[{d}]: src=0x{X:0>2} tap=0x{X:0>2} hold={s} timeout={d}ms perm={} hokp={}",
                 .{ i, rule.src_usage, rule.tap_usage, hold_str, rule.timeout_ms, rule.permissive_hold, rule.hold_on_other_key_press },
             );
+        }
+        for (remaps, 0..) |rm, i| {
+            log.info("  remap[{d}]: src=0x{X:0>2} → dst=0x{X:0>2}", .{ i, rm.src_usage, rm.dst_usage });
         }
 
         // Lazy vhidd init on first apply.
@@ -457,6 +467,22 @@ const Daemon = struct {
         }
         self.seize_ctx.caps_remap_active = caps_active;
 
+        // Rebuild the colon-form remap table. Reset to all-zero first
+        // so a previously-installed rule that's no longer present is
+        // forgotten.
+        self.seize_ctx.remap_table = @splat(0);
+        for (remaps) |rm| {
+            if (rm.src_usage >= self.seize_ctx.remap_table.len) {
+                log.warn("remap src=0x{X} out of HID page-7 range — skipping", .{rm.src_usage});
+                continue;
+            }
+            const dst16 = std.math.cast(u16, rm.dst_usage) orelse {
+                log.warn("remap dst=0x{X} out of u16 range — skipping", .{rm.dst_usage});
+                continue;
+            };
+            self.seize_ctx.remap_table[rm.src_usage] = dst16;
+        }
+
         const seize = try HidSeize.init(self.allocator, seizeInputCallback, &self.seize_ctx);
         errdefer seize.deinit();
         try seize.setMatches(matches.items);
@@ -477,6 +503,7 @@ const Daemon = struct {
         self.slots = &.{};
         self.seize_ctx.slots = &.{};
         self.seize_ctx.caps_remap_active = false;
+        self.seize_ctx.remap_table = @splat(0);
         // Drop any virtual keys we left held so a re-apply starts clean.
         if (self.vhidd) |v| {
             v.postKeyboardReport(.{}, &.{}) catch {};
@@ -497,11 +524,21 @@ fn listenerCallback(
     c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
 }
 
-fn firstRulesInRuleSet(rs: *const RuleSet) ?[]const protocol.Rule {
+const RulesView = struct {
+    rules: []const protocol.Rule,
+    remaps: []const protocol.Remap,
+};
+
+/// Pick the first uid whose entry has anything to act on (either
+/// tap-hold rules or colon-form remaps). D5 will replace this with
+/// the active console user lookup.
+fn firstRulesInRuleSet(rs: *const RuleSet) ?RulesView {
     var it = rs.per_uid.iterator();
     while (it.next()) |entry| {
-        const rules = entry.value_ptr.*;
-        if (rules.len > 0) return rules;
+        const e = entry.value_ptr;
+        if (e.rules.len > 0 or e.remaps.len > 0) {
+            return .{ .rules = e.rules, .remaps = e.remaps };
+        }
     }
     return null;
 }
@@ -634,6 +671,13 @@ const SeizeCtx = struct {
     /// skip the per-event caps_lock force-off so we don't interfere
     /// with users who haven't remapped caps_lock.
     caps_remap_active: bool = false,
+    /// Colon-form `.remap` table. Indexed by HID usage (page 0x07
+    /// only). Zero means "no remap"; any nonzero value rewrites the
+    /// source usage on its way in. Sized to 0x100 — covers every
+    /// keyboard usage. Allocated once and reused on each rule
+    /// rebuild. We don't device-key this in v1 — typical user has
+    /// one seized device and remaps target it by alias anyway.
+    remap_table: [0x100]u16 = @splat(0),
 };
 
 /// State for the layer-hold sink: a borrowed agent IPC stream + the
@@ -766,12 +810,24 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     // per-slot value, plus status codes 0x00..0x03 (no event /
     // ErrorRollOver / POSTFail / ErrorUndefined). None of those
     // should drive our state machine.
-    const usage16 = std.math.cast(u16, ev.usage) orelse return;
-    if (usage16 < 0x04) return;
+    const raw_usage16 = std.math.cast(u16, ev.usage) orelse return;
+    if (raw_usage16 < 0x04) return;
+
+    // Apply colon-form `.remap` rewrites BEFORE the slots see the
+    // event — hidutil's UserKeyMapping doesn't reach seized devices
+    // (kIOHIDOptionsTypeSeizeDevice bypasses the IOHIDLib filter
+    // chain), so the grabber has to do the substitution itself.
+    const usage16: u16 = blk: {
+        if (raw_usage16 < cx.remap_table.len) {
+            const dst = cx.remap_table[raw_usage16];
+            if (dst != 0) break :blk dst;
+        }
+        break :blk raw_usage16;
+    };
 
     const taphold_event: TapHold.Event = .{
         .usage_page = 0x07,
-        .usage = ev.usage,
+        .usage = usage16,
         .pressed = ev.pressed,
     };
 

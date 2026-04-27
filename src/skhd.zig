@@ -189,10 +189,12 @@ pub fn deinit(self: *Skhd) void {
 /// users without `skhd --install-grabber` still get the rest of
 /// their config running.
 fn forwardTapholdsToGrabber(self: *Skhd) !void {
-    if (self.mappings.tapholds.items.len == 0) return;
+    if (self.mappings.tapholds.items.len == 0 and self.mappings.remaps.items.len == 0) return;
 
     var rules = try std.ArrayList(grabber_protocol.Rule).initCapacity(self.allocator, self.mappings.tapholds.items.len);
     defer rules.deinit();
+    var remaps = try std.ArrayList(grabber_protocol.Remap).initCapacity(self.allocator, self.mappings.remaps.items.len);
+    defer remaps.deinit();
 
     var has_layer_rule = false;
 
@@ -215,11 +217,23 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
         });
     }
 
-    if (rules.items.len == 0) return;
+    for (self.mappings.remaps.items) |rm| {
+        const alias = self.mappings.device_aliases.get(rm.device_alias) orelse {
+            log.warn("remap for src=0x{X:0>2}: device alias '{s}' not in alias map (skip)", .{ rm.src_usage, rm.device_alias });
+            continue;
+        };
+        try remaps.append(.{
+            .src_usage = rm.src_usage,
+            .dst_usage = rm.dst_usage,
+            .device = .{ .vendor = alias.vendor, .product = alias.product },
+        });
+    }
+
+    if (rules.items.len == 0 and remaps.items.len == 0) return;
 
     log.info(
-        "forwarding {d} tap-hold rule(s) to skhd-grabber at {s} (layer_listen={})",
-        .{ rules.items.len, grabber_protocol.default_socket_path, has_layer_rule },
+        "forwarding {d} tap-hold rule(s) and {d} remap(s) to skhd-grabber at {s} (layer_listen={})",
+        .{ rules.items.len, remaps.items.len, grabber_protocol.default_socket_path, has_layer_rule },
     );
 
     const client = try self.allocator.create(agent_grabber_client.Client);
@@ -228,7 +242,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
     errdefer client.close();
 
     try client.hello();
-    try client.applyRules(rules.items);
+    try client.applyRules(rules.items, remaps.items);
 
     if (has_layer_rule) {
         // Keep the connection open — the grabber will push

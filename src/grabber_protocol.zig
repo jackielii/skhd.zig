@@ -11,7 +11,7 @@ pub const default_socket_path = "/var/run/skhd/grabber.sock";
 
 /// Protocol version exchanged in `hello`. Bump when wire format changes
 /// in a non-backwards-compatible way.
-pub const protocol_version: u32 = 1;
+pub const protocol_version: u32 = 2;
 
 /// Maximum size of a single framed message body (1 MiB). Guards against
 /// runaway frames on a misbehaving peer.
@@ -22,6 +22,19 @@ pub const max_frame_bytes: usize = 1 * 1024 * 1024;
 pub const Device = struct {
     vendor: u32,
     product: u32,
+};
+
+/// HID-level colon-form remap (`.remap X [device d] : Y`). Forwarded
+/// to the grabber so it can rewrite the source usage before tap-hold
+/// processing — `kIOHIDOptionsTypeSeizeDevice` bypasses the IOHIDLib
+/// UserKeyMapping that hidutil sets, so colon-form rules can't reach
+/// seized devices through hidutil alone.
+pub const Remap = struct {
+    src_usage: u32,
+    dst_usage: u32,
+    /// Device filter; required (the agent's parser rejects global
+    /// remaps).
+    device: Device,
 };
 
 /// A single tap-hold remap rule. Wire-stable: don't reorder/rename

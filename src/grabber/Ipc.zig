@@ -147,9 +147,30 @@ fn handleApplyRules(
     };
     defer rules_parsed.deinit();
 
-    try ruleset.replaceForUid(uid, rules_parsed.value);
+    // Optional `remaps` array (added in protocol v2). Older agents
+    // omit the field entirely; treat that as an empty list.
+    var remaps_owned: []protocol.Remap = &.{};
+    var remaps_parsed: ?std.json.Parsed([]const protocol.Remap) = null;
+    defer if (remaps_parsed) |*p| p.deinit();
+    if (obj.get("remaps")) |remaps_val| {
+        if (remaps_val != .array) {
+            try sendError(allocator, stream, "bad_apply", "'remaps' must be array");
+            return error.BadApply;
+        }
+        const remaps_json = try std.json.stringifyAlloc(allocator, remaps_val, .{});
+        defer allocator.free(remaps_json);
+        remaps_parsed = std.json.parseFromSlice([]const protocol.Remap, allocator, remaps_json, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| {
+            try sendError(allocator, stream, "bad_apply", @errorName(err));
+            return err;
+        };
+        remaps_owned = @constCast(remaps_parsed.?.value);
+    }
 
-    log.info("apply_rules uid={d} count={d}", .{ uid, rules_parsed.value.len });
+    try ruleset.replaceForUid(uid, rules_parsed.value, remaps_owned);
+
+    log.info("apply_rules uid={d} rules={d} remaps={d}", .{ uid, rules_parsed.value.len, remaps_owned.len });
     for (rules_parsed.value, 0..) |r, i| {
         log.info(
             "  rule[{d}]: src=0x{X:0>2} tap=0x{X:0>2} hold=0x{X:0>2} timeout={d}ms perm={} hokp={} retro={}",
@@ -168,9 +189,15 @@ fn handleApplyRules(
             log.info("    device: vendor=0x{X:0>4} product=0x{X:0>4}", .{ d.vendor, d.product });
         }
     }
+    for (remaps_owned, 0..) |r, i| {
+        log.info(
+            "  remap[{d}]: src=0x{X:0>2} → dst=0x{X:0>2} on vendor=0x{X:0>4} product=0x{X:0>4}",
+            .{ i, r.src_usage, r.dst_usage, r.device.vendor, r.device.product },
+        );
+    }
 
     try sendOk(allocator, stream);
-    return rules_parsed.value.len;
+    return rules_parsed.value.len + remaps_owned.len;
 }
 
 fn sendOk(allocator: std.mem.Allocator, stream: std.net.Stream) !void {

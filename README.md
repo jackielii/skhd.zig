@@ -473,6 +473,119 @@ ctrl - end [
 ```
 
 
+## Device-aware remapping (`.device` + `.remap`)
+
+`.remap` rewrites keys at the HID layer per device. Two forms:
+
+**Colon form** — instant 1:1 swap, applied via `hidutil` (no daemon needed):
+
+```
+# Declare the device once, by VendorID/ProductID.
+.device builtin { vendor: 0x05AC, product: 0x0342 }
+
+# UK ISO MacBook: make § (top-left) act as the ISO grave key, so it types `.
+.remap non_us_backslash [device builtin] : grave
+```
+
+**Block form** — tap-hold semantics (caps_lock → tap=escape / hold=ctrl,
+space → fn_layer, etc.). Goes through `skhd-grabber` (see below) because
+hidutil can't do tap vs. hold.
+
+```
+.remap caps_lock [device builtin] {
+    tap             : escape
+    hold            : lctrl
+    timeout         : 120ms
+    permissive_hold : on
+    retro_tap       : off
+}
+
+.remap space [device builtin] {
+    tap             : space
+    hold            : fn_layer
+    timeout         : 200ms
+    permissive_hold : on
+    retro_tap       : on
+}
+```
+
+Source/destination names use HID-standard physical-position naming
+(layout-independent) — different from the macOS virtual-keycode names
+shown by `skhd -o`. Run `skhd --grabber-status` or check
+`src/HidKeyMap.zig` for the full list. Common: `a-z`, `0-9`, `caps_lock`,
+`escape`, `space`, `return`, `tab`, `backspace`, `lctrl`, `lshift`, `lalt`,
+`lcmd` (and `r*` variants), `f1..f20`, `minus`, `equal`, `lbracket`,
+`rbracket`, `backslash`, `semicolon`, `quote`, `grave`, `comma`,
+`period`, `slash`, `non_us_backslash`.
+
+## skhd-grabber: caps_lock-class tap-hold
+
+macOS's user-level event tap can't see caps_lock or rewrite it cleanly
+without LED toggle artifacts. Block-form `.remap` rules go through a
+small system daemon (`skhd-grabber`) that runs as root, seizes the
+matched keyboard via IOHIDManager, and injects through the Karabiner
+DriverKit virtual HID device.
+
+### Install
+
+```bash
+# Single command — installs the per-user agent, then prompts to install
+# the system grabber if your config has caps_lock-class rules and the
+# target device is connected.
+skhd --install-service
+```
+
+If you want to install the grabber separately (or the prompt didn't fire):
+
+```bash
+sudo skhd --install-grabber
+```
+
+Diagnostic walk-through of every prerequisite:
+
+```bash
+skhd --grabber-status
+```
+
+### Dependencies
+
+`skhd-grabber` requires the **Karabiner DriverKit VirtualHIDDevice**
+extension to inject HID events:
+
+  https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice
+
+Install the dext, approve it in System Settings → Privacy & Security,
+then run `skhd --install-grabber`.
+
+### Mac Studio / external keyboard only
+
+If you share one config across a laptop and a desktop, `.remap`
+block-form rules targeting the laptop's built-in keyboard simply
+don't fire on the desktop — `--install-service` and the agent both
+detect that the target device isn't connected and skip the grabber
+entirely on that machine. No need to install the grabber or the dext
+on a machine that doesn't need them.
+
+### Caveats
+
+- **Signing**: setting `HIDKeyboardCapsLockDelayOverride` requires an
+  Apple Developer ID signature. Unsigned builds fall back to a reactive
+  workaround: the grabber reads the OS caps_lock state via
+  `CGEventSourceFlagsState` and, when Apple's firmware-level toggle
+  fires, injects a vhidd caps_lock toggle to flip it back. Works
+  cleanly in practice (no LED flash); see `src/grabber/HidSeize.zig`
+  for the rationale.
+- **Coexistence**: `skhd-grabber` and Karabiner-Elements both want
+  exclusive seize on the same keyboard. If you're running Karabiner-
+  Elements, disable its `karabiner_grabber` daemon
+  (`sudo launchctl bootout system/org.pqrs.service.daemon.karabiner_grabber`)
+  before starting `skhd-grabber`.
+- **F-row behavior**: with macOS's "Use F1, F2..." setting **off**
+  (default), the grabber translates F1..F12 keyboard events to the
+  appropriate Consumer / Apple-Vendor media events (volume,
+  brightness, mission control, …) so the F-row stays "media keys"
+  under seize.
+
 ## Testing and Debugging
 
 ### Debug vs Release Builds

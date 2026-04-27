@@ -6,10 +6,17 @@
 //! the upper 32 bits are the usage page and the lower 32 bits are the
 //! usage. `fullUsage(usage)` packs the keyboard page (0x07) for callers.
 //!
-//! Only the keysyms relevant to typical remap targets are listed —
-//! modifiers, caps_lock, escape, space, return, tab, delete, F-keys,
-//! and the F18/F19/F20 proxy slots used by Phase 3 to intercept toggle-
-//! quirky keys like caps_lock. A and 1 are included for tests.
+//! Names are HID-standard (physical-position, layout-independent) and
+//! deliberately differ from skhd's macOS-virtual-keycode names you see
+//! in `skhd -o` output. Examples:
+//!   - `grave` here = HID 0x35 = the top-left key. On US that's
+//!     `` ` /~ ``; on UK ISO it's `§/±`.
+//!   - `non_us_backslash` = HID 0x64 = the ISO-only key between left
+//!     shift and `Z`. UK ISO sends `` ` /~ `` from this key.
+//!
+//! When a `.remap` lookup fails, the parser error lists every name in
+//! this table so users can discover the right one without reading the
+//! source.
 const std = @import("std");
 
 pub const HID_PAGE_KEYBOARD: u64 = 0x07;
@@ -27,9 +34,16 @@ pub fn lookup(name: []const u8) ?u32 {
     return Map.get(name);
 }
 
-/// Static name → usage table. Names match skhd's existing literal
-/// keycode strings and modifier names so the user writes config the
-/// same way they do for hotkeys.
+/// All known names in declaration order. Used by the parser to list
+/// available names when a `.remap` source or destination doesn't
+/// resolve.
+pub fn knownNames() []const []const u8 {
+    return Map.keys();
+}
+
+/// Static name → usage table. HID-standard physical-position names —
+/// see the file-level comment for how these differ from skhd's macOS
+/// virtual-keycode names.
 const Map = std.StaticStringMap(u32).initComptime(&.{
     // Modifiers
     .{ "lctrl", 0xE0 },
@@ -66,10 +80,35 @@ const Map = std.StaticStringMap(u32).initComptime(&.{
     .{ "f13", 0x68 }, .{ "f14", 0x69 }, .{ "f15", 0x6A }, .{ "f16", 0x6B },
     .{ "f17", 0x6C }, .{ "f18", 0x6D }, .{ "f19", 0x6E }, .{ "f20", 0x6F },
 
-    // Letters/digits — for tests and the rare user that wants to remap
-    // alphanumeric keys directly. Add more on demand.
-    .{ "a", 0x04 }, .{ "b", 0x05 }, .{ "c", 0x06 },
-    .{ "0", 0x27 }, .{ "1", 0x1E }, .{ "2", 0x1F },
+    // Letters
+    .{ "a", 0x04 }, .{ "b", 0x05 }, .{ "c", 0x06 }, .{ "d", 0x07 },
+    .{ "e", 0x08 }, .{ "f", 0x09 }, .{ "g", 0x0A }, .{ "h", 0x0B },
+    .{ "i", 0x0C }, .{ "j", 0x0D }, .{ "k", 0x0E }, .{ "l", 0x0F },
+    .{ "m", 0x10 }, .{ "n", 0x11 }, .{ "o", 0x12 }, .{ "p", 0x13 },
+    .{ "q", 0x14 }, .{ "r", 0x15 }, .{ "s", 0x16 }, .{ "t", 0x17 },
+    .{ "u", 0x18 }, .{ "v", 0x19 }, .{ "w", 0x1A }, .{ "x", 0x1B },
+    .{ "y", 0x1C }, .{ "z", 0x1D },
+
+    // Digits (top row)
+    .{ "1", 0x1E }, .{ "2", 0x1F }, .{ "3", 0x20 }, .{ "4", 0x21 },
+    .{ "5", 0x22 }, .{ "6", 0x23 }, .{ "7", 0x24 }, .{ "8", 0x25 },
+    .{ "9", 0x26 }, .{ "0", 0x27 },
+
+    // Punctuation (US layout positions; HID is layout-independent so
+    // these refer to physical keys, not character output).
+    .{ "minus",            0x2D }, // -/_  (right of 0)
+    .{ "equal",            0x2E }, // =/+
+    .{ "lbracket",         0x2F }, // [/{
+    .{ "rbracket",         0x30 }, // ]/}
+    .{ "backslash",        0x31 }, // \/| (US, above return)
+    .{ "non_us_hash",      0x32 }, // # on some ISO layouts (rarely needed)
+    .{ "semicolon",        0x33 }, // ;/:
+    .{ "quote",            0x34 }, // '/"
+    .{ "grave",            0x35 }, // top-left key — `/~ on US, §/± on UK ISO
+    .{ "comma",            0x36 }, // ,/<
+    .{ "period",           0x37 }, // ./>
+    .{ "slash",            0x38 }, // ///
+    .{ "non_us_backslash", 0x64 }, // ISO-only key between L-shift and Z
 });
 
 test "lookup returns expected HID usage codes" {

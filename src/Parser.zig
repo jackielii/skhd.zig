@@ -1153,6 +1153,19 @@ fn resolveLoadPath(self: *Parser, filename: []const u8) ![]const u8 {
     return try self.allocator.dupe(u8, filename);
 }
 
+/// Build a comma-separated list of every HID name we accept in
+/// `.remap`. Used in error messages so the user can see the full set
+/// without reading source.
+fn formatHidKeyNames(allocator: std.mem.Allocator) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    for (HidKeyMap.knownNames(), 0..) |n, i| {
+        if (i != 0) try buf.appendSlice(allocator, ", ");
+        try buf.appendSlice(allocator, n);
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
 /// Parse `.remap <src> [device <alias>]` followed by either `:` (colon
 /// form, simple HID-level remap) or `{ ... }` (block form, tap-hold).
 /// Required device guard: global remaps would clobber other keyboards.
@@ -1171,7 +1184,9 @@ fn parse_remap_decl(self: *Parser, mappings: *Mappings) !void {
     self.advance();
 
     const src_usage = HidKeyMap.lookup(src_token.text) orelse {
-        const msg = try std.fmt.allocPrint(self.allocator, "Source '{s}' has no HID-level mapping. Supported names live in src/HidKeyMap.zig — add it there if needed.", .{src_token.text});
+        const names = try formatHidKeyNames(self.allocator);
+        defer self.allocator.free(names);
+        const msg = try std.fmt.allocPrint(self.allocator, "Source '{s}' has no HID-level mapping. Use HID-standard names (physical-position, layout-independent — different from skhd -o output). Available names: {s}", .{ src_token.text, names });
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
         return error.ParseErrorOccurred;
@@ -1232,7 +1247,9 @@ fn parse_remap_decl(self: *Parser, mappings: *Mappings) !void {
         return error.ParseErrorOccurred;
     }
     const dst_usage = HidKeyMap.lookup(dst_name) orelse {
-        const msg = try std.fmt.allocPrint(self.allocator, "Destination '{s}' has no HID-level mapping. Supported names live in src/HidKeyMap.zig.", .{dst_name});
+        const names = try formatHidKeyNames(self.allocator);
+        defer self.allocator.free(names);
+        const msg = try std.fmt.allocPrint(self.allocator, "Destination '{s}' has no HID-level mapping. Use HID-standard names (different from skhd -o output). Available names: {s}", .{ dst_name, names });
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, dst_token, msg, self.current_file_path);
         return error.ParseErrorOccurred;

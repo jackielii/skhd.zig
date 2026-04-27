@@ -107,6 +107,14 @@ sink_ctx: ?*anyopaque,
 layer_sink: ?LayerSink = null,
 layer_sink_ctx: ?*anyopaque = null,
 buffer: std.BoundedArray(Event, max_buffered_events) = .{},
+/// HID usages currently parked in `buffer` as a still-pressed down
+/// (not yet matched by an up). Used to decide whether an arriving
+/// key-up should be buffered (its down was buffered, replay them
+/// together to preserve order) or passed through immediately (its
+/// down was emitted before the pending window — buffering the up
+/// would let the OS see the key as held for the entire pending
+/// window and autorepeat it).
+buffered_downs: std.BoundedArray(u16, max_buffered_events) = .{},
 /// Whether any non-source key event has been seen since this rule
 /// last entered pending. Drives `retro_tap` (emit tap on release if
 /// nothing else was pressed during the hold).
@@ -182,11 +190,36 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
             // treats a nested tap as proof of intent-to-hold (used by
             // modifier-style rules; doesn't fit layer holds well).
             if (self.isLayer() or self.rule.permissive_hold) {
+                const ev_usage16: u16 = std.math.cast(u16, ev.usage) orelse 0;
+                if (!ev.pressed) {
+                    // For an UP event, only buffer if the matching
+                    // DOWN was also buffered. Otherwise the down is
+                    // already at the OS and delaying the up would
+                    // let the OS see the key as held for the entire
+                    // pending window — at which point autorepeat
+                    // fires and a single physical press shows up as
+                    // many characters.
+                    var down_was_buffered = false;
+                    for (self.buffered_downs.constSlice(), 0..) |u, i| {
+                        if (u == ev_usage16) {
+                            _ = self.buffered_downs.swapRemove(i);
+                            down_was_buffered = true;
+                            break;
+                        }
+                    }
+                    if (!down_was_buffered) {
+                        log.info("pass-through up: src=0x{X:0>2} usage=0x{X:0>2} (down was external)", .{ self.rule.src_usage, ev.usage });
+                        return .{ .disposition = .pass, .timer = .none };
+                    }
+                }
                 self.buffer.append(ev) catch {
                     log.warn("buffer overflow — flushing as tap", .{});
                     self.commitTap();
                     return .{ .disposition = .pass, .timer = .cancel };
                 };
+                if (ev.pressed) {
+                    self.buffered_downs.append(ev_usage16) catch {};
+                }
                 log.info("buffer: slot src=0x{X:0>2} +usage=0x{X:0>2} pressed={} (depth={d})", .{ self.rule.src_usage, ev.usage, ev.pressed, self.buffer.len });
                 if (self.rule.permissive_hold and !self.isLayer() and !ev.pressed) {
                     // Modifier-style permissive_hold: nested down+up
@@ -307,6 +340,7 @@ fn flushBuffer(self: *Self) void {
         self.sink(self.sink_ctx, ev);
     }
     self.buffer.clear();
+    self.buffered_downs.clear();
 }
 
 // ─── tests ───────────────────────────────────────────────────────
@@ -659,4 +693,75 @@ test "non-source events while idle: pass through, FSM untouched" {
     try std.testing.expectEqual(TimerAction.none, r.timer);
     try std.testing.expectEqual(@as(usize, 0), sink.out.items.len);
     try std.testing.expectEqual(State.idle, eng.state);
+}
+
+test "key released during pending: pass-through if its down was already at OS" {
+    // Regression for the "single press fires N times" bug. User
+    // presses 's' (slot idle, emitted directly). Then presses
+    // source (slot enters pending). Then releases 's'. The old code
+    // buffered the s-up — delaying it until source-up — and the OS
+    // saw 's' as held for the entire pending window, autorepeating
+    // it. Fix: pass-through nested-up if its matching down wasn't
+    // also buffered.
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var eng = init(.{
+        .src_usage = 0x2C,
+        .tap_usage = 0x2C,
+        .hold = .{ .layer = "fn_layer" },
+        .permissive_hold = true,
+    }, TestSink.callback, &sink);
+
+    // s-down arrives idle → pass-through (caller's responsibility
+    // to emit; we just verify disposition).
+    const r0 = eng.feed(kbev(0x16, true));
+    try std.testing.expectEqual(Disposition.pass, r0.disposition);
+
+    // Source down → pending.
+    _ = eng.feed(kbev(0x2C, true));
+
+    // s-up arrives during pending. s-down was external (not
+    // buffered) so the up must pass-through, NOT buffer.
+    const r1 = eng.feed(kbev(0x16, false));
+    try std.testing.expectEqual(Disposition.pass, r1.disposition);
+
+    // Source-up before timeout → tap path. Buffer is empty.
+    _ = eng.feed(kbev(0x2C, false));
+    // Output: just the source tap pair. No replay of the s.
+    try std.testing.expectEqual(@as(usize, 2), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0x2C), sink.out.items[0].usage);
+    try std.testing.expectEqual(@as(u32, 0x2C), sink.out.items[1].usage);
+}
+
+test "key pressed AND released during pending: both buffered, replayed in order" {
+    // The well-behaved case (and the one we mustn't break with the
+    // pass-through fix above): a nested key fully tapped inside the
+    // pending window should still be buffered, so the source-tap
+    // replay preserves "source-then-key" ordering.
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var eng = init(.{
+        .src_usage = 0x2C,
+        .tap_usage = 0x2C,
+        .hold = .{ .layer = "fn_layer" },
+        .permissive_hold = true,
+    }, TestSink.callback, &sink);
+
+    _ = eng.feed(kbev(0x2C, true)); // source down
+    const rd = eng.feed(kbev(0x16, true)); // s-down during pending
+    try std.testing.expectEqual(Disposition.consumed, rd.disposition);
+    const ru = eng.feed(kbev(0x16, false)); // s-up during pending — should buffer
+    try std.testing.expectEqual(Disposition.consumed, ru.disposition);
+    _ = eng.feed(kbev(0x2C, false)); // source up → tap
+
+    // Output: source tap, then s pair.
+    try std.testing.expectEqual(@as(usize, 4), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0x2C), sink.out.items[0].usage);
+    try std.testing.expect(sink.out.items[0].pressed);
+    try std.testing.expectEqual(@as(u32, 0x2C), sink.out.items[1].usage);
+    try std.testing.expect(!sink.out.items[1].pressed);
+    try std.testing.expectEqual(@as(u32, 0x16), sink.out.items[2].usage);
+    try std.testing.expect(sink.out.items[2].pressed);
+    try std.testing.expectEqual(@as(u32, 0x16), sink.out.items[3].usage);
+    try std.testing.expect(!sink.out.items[3].pressed);
 }

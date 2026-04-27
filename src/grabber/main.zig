@@ -986,6 +986,8 @@ fn emitToVhidd(ctx_ptr: ?*anyopaque, ev: TapHold.Event) void {
     if (usage16 < 0x04) return;
     if (!cx.state.applyKeyboardEvent(usage16, ev.pressed)) return;
 
+    log.info("emit: usage=0x{X:0>2} pressed={}", .{ usage16, ev.pressed });
+
     const held = cx.state.compactedKeys();
     cx.vhidd.postKeyboardReport(cx.state.modifiers, held) catch |err| {
         log.warn("vhidd post failed: {s}", .{@errorName(err)});

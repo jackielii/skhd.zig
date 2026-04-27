@@ -187,6 +187,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                     self.commitTap();
                     return .{ .disposition = .pass, .timer = .cancel };
                 };
+                log.info("buffer: slot src=0x{X:0>2} +usage=0x{X:0>2} pressed={} (depth={d})", .{ self.rule.src_usage, ev.usage, ev.pressed, self.buffer.len });
                 if (self.rule.permissive_hold and !self.isLayer() and !ev.pressed) {
                     // Modifier-style permissive_hold: nested down+up
                     // commits hold and replays the inner key under
@@ -299,6 +300,9 @@ fn emit(self: *Self, usage: u16, pressed: bool) void {
 }
 
 fn flushBuffer(self: *Self) void {
+    if (self.buffer.len > 0) {
+        log.info("flush: slot src=0x{X:0>2} replaying {d} buffered event(s)", .{ self.rule.src_usage, self.buffer.len });
+    }
     for (self.buffer.constSlice()) |ev| {
         self.sink(self.sink_ctx, ev);
     }

@@ -95,6 +95,10 @@ pub fn build(b: *std.Build) void {
     });
     grabber_exe.linkFramework("IOKit");
     grabber_exe.linkFramework("CoreFoundation");
+    // CoreGraphics for CGEventSourceFlagsState — used to detect when
+    // Apple firmware has toggled caps_lock against our intent so we
+    // can flip it back via a vhidd-injected caps_lock toggle.
+    grabber_exe.linkFramework("CoreGraphics");
     grabber_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     b.installArtifact(grabber_exe);
 

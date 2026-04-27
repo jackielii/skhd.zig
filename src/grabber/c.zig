@@ -228,6 +228,17 @@ pub extern fn IOObjectRelease(object: io_object_t) IOReturn;
 pub extern fn IOHIDSetModifierLockState(handle: io_connect_t, selector: c_int, state: u8) IOReturn;
 pub extern fn IOHIDGetModifierLockState(handle: io_connect_t, selector: c_int, state: *u8) IOReturn;
 
+// CoreGraphics — read-only access to the system's modifier state.
+// Used to detect when Apple's firmware-level caps_lock toggle has
+// fired against our intent (so we can flip it back via a vhidd-
+// injected caps_lock toggle). Read-only call works for any process;
+// the matching IOHIDSetModifierLockState write does not.
+pub const CGEventFlags = u64;
+pub const CGEventSourceStateID = c_int;
+pub const kCGEventSourceStateHIDSystemState: CGEventSourceStateID = 1;
+pub const kCGEventFlagMaskAlphaShift: CGEventFlags = 0x10000;
+pub extern fn CGEventSourceFlagsState(stateID: CGEventSourceStateID) CGEventFlags;
+
 // libc bits (geteuid for the seize permission check).
 pub extern fn geteuid() c_uint;
 

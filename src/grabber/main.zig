@@ -947,13 +947,26 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
         if (r.disposition == .consumed) any_consumed = true;
     }
 
-    // Apple firmware caps_lock neutralization. When caps_lock is the
-    // source of an active remap rule, force the OS-level caps_lock
-    // state off on every caps_lock event from the seized keyboard —
-    // covers both the press (preemptive) and the release (which
-    // happens after the firmware's ~150ms toggle would have fired).
+    // Apple firmware caps_lock neutralization. The proper fix
+    // (HIDKeyboardCapsLockDelayOverride=0 via IOHIDServiceClient or
+    // IOHIDSetModifierLockState) is gated on a real Apple Developer
+    // ID signature — both fail silently on self-signed binaries.
+    // Fallback: read the OS-level caps_lock state via the still-open
+    // CGEventSource API and, if Apple's firmware has toggled it,
+    // inject a vhidd caps_lock toggle to flip it back. Visible as a
+    // brief LED flash on long holds; clean otherwise.
     if (usage16 == 0x39 and cx.caps_remap_active) {
-        if (cx.hidsystem) |*hs| hs.setCapsLockState(false);
+        if (cx.hidsystem) |*hs| hs.setCapsLockState(false); // no-op when unsigned
+        const flags = c.CGEventSourceFlagsState(c.kCGEventSourceStateHIDSystemState);
+        if ((flags & c.kCGEventFlagMaskAlphaShift) != 0) {
+            log.info("caps_lock toggled by firmware — injecting vhidd toggle to flip off", .{});
+            // Apply the toggle to KbState so the next vhidd report
+            // reflects it correctly, then post.
+            _ = cx.state.applyKeyboardEvent(0x39, true);
+            cx.vhidd.postKeyboardReport(cx.state.modifiers, cx.state.compactedKeys()) catch {};
+            _ = cx.state.applyKeyboardEvent(0x39, false);
+            cx.vhidd.postKeyboardReport(cx.state.modifiers, cx.state.compactedKeys()) catch {};
+        }
     }
 
     if (any_consumed) return;

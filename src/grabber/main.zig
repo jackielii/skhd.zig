@@ -1199,8 +1199,32 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
         .pressed = ev.pressed,
     };
 
+    // Build the set of source-key usages currently in .pending
+    // across all slots. If the event we're about to dispatch is a
+    // fellow source (i.e. the source key of *another* slot that's
+    // currently pending), the foreign slot must NOT buffer it —
+    // letting it do so leads to double-emit pathologies (e.g. user
+    // presses caps+space; caps's pending buffer captures space-down,
+    // and on caps's hold-commit it replays space-down to the OS,
+    // which sees space held under ctrl and autorepeats). The slot
+    // whose own source matches still processes normally.
+    var pending_sources: std.BoundedArray(u16, 8) = .{};
+    for (cx.slots) |*slot| {
+        if (slot.engine.state == .pending) {
+            pending_sources.append(slot.engine.rule.src_usage) catch {};
+        }
+    }
+    const event_is_fellow_source = blk: for (pending_sources.constSlice()) |u| {
+        if (u == usage16) break :blk true;
+    } else false;
+
     var any_consumed = false;
     for (cx.slots) |*slot| {
+        if (event_is_fellow_source and slot.engine.rule.src_usage != usage16) {
+            // Another slot's source key — let it handle it; we stay
+            // out of the way so we don't snapshot it into our buffer.
+            continue;
+        }
         const r = slot.engine.feed(taphold_event);
         applyTapHoldTimer(slot, r.timer);
         if (r.disposition == .consumed) any_consumed = true;

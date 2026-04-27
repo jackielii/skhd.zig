@@ -7,6 +7,9 @@ fn linkFrameworks(exe: *std.Build.Step.Compile) void {
     // ServiceManagement: SMAppService.agent / register / unregister, used
     // by --register-service to register the bundled LaunchAgent with BTM.
     exe.linkFramework("ServiceManagement");
+    // IOKit: IOHIDManager enumeration in DeviceCheck.zig (decides
+    // whether to dial the grabber based on connected devices).
+    exe.linkFramework("IOKit");
 }
 
 fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {

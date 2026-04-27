@@ -8,6 +8,7 @@ const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
 const grabber_protocol = @import("grabber_protocol");
+const DeviceCheck = @import("DeviceCheck.zig");
 const Hidutil = @import("Hidutil.zig");
 const Hotkey = @import("Hotkey.zig");
 const Hotload = @import("Hotload.zig");
@@ -191,18 +192,46 @@ pub fn deinit(self: *Skhd) void {
 fn forwardTapholdsToGrabber(self: *Skhd) !void {
     if (self.mappings.tapholds.items.len == 0 and self.mappings.remaps.items.len == 0) return;
 
+    // Build a presence cache keyed by device alias so we don't enumerate
+    // HID twice for the same alias. A rule whose device isn't connected
+    // is silently dropped — the grabber would log "matched 0 devices"
+    // and the user-facing UX would be a "grabber not running" warning
+    // on machines (e.g. a Mac Studio) that share the config but lack
+    // the targeted built-in keyboard.
+    var present = std.StringHashMap(bool).init(self.allocator);
+    defer present.deinit();
+
+    const aliasPresent = struct {
+        fn check(
+            mappings: *const Mappings,
+            cache: *std.StringHashMap(bool),
+            alias_name: []const u8,
+        ) bool {
+            if (cache.get(alias_name)) |v| return v;
+            const alias = mappings.device_aliases.get(alias_name) orelse return false;
+            const ok = DeviceCheck.isPresent(alias.vendor, alias.product);
+            cache.put(alias_name, ok) catch {};
+            return ok;
+        }
+    }.check;
+
     var rules = try std.ArrayList(grabber_protocol.Rule).initCapacity(self.allocator, self.mappings.tapholds.items.len);
     defer rules.deinit();
     var remaps = try std.ArrayList(grabber_protocol.Remap).initCapacity(self.allocator, self.mappings.remaps.items.len);
     defer remaps.deinit();
 
     var has_layer_rule = false;
+    var skipped_absent: usize = 0;
 
     for (self.mappings.tapholds.items) |th| {
         const alias = self.mappings.device_aliases.get(th.device_alias) orelse {
             log.warn("taphold for src=0x{X:0>2}: device alias '{s}' not in alias map (skip)", .{ th.src_usage, th.device_alias });
             continue;
         };
+        if (!aliasPresent(&self.mappings, &present, th.device_alias)) {
+            skipped_absent += 1;
+            continue;
+        }
         if (th.hold_layer != null) has_layer_rule = true;
         try rules.append(.{
             .src_usage = th.src_usage,
@@ -222,6 +251,10 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
             log.warn("remap for src=0x{X:0>2}: device alias '{s}' not in alias map (skip)", .{ rm.src_usage, rm.device_alias });
             continue;
         };
+        if (!aliasPresent(&self.mappings, &present, rm.device_alias)) {
+            skipped_absent += 1;
+            continue;
+        }
         try remaps.append(.{
             .src_usage = rm.src_usage,
             .dst_usage = rm.dst_usage,
@@ -229,6 +262,9 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
         });
     }
 
+    if (skipped_absent > 0) {
+        log.info("skipped {d} grabber rule(s) — target device not connected", .{skipped_absent});
+    }
     if (rules.items.len == 0 and remaps.items.len == 0) return;
 
     log.info(

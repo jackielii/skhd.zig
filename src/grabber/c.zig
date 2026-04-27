@@ -228,6 +228,25 @@ pub extern fn IOObjectRelease(object: io_object_t) IOReturn;
 pub extern fn IOHIDSetModifierLockState(handle: io_connect_t, selector: c_int, state: u8) IOReturn;
 pub extern fn IOHIDGetModifierLockState(handle: io_connect_t, selector: c_int, state: *u8) IOReturn;
 
+// SystemConfiguration — read the active console user uid. D5 uses
+// this to apply rules only from the foreground user's agent (so
+// fast-user-switching doesn't get caps_lock-as-ctrl set up by a
+// background user's stored rules).
+//
+// We poll on a CFRunLoopTimer rather than subscribing to change
+// notifications — one syscall every few seconds is cheaper than the
+// SC notification dance and the responsiveness is fine for
+// user-switch (humans don't notice 3s).
+pub const SCDynamicStoreRef = ?*anyopaque;
+pub const uid_t = u32;
+pub const gid_t = u32;
+
+pub extern fn SCDynamicStoreCopyConsoleUser(
+    store: SCDynamicStoreRef,
+    uid_out: ?*uid_t,
+    gid_out: ?*gid_t,
+) CFStringRef;
+
 // CoreGraphics — read-only access to the system's modifier state.
 // Used to detect when Apple's firmware-level caps_lock toggle has
 // fired against our intent (so we can flip it back via a vhidd-

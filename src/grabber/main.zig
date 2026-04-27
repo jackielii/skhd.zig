@@ -204,6 +204,17 @@ const Daemon = struct {
     seize_ctx: SeizeCtx,
     layer_ctx: LayerPushCtx,
 
+    /// Active console user (foreground session). Rules from agents
+    /// running in *other* sessions get stored in the RuleSet but
+    /// not applied — only this uid's rules drive seize/vhidd. Null
+    /// means "no console user" (login window, etc.); seize stays
+    /// torn down. D5: fast-user-switching support.
+    active_uid: ?u32 = null,
+    /// CFRunLoopTimer that re-queries the console user every few
+    /// seconds. On change, applyLatestRules rebuilds from the new
+    /// uid's stored rules (or tears down if they have none).
+    console_user_timer: c.CFRunLoopTimerRef = null,
+
     pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) !Daemon {
         try ensureSocketParentDir(socket_path);
         // Stale socket from a crashed previous run: bind() would EADDRINUSE.
@@ -231,6 +242,13 @@ const Daemon = struct {
             break :blk null;
         };
 
+        const initial_uid = currentConsoleUid();
+        if (initial_uid) |u| {
+            log.info("active console user: uid={d}", .{u});
+        } else {
+            log.info("no active console user at startup (login window?)", .{});
+        }
+
         return .{
             .allocator = allocator,
             .socket_path = socket_path,
@@ -243,10 +261,12 @@ const Daemon = struct {
                 .hidsystem = hidsystem,
             },
             .layer_ctx = .{ .stream = null, .allocator = allocator },
+            .active_uid = initial_uid,
         };
     }
 
     pub fn deinit(self: *Daemon) void {
+        self.stopConsoleUserTimer();
         self.teardownSeize();
         if (self.vhidd) |v| {
             v.close();
@@ -279,6 +299,7 @@ const Daemon = struct {
             log.err("failed to start IPC listener: {s}", .{@errorName(err)});
             return;
         };
+        self.startConsoleUserTimer();
 
         log.info("listening on {s}", .{self.socket_path});
 
@@ -329,33 +350,44 @@ const Daemon = struct {
             break :blk Ipc.ServeResult.closed;
         };
 
-        if (result == .rules_applied) {
-            self.applyLatestRules(conn.stream) catch |err| {
-                log.err("applyLatestRules failed: {s}", .{@errorName(err)});
-                conn.stream.close();
-            };
-        } else {
-            conn.stream.close();
+        switch (result) {
+            .closed => conn.stream.close(),
+            .rules_applied => |sender_uid| {
+                if (self.active_uid == null or sender_uid != self.active_uid.?) {
+                    log.info("rules from uid={d} stored but not applied (active console user is {?d})", .{ sender_uid, self.active_uid });
+                    conn.stream.close();
+                    return;
+                }
+                self.applyLatestRules(conn.stream) catch |err| {
+                    log.err("applyLatestRules failed: {s}", .{@errorName(err)});
+                    conn.stream.close();
+                };
+            },
         }
     }
 
-    /// (Re)build vhidd / seize / engine slots from whatever rules the
-    /// ruleset currently holds. `agent_conn` is the connection that
-    /// just sent apply_rules — used as the layer-push target if any
-    /// rule is a layer-hold rule. Ownership of `agent_conn` transfers
-    /// here; on exit it's either kept (layer rules present) or
-    /// closed.
-    fn applyLatestRules(self: *Daemon, agent_conn: std.net.Stream) !void {
-        const view = firstRulesInRuleSet(&self.ruleset) orelse {
-            // Empty rule set after apply: tear everything down so we
-            // stop seizing devices.
-            log.info("apply_rules cleared the rule set — releasing seize", .{});
+    /// (Re)build vhidd / seize / engine slots from the active console
+    /// user's stored rules. `maybe_agent_conn` is the connection that
+    /// just sent apply_rules (used as the layer-push target if any
+    /// rule is a layer-hold rule); null when called from a console-
+    /// user change event, in which case there's no live agent
+    /// connection and layer push is silenced until that user's agent
+    /// reconnects.
+    fn applyLatestRules(self: *Daemon, maybe_agent_conn: ?std.net.Stream) !void {
+        const uid = self.active_uid orelse {
+            log.info("no active console user — keeping seize torn down", .{});
             self.teardownSeize();
-            agent_conn.close();
+            if (maybe_agent_conn) |conn| conn.close();
             return;
         };
-        const rules = view.rules;
-        const remaps = view.remaps;
+        const rules = self.ruleset.rulesForUid(uid);
+        const remaps = self.ruleset.remapsForUid(uid);
+        if (rules.len == 0 and remaps.len == 0) {
+            log.info("uid={d}: no rules to apply — releasing seize", .{uid});
+            self.teardownSeize();
+            if (maybe_agent_conn) |conn| conn.close();
+            return;
+        }
 
         var has_layer_rule = false;
         var matches = std.ArrayList(HidSeize.Match).init(self.allocator);
@@ -373,7 +405,7 @@ const Daemon = struct {
         for (rules) |rule| {
             const dev = rule.device orelse {
                 log.err("rule src=0x{X:0>2} has no device match — global seize not supported yet", .{rule.src_usage});
-                agent_conn.close();
+                if (maybe_agent_conn) |conn| conn.close();
                 return error.MissingDevice;
             };
             if (rule.hold_layer != null) has_layer_rule = true;
@@ -413,11 +445,11 @@ const Daemon = struct {
         // Swap layer push target — close the previous agent
         // connection so the agent's old listener cleans up.
         if (self.agent_layer_conn) |old| old.close();
-        if (has_layer_rule) {
-            self.agent_layer_conn = agent_conn;
+        if (has_layer_rule and maybe_agent_conn != null) {
+            self.agent_layer_conn = maybe_agent_conn;
         } else {
             self.agent_layer_conn = null;
-            agent_conn.close();
+            if (maybe_agent_conn) |conn| conn.close();
         }
         self.layer_ctx.stream = self.agent_layer_conn;
 
@@ -517,7 +549,64 @@ const Daemon = struct {
             v.postGenericDesktopReport(&.{}) catch {};
         }
     }
+
+    /// Poll the active console user every 3 seconds. On change, log
+    /// the transition and rebuild seize from the new uid's stored
+    /// rules (or tear down if they have none). Polling is much
+    /// simpler than SCDynamicStore notification subscription and the
+    /// 3s latency is well within human-noticeable limits for a
+    /// fast-user-switch.
+    fn startConsoleUserTimer(self: *Daemon) void {
+        if (self.console_user_timer != null) return;
+        var ctx: c.CFRunLoopTimerContext = .{
+            .version = 0,
+            .info = self,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+        const interval: f64 = 3.0;
+        const fire_at = c.CFAbsoluteTimeGetCurrent() + interval;
+        self.console_user_timer = c.CFRunLoopTimerCreate(
+            c.kCFAllocatorDefault,
+            fire_at,
+            interval,
+            0,
+            0,
+            consoleUserTimerCallback,
+            &ctx,
+        );
+        if (self.console_user_timer == null) {
+            log.warn("could not create console_user timer; fast-user-switching may not be picked up", .{});
+            return;
+        }
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), self.console_user_timer, c.kCFRunLoopDefaultMode);
+    }
+
+    fn stopConsoleUserTimer(self: *Daemon) void {
+        if (self.console_user_timer) |t| {
+            c.CFRunLoopTimerInvalidate(t);
+            c.CFRelease(t);
+            self.console_user_timer = null;
+        }
+    }
 };
+
+fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    const new_uid = currentConsoleUid();
+    if (new_uid == d.active_uid) return; // no change
+
+    log.info("active console user changed: {?d} → {?d}", .{ d.active_uid, new_uid });
+    d.active_uid = new_uid;
+    // Rebuild from the (possibly new) uid's rules. No agent_conn
+    // because this rebuild isn't triggered by an agent message —
+    // when the new user's agent next sends apply_rules, that path
+    // wires up layer push.
+    d.applyLatestRules(null) catch |err| {
+        log.warn("rebuild after console user change failed: {s}", .{@errorName(err)});
+    };
+}
 
 fn listenerCallback(
     cf_fd: c.CFFileDescriptorRef,
@@ -532,23 +621,20 @@ fn listenerCallback(
     c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
 }
 
-const RulesView = struct {
-    rules: []const protocol.Rule,
-    remaps: []const protocol.Remap,
-};
-
-/// Pick the first uid whose entry has anything to act on (either
-/// tap-hold rules or colon-form remaps). D5 will replace this with
-/// the active console user lookup.
-fn firstRulesInRuleSet(rs: *const RuleSet) ?RulesView {
-    var it = rs.per_uid.iterator();
-    while (it.next()) |entry| {
-        const e = entry.value_ptr;
-        if (e.rules.len > 0 or e.remaps.len > 0) {
-            return .{ .rules = e.rules, .remaps = e.remaps };
-        }
-    }
-    return null;
+/// Read the current foreground console user uid, or null at the
+/// login window (no user logged in graphically). Calls
+/// SCDynamicStoreCopyConsoleUser with a null store, the canonical
+/// "just give me the current value, no subscription" form.
+fn currentConsoleUid() ?u32 {
+    var uid: c.uid_t = 0;
+    const name = c.SCDynamicStoreCopyConsoleUser(null, &uid, null);
+    if (name == null) return null;
+    c.CFRelease(name);
+    // SCDynamicStoreCopyConsoleUser returns "loginwindow" with uid=0
+    // at the login screen. Treat any uid < 500 (system uids) as
+    // "no console user" — real users on macOS start at 501.
+    if (uid < 500) return null;
+    return @intCast(uid);
 }
 
 fn ensureSocketParentDir(socket_path: []const u8) !void {

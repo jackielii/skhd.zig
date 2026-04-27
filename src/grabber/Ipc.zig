@@ -12,14 +12,15 @@ const RuleSet = @import("RuleSet.zig");
 const log = std.log.scoped(.grabber_ipc);
 
 /// Result of one client session.
-pub const ServeResult = enum {
+pub const ServeResult = union(enum) {
     /// Client disconnected (sent bye, or closed) without leaving rules
     /// active. Caller should drop the connection.
     closed,
-    /// Client sent apply_rules with at least one rule. Caller may
-    /// take ownership of the connection (e.g. to push mode_change
-    /// messages back to the agent for layer holds) or close it.
-    rules_applied,
+    /// Client sent apply_rules with at least one rule. Carries the
+    /// sender's uid so the daemon can decide whether the rules
+    /// should be applied right now (active console user) or just
+    /// stored (background user under fast-user-switching).
+    rules_applied: u32,
 };
 
 pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream, ruleset: *RuleSet) !ServeResult {
@@ -77,7 +78,7 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream, ruleset: *Rul
             // present) or wait for the next client. The agent may
             // still keep its end of the connection open if it wants
             // to receive mode_change pushes.
-            if (applied_count > 0) return .rules_applied;
+            if (applied_count > 0) return .{ .rules_applied = client_uid.? };
             // Empty apply_rules clears the rule set. Continue
             // handling further messages on the same connection.
         } else if (std.mem.eql(u8, kind, "bye")) {

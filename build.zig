@@ -102,6 +102,10 @@ pub fn build(b: *std.Build) void {
     // Apple firmware has toggled caps_lock against our intent so we
     // can flip it back via a vhidd-injected caps_lock toggle.
     grabber_exe.linkFramework("CoreGraphics");
+    // SystemConfiguration for SCDynamicStoreCopyConsoleUser — D5
+    // tracks the active console user and only applies rules from
+    // their agent. Multi-user / fast-user-switching support.
+    grabber_exe.linkFramework("SystemConfiguration");
     grabber_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     b.installArtifact(grabber_exe);
 

@@ -8,6 +8,7 @@ const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
 const grabber_protocol = @import("grabber_protocol");
+const Hidutil = @import("Hidutil.zig");
 const Hotkey = @import("Hotkey.zig");
 const Hotload = @import("Hotload.zig");
 const Keycodes = @import("Keycodes.zig");
@@ -49,6 +50,11 @@ watchdog_timer: c.CFRunLoopTimerRef = null,
 /// CFRunLoop source. Both freed on deinit.
 grabber_client: ?*agent_grabber_client.Client = null,
 layer_listener: ?*agent_layer_listener.Listener = null,
+/// Per-device `hidutil` UserKeyMapping owner. Allocated only when the
+/// config has at least one colon-form `.remap`. On deinit (graceful or
+/// signal), restoreAll() clears the OS-level mapping so the keyboard
+/// returns to default.
+hidutil: ?*Hidutil = null,
 
 pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -103,6 +109,24 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     log.info("Initial process: {s}", .{carbon_event.getProcessName()});
 
+    // Lazy-init Hidutil only if any colon-form `.remap` declarations
+    // exist. Crash recovery runs first so a previous instance's stale
+    // UserKeyMapping is cleared before we apply our own.
+    var hidutil: ?*Hidutil = null;
+    if (mappings.remaps.items.len > 0) {
+        hidutil = Hidutil.init(gpa) catch |err| blk: {
+            log.warn("Hidutil init failed: {s}. .remap colon-form ignored.", .{@errorName(err)});
+            break :blk null;
+        };
+        if (hidutil) |h| {
+            h.recoverFromCrash() catch |err| {
+                log.warn("Hidutil crash recovery failed: {s}. Continuing.", .{@errorName(err)});
+            };
+            log.info("Hidutil initialized for {d} remap declaration(s)", .{mappings.remaps.items.len});
+        }
+    }
+    errdefer if (hidutil) |h| h.deinit();
+
     // Create event tap with keyboard and system defined events
     const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
 
@@ -115,6 +139,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
         .verbose = verbose,
         .tracer = Tracer.init(profile),
         .carbon_event = carbon_event,
+        .hidutil = hidutil,
     };
 }
 
@@ -123,6 +148,15 @@ pub fn deinit(self: *Skhd) void {
     if (self.tracer.enabled) {
         const stderr = std.io.getStdErr().writer();
         self.tracer.printSummary(stderr) catch {};
+    }
+
+    // Clear hidutil UserKeyMapping FIRST so the user's keyboard isn't
+    // left remapped if anything below errors. Idempotent — no-op when
+    // applyRemaps was never called.
+    if (self.hidutil) |h| {
+        h.restoreAll();
+        h.deinit();
+        self.hidutil = null;
     }
 
     if (self.hotloader) |hotloader| {
@@ -423,6 +457,15 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     c.NSApplicationLoad();
 
     log.info("Event tap created successfully. skhd is now running.", .{});
+
+    // Apply hidutil remaps AFTER the event tap is up — the OS starts
+    // delivering remapped keys immediately, and we want our tap
+    // intercepting the translated stream.
+    if (self.hidutil) |h| {
+        h.applyRemaps(&self.mappings) catch |err| {
+            log.err("Failed to apply hidutil remaps: {s}. Colon-form .remap rules will not take effect.", .{@errorName(err)});
+        };
+    }
 
     // Watchdog reconciles the tap with TCC state every 1s. Catches runtime
     // accessibility revoke (which the OS doesn't surface via the disabled

@@ -5,6 +5,7 @@ pub usingnamespace @cImport({
     @cInclude("objc/objc.h");
     @cInclude("objc/runtime.h");
     @cInclude("unistd.h");
+    @cInclude("pwd.h");
     @cInclude("sys/types.h");
     @cInclude("sys/wait.h");
     @cInclude("fcntl.h");

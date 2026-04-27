@@ -1,6 +1,14 @@
 const std = @import("std");
 
-fn linkFrameworks(exe: *std.Build.Step.Compile) void {
+fn linkFrameworks(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    // Explicit os_version_min flips Zig out of "native" mode, so it stops
+    // auto-adding the macOS SDK to the framework search path. Re-add it
+    // from the SDK path stashed by build().
+    if (sdk_path) |sdk| {
+        exe.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
+        exe.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+    }
     exe.linkFramework("Cocoa");
     exe.linkFramework("Carbon");
     exe.linkFramework("CoreServices");
@@ -11,6 +19,10 @@ fn linkFrameworks(exe: *std.Build.Step.Compile) void {
     // whether to dial the grabber based on connected devices).
     exe.linkFramework("IOKit");
 }
+
+// macOS SDK path resolved once via xcrun and reused for every artifact's
+// framework / include / library search paths.
+var sdk_path: ?[]const u8 = null;
 
 fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
     // Get build mode string
@@ -56,8 +68,29 @@ const track_alloc_option = "track_alloc";
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // Pin macOS deployment target. Without this, Zig stamps the Mach-O's
+    // LC_BUILD_VERSION minos with the build host's OS version, so binaries
+    // built on macos-latest CI runners (now Tahoe 26) refuse to launch on
+    // macOS 15.x with "You can't use this version of application 'skhd' with
+    // this version of macOS." 13.0 matches the Info.plist's
+    // LSMinimumSystemVersion and is the floor required by SMAppService.
+    const target = b.standardTargetOptions(.{
+        .default_target = .{
+            .os_tag = .macos,
+            .os_version_min = .{ .semver = .{ .major = 13, .minor = 0, .patch = 0 } },
+        },
+    });
     const optimize = b.standardOptimizeOption(.{});
+
+    // Setting os_version_min above makes Zig treat the target as non-native
+    // and stop auto-resolving the macOS SDK, so framework links fail. Probe
+    // xcrun for the SDK and add its paths to every artifact via
+    // linkFrameworks. Setting b.sysroot would double-prefix paths added with
+    // cwd_relative, so we stash the SDK path in a module-level var instead.
+    if (target.result.os.tag == .macos) {
+        const out = b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" });
+        sdk_path = std.mem.trim(u8, out, " \n\r\t");
+    }
 
     // Shared protocol module: types + framing for the agent ↔ grabber
     // IPC. Both binaries (and tests that exercise either side of the
@@ -67,6 +100,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
 
     // Main executable
     const exe = b.addExecutable(.{
@@ -79,7 +113,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, track_alloc_option, false);
 
-    linkFrameworks(exe);
+    linkFrameworks(b, exe);
     addVersionImport(b, exe);
     exe.root_module.addOptions("build_options", options);
     exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
@@ -96,6 +130,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    if (sdk_path) |sdk| {
+        grabber_exe.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        grabber_exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
+        grabber_exe.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+    }
     grabber_exe.linkFramework("IOKit");
     grabber_exe.linkFramework("CoreFoundation");
     // CoreGraphics for CGEventSourceFlagsState — used to detect when
@@ -276,7 +315,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
     });
-    linkFrameworks(bench_exe);
+    linkFrameworks(b, bench_exe);
     addVersionImport(b, bench_exe);
 
     const zbench = b.dependency("zbench", .{
@@ -301,7 +340,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    linkFrameworks(alloc_exe);
+    linkFrameworks(b, alloc_exe);
     addVersionImport(b, alloc_exe);
 
     const alloc_options = b.addOptions();
@@ -343,7 +382,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    linkFrameworks(exe_unit_tests);
+    linkFrameworks(b, exe_unit_tests);
     addVersionImport(b, exe_unit_tests);
 
     exe_unit_tests.root_module.addOptions("build_options", options);
@@ -357,7 +396,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    linkFrameworks(tests_unit_tests);
+    linkFrameworks(b, tests_unit_tests);
     addVersionImport(b, exe_unit_tests);
     tests_unit_tests.root_module.addOptions("build_options", options);
     tests_unit_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
@@ -385,7 +424,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        linkFrameworks(module_tests);
+        linkFrameworks(b, module_tests);
         addVersionImport(b, module_tests);
         module_tests.root_module.addOptions("build_options", options);
         // RuleSet's test imports the shared protocol module by name;

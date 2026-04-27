@@ -76,11 +76,16 @@ jobs:
         include:
           - os: macos-latest
             arch: arm64
-          # Intel x86_64 builds paused starting v0.0.19 (no demand, macos-13
-          # runners spend most time queued). To re-enable, uncomment the
-          # entry below and the matching SHA / sed blocks in update-homebrew.
-          # - os: macos-13
-          #   arch: x86_64
+            target: ""
+          # Cross-compile x86_64 from the arm64 runner. The macOS SDK is
+          # universal (x86_64 stubs ship in the same SDK arm64 uses), and
+          # codesign on arm64 happily signs an x86_64 Mach-O. Avoids
+          # depending on the macos-13 Intel runner, which is on GitHub's
+          # deprecation timeline. -Dtarget carries the explicit os version so
+          # build.zig's default_target (macos 13.0) is preserved.
+          - os: macos-latest
+            arch: x86_64
+            target: x86_64-macos.13.0
     runs-on: ${{ matrix.os }}
     
     steps:
@@ -138,7 +143,11 @@ jobs:
 
     - name: Build Release .app bundle
       run: |
-        zig build app -Doptimize=ReleaseFast
+        TARGET_ARG=""
+        if [ -n "${{ matrix.target }}" ]; then
+          TARGET_ARG="-Dtarget=${{ matrix.target }}"
+        fi
+        zig build app -Doptimize=ReleaseFast $TARGET_ARG
         # Stage the bundle at the working tree root for tarballing.
         mv zig-out/skhd.app skhd.app
 
@@ -205,18 +214,17 @@ jobs:
         cd ${{ github.workspace }}
         gh release download ${VERSION} --repo jackielii/skhd.zig --pattern "*.tar.gz"
 
-        # Calculate SHA256 (arm64 only; Intel paused — see build-release matrix)
         ARM64_SHA=$(shasum -a 256 skhd-arm64-macos.tar.gz | awk '{print $1}')
         echo "arm64_sha=${ARM64_SHA}" >> $GITHUB_OUTPUT
 
-        # X86_64_SHA=$(shasum -a 256 skhd-x86_64-macos.tar.gz | awk '{print $1}')
-        # echo "x86_64_sha=${X86_64_SHA}" >> $GITHUB_OUTPUT
+        X86_64_SHA=$(shasum -a 256 skhd-x86_64-macos.tar.gz | awk '{print $1}')
+        echo "x86_64_sha=${X86_64_SHA}" >> $GITHUB_OUTPUT
 
     - name: Update Formula
       env:
         VERSION: ${{ steps.release.outputs.version }}
         ARM64_SHA: ${{ steps.release.outputs.arm64_sha }}
-        # X86_64_SHA: ${{ steps.release.outputs.x86_64_sha }}  # Intel paused
+        X86_64_SHA: ${{ steps.release.outputs.x86_64_sha }}
       run: |
         cd homebrew-tap
 
@@ -224,14 +232,11 @@ jobs:
         # URL instead). No-op when missing.
         sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/skhd-zig.rb
 
-        # Update URL + sha256 for the arm64 release. Intel paused — see
-        # build-release matrix above; uncomment the x86_64 lines below to
-        # re-enable.
         sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-arm64|download/v${VERSION}/skhd-arm64|" Formula/skhd-zig.rb
         sed -i "/arm64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${ARM64_SHA}\"/" Formula/skhd-zig.rb
 
-        # sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-x86_64|download/v${VERSION}/skhd-x86_64|" Formula/skhd-zig.rb
-        # sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${X86_64_SHA}\"/" Formula/skhd-zig.rb
+        sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-x86_64|download/v${VERSION}/skhd-x86_64|" Formula/skhd-zig.rb
+        sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${X86_64_SHA}\"/" Formula/skhd-zig.rb
 
     - name: Commit and push
       run: |

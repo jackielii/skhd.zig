@@ -195,6 +195,8 @@ pub fn main() !void {
     var skhd = try Skhd.init(gpa, resolved_config_file, verbose, profile);
     defer skhd.deinit();
 
+    applyConfigPaths(gpa, skhd.mappings.paths.items);
+
     if (verbose) {
         log.info("Using config file: {s}", .{resolved_config_file});
         if (no_hotload) {
@@ -286,45 +288,133 @@ fn logSessionStart() void {
     });
 }
 
+/// Resolve the user's login shell. Prefers `SHELL` env (the shell the user is
+/// actively using — terminal apps may override pw_shell), then falls back to
+/// `getpwuid(getuid()).pw_shell` from Open Directory. The pw_shell fallback is
+/// what fixes #36: under SMAppService, SHELL can be unset, so the previous
+/// implementation silently bailed out. pw_shell is the same source `login(1)`
+/// uses and is reliable under launchd.
+fn detectLoginShell(allocator: std.mem.Allocator) ?[:0]const u8 {
+    if (std.posix.getenv("SHELL")) |shell| {
+        if (shell.len > 0) return allocator.dupeZ(u8, shell) catch null;
+    }
+    if (c.getpwuid(c.getuid())) |pw| {
+        if (pw.*.pw_shell) |shell_ptr| {
+            const slice = std.mem.sliceTo(shell_ptr, 0);
+            if (slice.len > 0) return allocator.dupeZ(u8, slice) catch null;
+        }
+    }
+    return null;
+}
+
+/// Capture PATH using a shell-specific invocation. `-i` is dropped on every
+/// shell because interactive init under launchd's no-tty environment is the
+/// main source of failures: zsh's `compinit` writes warnings to stdout, fish
+/// prompts that probe terminal capabilities can hang, and rc files commonly
+/// assume `read`/colorized output works. PATH belongs in profile/login files
+/// anyway, which `-l` (or fish's always-sourced `config.fish`) covers.
+///
+/// Returns the trimmed colon-joined PATH on success, null on any failure
+/// (with the failure logged at warn level so it survives in the daemon log).
+fn capturePath(allocator: std.mem.Allocator, shell_path: []const u8) ?[]u8 {
+    const shell_name = std.fs.path.basename(shell_path);
+
+    // fish stores PATH as a list and `printenv PATH` prints it
+    // space-separated. `string join : $PATH` gives the colon-joined form
+    // every other tool expects. fish always sources `config.fish` and
+    // `conf.d/*.fish`, so no `-l` flag is needed.
+    const argv: []const []const u8 = if (std.mem.eql(u8, shell_name, "fish"))
+        &.{ shell_path, "-c", "string join : $PATH" }
+    else
+        &.{ shell_path, "-lc", "printenv PATH" };
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch |err| {
+        log.warn("PATH capture: spawn {s} failed: {s}", .{ shell_path, @errorName(err) });
+        return null;
+    };
+
+    var stdout_data = std.ArrayList(u8).init(allocator);
+    defer stdout_data.deinit();
+    if (child.stdout) |stdout| {
+        stdout.reader().readAllArrayList(&stdout_data, 64 * 1024) catch |err| {
+            _ = child.wait() catch {};
+            log.warn("PATH capture: read stdout failed: {s}", .{@errorName(err)});
+            return null;
+        };
+    }
+    const term = child.wait() catch |err| {
+        log.warn("PATH capture: wait failed: {s}", .{@errorName(err)});
+        return null;
+    };
+    if (term != .Exited or term.Exited != 0) {
+        log.warn("PATH capture: {s} exited abnormally: {any}", .{ shell_path, term });
+        return null;
+    }
+
+    const trimmed = std.mem.trim(u8, stdout_data.items, " \r\n\t");
+    if (trimmed.len == 0) {
+        log.warn("PATH capture: {s} returned empty PATH", .{shell_path});
+        return null;
+    }
+
+    return allocator.dupe(u8, trimmed) catch null;
+}
+
 /// Augment PATH from the user's login shell so commands launched by hotkeys
 /// resolve the same as they do in a terminal. launchd starts services with a
 /// minimal `PATH=/usr/bin:/bin:/usr/sbin:/sbin` that excludes Homebrew
 /// (`/opt/homebrew/bin`, `/usr/local/bin`), `~/.local/bin`, and similar — so
 /// commands like `yabai` or `jq` referenced bare in skhdrc fail to exec.
 /// This is the same problem (and same fix) GUI editors like VS Code solve.
-///
-/// Runs `$SHELL -ilc 'printenv PATH'` once at startup. `-l` sources login
-/// files, `-i` sources interactive rc files (`~/.bashrc`, `config.fish`),
-/// and `printenv` prints PATH colon-separated regardless of shell (fish
-/// otherwise prints `$PATH` as a space-separated array).
 fn inheritUserPath(allocator: std.mem.Allocator) void {
-    const shell = std.posix.getenv("SHELL") orelse return;
+    const shell = detectLoginShell(allocator) orelse {
+        log.warn("PATH inheritance: no login shell (SHELL unset and getpwuid failed)", .{});
+        return;
+    };
+    defer allocator.free(shell);
 
-    const argv = [_][]const u8{ shell, "-ilc", "printenv PATH" };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return;
+    const captured = capturePath(allocator, shell) orelse return;
+    defer allocator.free(captured);
 
-    var stdout_data = std.ArrayList(u8).init(allocator);
-    defer stdout_data.deinit();
-    if (child.stdout) |stdout| {
-        stdout.reader().readAllArrayList(&stdout_data, 64 * 1024) catch {
-            _ = child.wait() catch {};
-            return;
-        };
-    }
-    const term = child.wait() catch return;
-    if (term != .Exited or term.Exited != 0) return;
-
-    const trimmed = std.mem.trim(u8, stdout_data.items, " \r\n\t");
-    if (trimmed.len == 0) return;
-
-    const path_z = allocator.dupeZ(u8, trimmed) catch return;
+    const path_z = allocator.dupeZ(u8, captured) catch return;
     defer allocator.free(path_z);
 
-    if (c.setenv("PATH", path_z.ptr, 1) != 0) return;
-    log.info("inherited PATH from {s}", .{shell});
+    if (c.setenv("PATH", path_z.ptr, 1) != 0) {
+        log.warn("PATH inheritance: setenv failed", .{});
+        return;
+    }
+    log.warn("PATH inherited from {s}: {s}", .{ shell, captured });
+}
+
+/// Prepend `.path` directive entries to PATH. Called after inheritUserPath so
+/// the layering is:
+///   `<.path entries, in declaration order> : <inherited PATH>`
+/// Explicit user entries take precedence over what shell inheritance found,
+/// which matters for tool-version-managers (mise/asdf shims) where the user
+/// wants the shim dir resolved before any system tool of the same name.
+fn applyConfigPaths(allocator: std.mem.Allocator, entries: []const []const u8) void {
+    if (entries.len == 0) return;
+
+    const current = std.posix.getenv("PATH") orelse "";
+
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+
+    for (entries) |entry| {
+        buf.appendSlice(entry) catch return;
+        buf.append(':') catch return;
+    }
+    buf.appendSlice(current) catch return;
+    buf.append(0) catch return;
+
+    if (c.setenv("PATH", @ptrCast(buf.items.ptr), 1) != 0) {
+        log.warn("PATH apply: setenv failed", .{});
+        return;
+    }
+    log.warn("PATH after .path directives: {s}", .{buf.items[0 .. buf.items.len - 1]});
 }
 
 /// Resolve config file path following XDG spec

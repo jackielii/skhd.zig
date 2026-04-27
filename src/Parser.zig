@@ -1053,8 +1053,28 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         try self.parse_device_decl(mappings);
     } else if (std.mem.eql(u8, option, "remap")) {
         try self.parse_remap_decl(mappings);
+    } else if (std.mem.eql(u8, option, "path")) {
+        // Two forms: single-entry `.path "/opt/homebrew/bin"` or list
+        // `.path [ "/opt/homebrew/bin", "$HOME/.local/bin" ]`. Tilde and
+        // $HOME are expanded at parse time so the stored entry is absolute.
+        if (self.match(.Token_BeginList)) {
+            while (self.match(.Token_String)) {
+                try self.addPathEntry(mappings, self.previous());
+            }
+            if (!self.match(.Token_EndList)) {
+                const token = self.peek() orelse self.previous();
+                self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ']' to close path list", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+        } else if (self.match(.Token_String)) {
+            try self.addPathEntry(mappings, self.previous());
+        } else {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected path string or '[' after 'path'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell, device, remap", .{option});
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell, device, remap, path", .{option});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
         return error.ParseErrorOccurred;
@@ -1135,6 +1155,53 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
             return err;
         };
     }
+}
+
+/// Expand a `.path` entry: strip surrounding quotes (already handled by
+/// processStringOwned), resolve a leading `~` or `$HOME` to the user's home
+/// directory, and store the absolute path in mappings.paths. We deliberately
+/// don't support arbitrary `$VAR` — env at parse time can differ from env at
+/// command-exec time, and the user can write absolute paths for everything
+/// non-HOME.
+fn addPathEntry(self: *Parser, mappings: *Mappings, token: Token) !void {
+    const raw = try self.processStringOwned(token.text);
+    defer self.allocator.free(raw);
+
+    const expanded = expandHome(self.allocator, raw) catch |err| {
+        const msg = try std.fmt.allocPrint(self.allocator, "Failed to expand path '{s}': {s}", .{ raw, @errorName(err) });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+    defer self.allocator.free(expanded);
+
+    if (expanded.len == 0) {
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Empty path entry", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    mappings.add_path(expanded) catch |err| {
+        const msg = try std.fmt.allocPrint(self.allocator, "Failed to add path '{s}': {s}", .{ expanded, @errorName(err) });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+}
+
+fn expandHome(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    // `~` alone, or `~/...` → $HOME / $HOME + suffix.
+    if (std.mem.eql(u8, raw, "~") or std.mem.startsWith(u8, raw, "~/")) {
+        const home = std.posix.getenv("HOME") orelse return error.HomeNotSet;
+        if (raw.len == 1) return allocator.dupe(u8, home);
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ home, raw[1..] });
+    }
+    // `$HOME` or `$HOME/...` (no other $VAR forms supported).
+    if (std.mem.eql(u8, raw, "$HOME") or std.mem.startsWith(u8, raw, "$HOME/")) {
+        const home = std.posix.getenv("HOME") orelse return error.HomeNotSet;
+        if (raw.len == 5) return allocator.dupe(u8, home);
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ home, raw[5..] });
+    }
+    return allocator.dupe(u8, raw);
 }
 
 fn resolveLoadPath(self: *Parser, filename: []const u8) ![]const u8 {
@@ -1717,6 +1784,75 @@ test "shell directive error handling" {
     // Test missing shell path
     const content = ".shell";
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, content));
+}
+
+test "path directive single entry" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings, ".path \"/opt/homebrew/bin\"");
+    try std.testing.expectEqual(@as(usize, 1), mappings.paths.items.len);
+    try std.testing.expectEqualStrings("/opt/homebrew/bin", mappings.paths.items[0]);
+}
+
+test "path directive list form" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const content =
+        \\.path [
+        \\    "/opt/homebrew/bin"
+        \\    "/usr/local/bin"
+        \\]
+    ;
+    try parser.parse(&mappings, content);
+    try std.testing.expectEqual(@as(usize, 2), mappings.paths.items.len);
+    try std.testing.expectEqualStrings("/opt/homebrew/bin", mappings.paths.items[0]);
+    try std.testing.expectEqualStrings("/usr/local/bin", mappings.paths.items[1]);
+}
+
+test "path directive expands tilde and HOME" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+
+    try parser.parse(&mappings,
+        \\.path "~/.local/bin"
+        \\.path "$HOME/bin"
+    );
+    try std.testing.expectEqual(@as(usize, 2), mappings.paths.items.len);
+
+    const tilde_expanded = try std.fmt.allocPrint(alloc, "{s}/.local/bin", .{home});
+    defer alloc.free(tilde_expanded);
+    try std.testing.expectEqualStrings(tilde_expanded, mappings.paths.items[0]);
+
+    const home_expanded = try std.fmt.allocPrint(alloc, "{s}/bin", .{home});
+    defer alloc.free(home_expanded);
+    try std.testing.expectEqualStrings(home_expanded, mappings.paths.items[1]);
+}
+
+test "path directive missing argument errors" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, ".path"));
 }
 
 test "command definition without placeholders" {

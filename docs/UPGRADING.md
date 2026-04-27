@@ -25,6 +25,25 @@ That's it. Your accessibility grant carries over (TCC entry is bundle-ID-keyed, 
 
 The old `disallowed` legacy BTM entry from previous versions is harmless once the new managed entry is in place — but you can clean it up via System Settings → General → Login Items & Extensions if you like.
 
+## If keys stop working after `brew upgrade` (macOS Tahoe)
+
+On macOS 15+ (Tahoe), TCC stores Input Monitoring grants with a **csreq anchored to the binary's cdHash** rather than the signing cert root. Every rebuild produces a new cdHash, so a brew upgrade silently invalidates the grant — the System Settings entry still shows as **granted**, but no events flow into the daemon.
+
+Symptoms:
+- `skhd --status` shows the daemon running, but hotkeys don't fire.
+- System Settings → Privacy & Security → Accessibility (and/or Input Monitoring) shows skhd as enabled.
+- `~/Library/Logs/skhd.log` shows the event tap was created but no key activity.
+
+Fix — drop the stale grant so macOS re-prompts and stores a fresh, cert-root-anchored csreq:
+
+```bash
+tccutil reset ListenEvent com.jackielii.skhd
+tccutil reset Accessibility com.jackielii.skhd
+skhd --restart-service
+```
+
+Then re-toggle the entry in System Settings (or accept the prompt if one appears). This issue recurs on every brew upgrade until Apple loosens the anchor policy; `skhd --status` includes the same fix in its remediation output when the tap is detected as denied.
+
 ## Migrating from 0.0.17 or earlier (the original Tahoe rework)
 
 Version 0.0.18 introduced the `.app` bundle structure and `~/Library/Logs/skhd.log`. If you're coming from 0.0.17 or earlier you also need to perform the steps below before the SMAppService re-register above.

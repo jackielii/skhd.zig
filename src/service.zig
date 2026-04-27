@@ -498,7 +498,20 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
         std.debug.print("   up in the list, unlike a bare binary)\n", .{});
         std.debug.print("3. Toggle the entry on\n", .{});
         std.debug.print("4. Run: skhd --restart-service\n", .{});
-        std.debug.print("\nFor more troubleshooting, see docs/CODE_SIGNING.md.\n", .{});
+        std.debug.print(
+            \\
+            \\If the entry already shows as granted in System Settings but
+            \\events still don't flow (typical after `brew upgrade` on macOS
+            \\Tahoe — the cached csreq is anchored to the previous binary's
+            \\cdHash), drop the stale grant and re-grant from scratch:
+            \\
+            \\  tccutil reset ListenEvent com.jackielii.skhd
+            \\  tccutil reset Accessibility com.jackielii.skhd
+            \\  skhd --restart-service     # then re-grant via System Settings
+            \\
+            \\For more troubleshooting, see docs/CODE_SIGNING.md.
+            \\
+        , .{});
     }
 }
 

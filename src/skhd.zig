@@ -570,9 +570,15 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
                 \\  list. If the path above is not a .app, install the app
                 \\  bundle (`brew upgrade skhd-zig`) so the entry is visible
                 \\  and toggleable, then re-run --install-service.
-                \\- If skhd was working before and stopped after a binary swap,
-                \\  a stale TCC entry may need clearing. See:
-                \\    docs/CODE_SIGNING.md (Troubleshooting section)
+                \\- If skhd was working before and stopped after a `brew
+                \\  upgrade` (or any binary swap), the TCC entry likely shows
+                \\  as granted but its csreq is anchored to the previous
+                \\  cdHash. Reset and re-grant:
+                \\    tccutil reset ListenEvent com.jackielii.skhd
+                \\    tccutil reset Accessibility com.jackielii.skhd
+                \\    skhd --restart-service   # then re-grant in Settings
+                \\  See docs/CODE_SIGNING.md for the full troubleshooting
+                \\  section.
                 \\=====================================================
                 \\
             , .{display_path});

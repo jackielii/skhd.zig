@@ -137,3 +137,13 @@ pub extern fn IOHIDElementGetUsage(element: IOHIDElementRef) u32;
 
 // libc bits (geteuid for the seize permission check).
 pub extern fn geteuid() c_uint;
+
+// stdio handle for setvbuf — when launchd redirects our stdout/stderr
+// to a file, they go block-buffered; per-event log lines then aren't
+// visible until the buffer fills. We force line-buffered (or
+// unbuffered) at startup so debug logs land immediately.
+pub const FILE = anyopaque;
+pub extern var __stderrp: *FILE;
+pub extern var __stdoutp: *FILE;
+pub const _IONBF: c_int = 2;
+pub extern fn setvbuf(stream: *FILE, buf: ?[*]u8, mode: c_int, size: usize) c_int;

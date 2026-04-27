@@ -2,9 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c.zig");
+const agent_grabber_client = @import("agent_grabber_client.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
 const EventTap = @import("EventTap.zig");
 const forkAndExec = @import("exec.zig").forkAndExec;
+const grabber_protocol = @import("grabber_protocol");
 const Hotkey = @import("Hotkey.zig");
 const Hotload = @import("Hotload.zig");
 const Keycodes = @import("Keycodes.zig");
@@ -82,6 +84,18 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     // Log shell configuration
     log.info("Using shell: {s}", .{mappings.shell});
 
+    // Forward tap-hold rules to skhd-grabber so the system daemon can
+    // seize the matched device and run the FSM at the HID layer. We
+    // do this here (one-shot at startup) rather than attempting per-
+    // event coordination — caps_lock-class rules can't run in the
+    // user-agent CGEventTap because macOS Tahoe filters them at the
+    // kernel HID layer before the tap sees them. Tolerate "grabber
+    // not running" gracefully so users without the daemon installed
+    // still get the rest of their config (modes, hotkeys, etc.).
+    forwardTapholdsToGrabber(gpa, &mappings) catch |err| {
+        log.warn("could not forward .remap rules to skhd-grabber: {s}", .{@errorName(err)});
+    };
+
     // Initialize Carbon event handler for app switching
     var carbon_event = try CarbonEvent.init(gpa);
     errdefer carbon_event.deinit();
@@ -118,6 +132,50 @@ pub fn deinit(self: *Skhd) void {
     self.event_tap.deinit();
     self.mappings.deinit();
     self.allocator.free(self.config_file);
+}
+
+/// Translate parsed `.remap { tap, hold, ... }` rules into the
+/// IPC schema and push them to skhd-grabber. Looks up each rule's
+/// device alias to attach the (vendor, product) match the grabber
+/// uses for IOHIDManager. No-ops cleanly when there are no rules.
+///
+/// "Cannot reach grabber" is downgraded to a warning by the caller —
+/// users without `skhd --install-grabber` still get the rest of
+/// their config running.
+fn forwardTapholdsToGrabber(allocator: std.mem.Allocator, mappings: *const Mappings) !void {
+    if (mappings.tapholds.items.len == 0) return;
+
+    var rules = try std.ArrayList(grabber_protocol.Rule).initCapacity(allocator, mappings.tapholds.items.len);
+    defer rules.deinit();
+
+    for (mappings.tapholds.items) |th| {
+        const alias = mappings.device_aliases.get(th.device_alias) orelse {
+            log.warn("taphold for src=0x{X:0>2}: device alias '{s}' not in alias map (skip)", .{ th.src_usage, th.device_alias });
+            continue;
+        };
+        try rules.append(.{
+            .src_usage = th.src_usage,
+            .tap_usage = th.tap_usage,
+            .hold_usage = th.hold_usage,
+            .device = .{ .vendor = alias.vendor, .product = alias.product },
+            .timeout_ms = th.timeout_ms,
+            .permissive_hold = th.permissive_hold,
+            .hold_on_other_key_press = th.hold_on_other_key_press,
+            .retro_tap = th.retro_tap,
+        });
+    }
+
+    if (rules.items.len == 0) return;
+
+    log.info("forwarding {d} tap-hold rule(s) to skhd-grabber at {s}", .{ rules.items.len, grabber_protocol.default_socket_path });
+
+    var client = try agent_grabber_client.Client.connect(allocator, grabber_protocol.default_socket_path);
+    defer client.close();
+
+    try client.hello();
+    try client.applyRules(rules.items);
+    try client.bye();
+    log.info("grabber acknowledged {d} rule(s)", .{rules.items.len});
 }
 
 /// Poll AXIsProcessTrusted on a 1s timer and reconcile the event tap with

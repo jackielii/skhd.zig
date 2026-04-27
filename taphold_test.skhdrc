@@ -1,0 +1,96 @@
+# skhd.zig built-in keyboard test config
+#
+# Goal: make the MacBook built-in keyboard feel like the convolution QMK
+# board (keyboards/keebio/convolution/keymaps/jackie). Type with this active,
+# compare to typing on the convolution. Should feel identical.
+#
+# STATUS: target syntax for the upcoming .remap + .device features.
+#         Will not load on current skhd.zig. Uses syntax under design.
+#
+# Built-in caps_lock interception is handled automatically via hidutil
+# remap (caps_lock -> F18, per-device, restored on exit). User does not
+# need to touch System Settings.
+
+.SHELL "/bin/dash"
+
+.define anybar_color : echo -n "{{1}}" | nc -4u -w0 localhost 1738
+
+# ── Device alias ──────────────────────────────────────────────────────────
+# Discover the vendor/product values with: skhd --list-devices
+.device builtin { vendor: 0x05AC, product: 0x0342 }
+
+# ── Caps Lock -> tap=Esc, hold=LCtrl ──────────────────────────────────────
+# Mirrors JL_CTL_ESC. QMK term=120ms (PREFER_HOLD), PERMISSIVE_HOLD on,
+# retro off.
+.remap caps_lock [device builtin] {
+    tap             : escape
+    hold            : lctrl
+    timeout         : 120ms
+    permissive_hold : on
+    retro_tap       : off
+}
+
+# ── Space -> tap=Space, hold=fn_layer ─────────────────────────────────────
+# Mirrors JL_LSPC. QMK term=300ms (PREFER_TAP+50), PERMISSIVE_HOLD on,
+# RETRO_TAPPING on.
+:: fn_layer @ : @anybar_color("green")
+:: default : @anybar_color("hollow")
+
+.remap space [device builtin] {
+    tap             : space
+    hold            : fn_layer
+    timeout         : 300ms
+    permissive_hold : on
+    retro_tap       : on
+}
+
+# ── fn_layer (= QMK convolution layer 2) ──────────────────────────────────
+# Layer keys are NOT device-guarded: once fn_layer is active (entered by
+# holding built-in space), all keystrokes are intercepted regardless of
+# source. This matches QMK layer behavior.
+
+# Number row -> F-row
+fn_layer < 1 | f1
+fn_layer < 2 | f2
+fn_layer < 3 | f3
+fn_layer < 4 | f4
+fn_layer < 5 | f5
+fn_layer < 6 | f6
+fn_layer < 7 | f7
+fn_layer < 8 | f8
+fn_layer < 9 | f9
+fn_layer < 0 | f10
+
+# QWERTY row -> nav cluster
+fn_layer < w | alt - q
+fn_layer < r | end
+fn_layer < t | pageup
+fn_layer < u | home
+fn_layer < i | pagedown
+fn_layer < o | pageup
+fn_layer < p | end
+
+# Home row -> arrows + page nav
+fn_layer < f | pagedown
+fn_layer < h | left
+fn_layer < j | down
+fn_layer < k | up
+fn_layer < l | right
+
+# Selection variants
+fn_layer < shift - h | shift - left
+fn_layer < shift - j | shift - down
+fn_layer < shift - k | shift - up
+fn_layer < shift - l | shift - right
+
+# Bottom row -> clipboard ops + nav
+fn_layer < z | cmd - z
+fn_layer < x | cmd - x
+fn_layer < c | cmd - c
+fn_layer < v | cmd - v
+fn_layer < b | pageup
+fn_layer < n | down
+
+# Defensive escape: release of space exits automatically; this is the manual
+# fallback in case state gets stuck.
+fn_layer < escape ; default

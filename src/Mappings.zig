@@ -11,8 +11,60 @@ shell: [:0]const u8,
 loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
 // Track all hotkeys for cleanup (hotkeys can belong to multiple modes)
 hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
+// Device aliases declared via `.device <name> <vendor> <product>`. Empty
+// when the user hasn't opted into per-device matching, in which case the
+// IOHIDManager monitor is never started.
+device_aliases: std.StringHashMapUnmanaged(DeviceAlias) = .empty,
+// HID-level remaps declared via `.remap <src> [device <alias>] : <dst>`.
+// Owned by Mappings — strings are duped on insert, freed in deinit.
+remaps: std.ArrayListUnmanaged(RemapDecl) = .empty,
+// Tap-hold declarations from the block form of `.remap`. Distinct from
+// `remaps` so the runtime knows which keys need a state machine vs a
+// pure HID-level remap.
+tapholds: std.ArrayListUnmanaged(TapHoldDecl) = .empty,
 
 const Mappings = @This();
+
+pub const DeviceAlias = struct {
+    vendor: u32,
+    product: u32,
+};
+
+pub const RemapDecl = struct {
+    /// HID usage byte (page implied = 0x07 keyboard) of the source key.
+    src_usage: u32,
+    /// HID usage byte of the destination key.
+    dst_usage: u32,
+    /// Device alias name. Owned by Mappings (duped on insert, freed in
+    /// deinit). Required for v1 — global remaps are not supported.
+    device_alias: []const u8,
+};
+
+pub const TapHoldDecl = struct {
+    /// HID usage byte of the physical key being intercepted (caps_lock,
+    /// space, etc.).
+    src_usage: u32,
+    /// HID usage byte of the action emitted on a quick tap (e.g.,
+    /// escape).
+    tap_usage: u32,
+    /// HID usage byte of the action committed on hold (e.g., lctrl).
+    /// Phase 4 will extend this to layer / mode names.
+    hold_usage: u32,
+    /// Required device alias (same rationale as RemapDecl). Owned.
+    device_alias: []const u8,
+    /// Tap-vs-hold decision deadline in milliseconds. Default 200 if
+    /// unspecified by the user.
+    timeout_ms: u32 = 200,
+    /// QMK PERMISSIVE_HOLD: nested-tap (other key down + up) inside the
+    /// hold key's press commits to hold even before the timeout.
+    permissive_hold: bool = true,
+    /// QMK HOLD_ON_OTHER_KEY_PRESS: any other key down commits to hold
+    /// immediately. Stronger than permissive_hold; off by default.
+    hold_on_other_key_press: bool = false,
+    /// QMK RETRO_TAPPING: when held past timeout with no other key
+    /// pressed, emit the tap action on release anyway.
+    retro_tap: bool = false,
+};
 
 pub fn init(alloc: std.mem.Allocator) !Mappings {
     const default_shell = "/bin/bash";
@@ -47,6 +99,15 @@ pub fn deinit(self: *Mappings) void {
         while (it.next()) |key| self.allocator.free(key.*);
         self.blacklist.deinit(self.allocator);
     }
+    {
+        var it = self.device_aliases.keyIterator();
+        while (it.next()) |key| self.allocator.free(key.*);
+        self.device_aliases.deinit(self.allocator);
+    }
+    for (self.remaps.items) |r| self.allocator.free(r.device_alias);
+    self.remaps.deinit(self.allocator);
+    for (self.tapholds.items) |t| self.allocator.free(t.device_alias);
+    self.tapholds.deinit(self.allocator);
     self.allocator.free(self.shell);
 
     // Free loaded file paths
@@ -81,6 +142,54 @@ pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     }
     const owned = try self.allocator.dupe(u8, key);
     try self.blacklist.put(self.allocator, owned, void{});
+}
+
+pub fn add_device_alias(self: *Mappings, name: []const u8, vendor: u32, product: u32) !void {
+    if (self.device_aliases.contains(name)) {
+        return error.DeviceAliasAlreadyExists;
+    }
+    const owned = try self.allocator.dupe(u8, name);
+    errdefer self.allocator.free(owned);
+    try self.device_aliases.put(self.allocator, owned, .{ .vendor = vendor, .product = product });
+}
+
+pub fn add_remap(self: *Mappings, src_usage: u32, dst_usage: u32, device_alias: []const u8) !void {
+    // Same source key for the same device cannot be remapped twice.
+    if (self.findRemapOrTaphold(src_usage, device_alias)) {
+        return error.RemapConflict;
+    }
+    const owned_alias = try self.allocator.dupe(u8, device_alias);
+    errdefer self.allocator.free(owned_alias);
+    try self.remaps.append(self.allocator, .{
+        .src_usage = src_usage,
+        .dst_usage = dst_usage,
+        .device_alias = owned_alias,
+    });
+}
+
+pub fn add_taphold(self: *Mappings, decl: TapHoldDecl) !void {
+    if (self.findRemapOrTaphold(decl.src_usage, decl.device_alias)) {
+        return error.RemapConflict;
+    }
+    const owned_alias = try self.allocator.dupe(u8, decl.device_alias);
+    errdefer self.allocator.free(owned_alias);
+    var d = decl;
+    d.device_alias = owned_alias;
+    try self.tapholds.append(self.allocator, d);
+}
+
+/// True if (src_usage, device_alias) is already claimed by a `.remap`
+/// or `.remap { ... }` block. Used by both add_remap and add_taphold to
+/// reject ambiguous configurations like a colon-form and a block-form
+/// targeting the same physical key on the same device.
+fn findRemapOrTaphold(self: *const Mappings, src_usage: u32, device_alias: []const u8) bool {
+    for (self.remaps.items) |existing| {
+        if (existing.src_usage == src_usage and std.mem.eql(u8, existing.device_alias, device_alias)) return true;
+    }
+    for (self.tapholds.items) |existing| {
+        if (existing.src_usage == src_usage and std.mem.eql(u8, existing.device_alias, device_alias)) return true;
+    }
+    return false;
 }
 
 pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -166,6 +275,85 @@ test "format" {
     defer alloc.free(formatted);
     try std.testing.expect(formatted.len > 0);
     try std.testing.expect(mode != null);
+}
+
+test "add_taphold rejects collision with prior .remap on same src+device" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_remap(0x39, 0xE0, "builtin");
+    const result = mappings.add_taphold(.{
+        .src_usage = 0x39,
+        .tap_usage = 0x29,
+        .hold_usage = 0xE0,
+        .device_alias = "builtin",
+    });
+    try std.testing.expectError(error.RemapConflict, result);
+}
+
+test "add_taphold accepts distinct src or distinct device" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_taphold(.{
+        .src_usage = 0x39, // caps_lock
+        .tap_usage = 0x29, // escape
+        .hold_usage = 0xE0, // lctrl
+        .device_alias = "builtin",
+        .timeout_ms = 120,
+    });
+    // Same key, different device — fine.
+    try mappings.add_taphold(.{
+        .src_usage = 0x39,
+        .tap_usage = 0x29,
+        .hold_usage = 0xE0,
+        .device_alias = "hhkb",
+    });
+    // Different key, same device — fine.
+    try mappings.add_taphold(.{
+        .src_usage = 0x2C, // space
+        .tap_usage = 0x2C,
+        .hold_usage = 0xE2, // lalt
+        .device_alias = "builtin",
+        .timeout_ms = 300,
+        .retro_tap = true,
+    });
+    try std.testing.expectEqual(@as(usize, 3), mappings.tapholds.items.len);
+    try std.testing.expectEqual(@as(u32, 120), mappings.tapholds.items[0].timeout_ms);
+    try std.testing.expectEqual(true, mappings.tapholds.items[2].retro_tap);
+}
+
+test "add_remap returns error on duplicate src+device" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_remap(0x39, 0xE0, "builtin"); // caps_lock -> lctrl on builtin
+    // Same source on a different device is fine.
+    try mappings.add_remap(0x39, 0xE0, "hhkb");
+    try std.testing.expectEqual(@as(usize, 2), mappings.remaps.items.len);
+    // Same source + same device is a conflict.
+    const result = mappings.add_remap(0x39, 0xE1, "builtin");
+    try std.testing.expectError(error.RemapConflict, result);
+    try std.testing.expectEqual(@as(usize, 2), mappings.remaps.items.len);
+}
+
+test "add_device_alias returns error on duplicate" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try mappings.add_device_alias("builtin", 0x05AC, 0x0342);
+
+    const result = mappings.add_device_alias("builtin", 0x04FE, 0x0021);
+    try std.testing.expectError(error.DeviceAliasAlreadyExists, result);
+
+    const entry = mappings.device_aliases.get("builtin").?;
+    try std.testing.expectEqual(@as(u32, 0x05AC), entry.vendor);
+    try std.testing.expectEqual(@as(u32, 0x0342), entry.product);
+    try std.testing.expectEqual(@as(usize, 1), mappings.device_aliases.count());
 }
 
 test "add_blacklist returns error on duplicate" {

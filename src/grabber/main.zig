@@ -44,6 +44,14 @@ var should_exit: std.atomic.Value(bool) = .init(false);
 var bound_socket_path: ?[]const u8 = null;
 
 pub fn main() !void {
+    // stderr → file is block-buffered by libc default. Our SIGTERM
+    // handler exits via _exit() which skips fflush, so block-buffered
+    // logs from the seize loop never reach the log file. Switching
+    // stderr (and stdout for symmetry) to unbuffered fixes that —
+    // each log line goes to the fd immediately.
+    _ = c.setvbuf(c.__stderrp, null, c._IONBF, 0);
+    _ = c.setvbuf(c.__stdoutp, null, c._IONBF, 0);
+
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
         _ = debug_allocator.deinit();
@@ -192,9 +200,111 @@ pub fn main() !void {
         Ipc.serve(gpa, conn.stream, &ruleset) catch |err| {
             log.warn("client session ended: {s}", .{@errorName(err)});
         };
+
+        // After processing the connection, if the agent gave us
+        // rules, transition out of the accept loop into seize+TapHold
+        // mode and run there until SIGTERM. D5 will replace this with
+        // proper hot-reload (kqueue-multiplexed accept + seize).
+        if (firstRulesInRuleSet(&ruleset)) |rules| {
+            log.info("apply_rules received — transitioning to seize loop with {d} rule(s)", .{rules.len});
+            // Drop the IPC socket before going into the seize run loop;
+            // re-applies require a daemon restart for now.
+            posix.unlink(socket_path) catch {};
+            server.deinit();
+            bound_socket_path = null;
+            runDaemonSeize(gpa, rules) catch |err| {
+                log.err("seize loop failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        }
     }
 
     log.info("shutting down", .{});
+}
+
+/// Return the first non-empty per-uid rules slice in the ruleset.
+/// D5 will iterate the active console user; D5-precursor (this) just
+/// uses whatever's there so a single agent can drive end-to-end tests.
+fn firstRulesInRuleSet(rs: *const RuleSet) ?[]const protocol.Rule {
+    var it = rs.per_uid.iterator();
+    while (it.next()) |entry| {
+        const rules = entry.value_ptr.*;
+        if (rules.len > 0) return rules;
+    }
+    return null;
+}
+
+/// Run the seize + TapHold loop driven by IPC-supplied rules. Single-
+/// rule for now (uses the first entry in `rules`). Returns only on
+/// hard error; SIGTERM bypasses this via the signal handler's _exit.
+fn runDaemonSeize(allocator: std.mem.Allocator, rules: []const protocol.Rule) !void {
+    if (rules.len == 0) return;
+
+    const r = rules[0];
+    if (rules.len > 1) {
+        log.warn("daemon currently uses only the first rule; {d} extra rule(s) ignored (multi-rule support is post-D5)", .{rules.len - 1});
+    }
+    const dev = r.device orelse {
+        log.err("rule has no device match — global seize not supported yet", .{});
+        return error.MissingDevice;
+    };
+
+    log.info(
+        "daemon seize: device 0x{X:0>4}:0x{X:0>4} rule src=0x{X:0>2} tap=0x{X:0>2} hold=0x{X:0>2} timeout={d}ms perm={} hokp={}",
+        .{
+            dev.vendor,
+            dev.product,
+            r.src_usage,
+            r.tap_usage,
+            r.hold_usage,
+            r.timeout_ms,
+            r.permissive_hold,
+            r.hold_on_other_key_press,
+        },
+    );
+
+    log.info("connecting to vhidd_server", .{});
+    var vhidd = try Vhidd.Client.connect(allocator);
+    defer vhidd.close();
+
+    log.info("initializing virtual keyboard", .{});
+    try vhidd.initializeKeyboard(.{});
+    try vhidd.waitForBoolTrue(.virtual_hid_keyboard_ready, 5000);
+    log.info("virtual keyboard ready", .{});
+
+    const taphold_rule: TapHold.Rule = .{
+        .src_usage = std.math.cast(u16, r.src_usage) orelse return error.SourceUsageOverflow,
+        .tap_usage = std.math.cast(u16, r.tap_usage) orelse return error.TapUsageOverflow,
+        .hold_usage = std.math.cast(u16, r.hold_usage) orelse return error.HoldUsageOverflow,
+        .timeout_ms = r.timeout_ms,
+        .permissive_hold = r.permissive_hold,
+        .hold_on_other_key_press = r.hold_on_other_key_press,
+        .retro_tap = r.retro_tap,
+    };
+
+    var ctx = SeizeCtx{ .state = .{}, .vhidd = &vhidd };
+    var engine = TapHold.init(taphold_rule, emitToVhidd, &ctx);
+    ctx.engine = &engine;
+    defer cancelTapHoldTimer(&ctx);
+
+    var seize = try HidSeize.init(allocator, seizeInputCallback, &ctx);
+    defer seize.deinit();
+    try seize.setMatches(&.{.{ .vendor = dev.vendor, .product = dev.product }});
+    try seize.start(.seize);
+
+    log.info("daemon seize active — handling events until SIGTERM", .{});
+
+    while (!should_exit.load(.acquire)) {
+        const rc = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 60.0, 0);
+        switch (rc) {
+            c.kCFRunLoopRunStopped, c.kCFRunLoopRunFinished => break,
+            else => {},
+        }
+    }
+
+    seize.stop();
+    vhidd.postKeyboardReport(.{}, &.{}) catch {};
 }
 
 fn ensureSocketParentDir(socket_path: []const u8) !void {

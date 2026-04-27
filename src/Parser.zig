@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const Mode = @import("Mode.zig");
 const Mappings = @import("Mappings.zig");
 const Keycodes = @import("Keycodes.zig");
+const HidKeyMap = @import("HidKeyMap.zig");
 const utils = @import("utils.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 const ParseError = @import("ParseError.zig").ParseError;
@@ -1048,8 +1049,12 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected shell path after 'shell'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
+    } else if (std.mem.eql(u8, option, "device")) {
+        try self.parse_device_decl(mappings);
+    } else if (std.mem.eql(u8, option, "remap")) {
+        try self.parse_remap_decl(mappings);
     } else {
-        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell", .{option});
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown option '{s}'. Valid options are: define, load, blacklist, shell, device, remap", .{option});
         defer self.allocator.free(msg);
         self.error_info = try ParseError.fromToken(self.allocator, self.previous(), msg, self.current_file_path);
         return error.ParseErrorOccurred;
@@ -1110,6 +1115,348 @@ fn resolveLoadPath(self: *Parser, filename: []const u8) ![]const u8 {
 
     // Otherwise, treat as relative to current working directory
     return try self.allocator.dupe(u8, filename);
+}
+
+/// Parse `.remap <src> [device <alias>]` followed by either `:` (colon
+/// form, simple HID-level remap) or `{ ... }` (block form, tap-hold).
+/// Required device guard: global remaps would clobber other keyboards.
+fn parse_remap_decl(self: *Parser, mappings: *Mappings) !void {
+    const src_token = self.peek() orelse {
+        self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Expected source key after '.remap'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+    switch (src_token.type) {
+        .Token_Literal, .Token_Modifier, .Token_Identifier, .Token_Key => {},
+        else => {
+            self.error_info = try ParseError.fromToken(self.allocator, src_token, "Expected key name (e.g., caps_lock, lctrl, escape) as remap source", self.current_file_path);
+            return error.ParseErrorOccurred;
+        },
+    }
+    self.advance();
+
+    const src_usage = HidKeyMap.lookup(src_token.text) orelse {
+        const msg = try std.fmt.allocPrint(self.allocator, "Source '{s}' has no HID-level mapping. Supported names live in src/HidKeyMap.zig — add it there if needed.", .{src_token.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+
+    if (!self.match(.Token_BeginList)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "'.remap' requires a [device <alias>] guard. Global remaps are not supported (would clobber other keyboards).", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected 'device' inside guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!std.mem.eql(u8, self.previous().text, "device")) {
+        self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Expected 'device' keyword inside guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected device alias name after 'device'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const alias_token = self.previous();
+    const alias_name = alias_token.text;
+    if (!mappings.device_aliases.contains(alias_name)) {
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown device alias '{s}'. Declare it with '.device {s} {{ vendor: 0x..., product: 0x... }}' first.", .{ alias_name, alias_name });
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, alias_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (!self.match(.Token_EndList)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ']' to close device guard", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    // Branch: colon form (`.remap X [device d] : Y`) vs block form
+    // (`.remap X [device d] { tap: ..., hold: ..., ... }`).
+    if (self.peek_check(.Token_BeginBlock)) {
+        _ = self.advance();
+        try self.parse_remap_block_body(mappings, src_token, src_usage, alias_name);
+        return;
+    }
+
+    // Colon form (simple HID-level swap). Right-hand side is grabbed
+    // by Token_Command which runs to newline.
+    if (!self.match(.Token_Command)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected ':' followed by destination key, or '{' for the tap-hold block form", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const dst_token = self.previous();
+    const dst_name = std.mem.trim(u8, dst_token.text, " \t");
+    if (dst_name.len == 0) {
+        self.error_info = try ParseError.fromToken(self.allocator, dst_token, "Empty destination — expected a key name (e.g., lctrl)", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const dst_usage = HidKeyMap.lookup(dst_name) orelse {
+        const msg = try std.fmt.allocPrint(self.allocator, "Destination '{s}' has no HID-level mapping. Supported names live in src/HidKeyMap.zig.", .{dst_name});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, dst_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+
+    mappings.add_remap(src_usage, dst_usage, alias_name) catch |err| {
+        if (err == error.RemapConflict) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Source key '{s}' is already claimed by another .remap or .remap{{}} on device '{s}'", .{ src_token.text, alias_name });
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return err;
+    };
+}
+
+/// Parse the body of `.remap X [device d] { ... }`. The opening `{`
+/// has already been consumed.
+fn parse_remap_block_body(self: *Parser, mappings: *Mappings, src_token: Token, src_usage: u32, alias_name: []const u8) !void {
+    var tap_usage: ?u32 = null;
+    var hold_usage: ?u32 = null;
+    var hold_target_text: []const u8 = "";
+    var timeout_ms: u32 = 200;
+    var permissive_hold: bool = true;
+    var hold_on_other_key_press: bool = false;
+    var retro_tap: bool = false;
+
+    while (!self.match(.Token_EndBlock)) {
+        if (!self.match(.Token_Identifier)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected field name (tap, hold, timeout, permissive_hold, hold_on_other_key_press, retro_tap) or '}'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        const field_token = self.previous();
+        const field = field_token.text;
+
+        if (!self.match(.Token_Colon)) {
+            const token = self.peek() orelse self.previous();
+            const msg = try std.fmt.allocPrint(self.allocator, "Expected ':' after field name '{s}'", .{field});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        if (std.mem.eql(u8, field, "tap")) {
+            tap_usage = try self.parse_keysym_value();
+        } else if (std.mem.eql(u8, field, "hold")) {
+            // Capture the raw token text so we can emit a clear
+            // "layer holds aren't wired up yet" diagnostic for things
+            // like `hold : fn_layer` (a mode name, not a key).
+            const peeked = self.peek() orelse self.previous();
+            hold_target_text = peeked.text;
+            hold_usage = HidKeyMap.lookup(peeked.text) orelse blk: {
+                // Not a HID key — could be a layer name. Consume the
+                // token, leave hold_usage null, validate later.
+                self.advance();
+                break :blk null;
+            };
+            if (hold_usage != null) self.advance();
+        } else if (std.mem.eql(u8, field, "timeout")) {
+            timeout_ms = try self.parse_duration_ms();
+        } else if (std.mem.eql(u8, field, "permissive_hold")) {
+            permissive_hold = try self.parse_bool_on_off();
+        } else if (std.mem.eql(u8, field, "hold_on_other_key_press")) {
+            hold_on_other_key_press = try self.parse_bool_on_off();
+        } else if (std.mem.eql(u8, field, "retro_tap")) {
+            retro_tap = try self.parse_bool_on_off();
+        } else {
+            const msg = try std.fmt.allocPrint(self.allocator, "Unknown field '{s}' in .remap block. Supported: tap, hold, timeout, permissive_hold, hold_on_other_key_press, retro_tap", .{field});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, field_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        _ = self.match(.Token_Comma);
+    }
+
+    if (tap_usage == null) {
+        self.error_info = try ParseError.fromToken(self.allocator, src_token, "Missing required field 'tap' in .remap block", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (hold_usage == null) {
+        // Layer-hold case (`hold : fn_layer`). Mode-based holds aren't
+        // wired into the grabber yet — accept the parse but warn so the
+        // user knows that specific rule won't apply at runtime.
+        if (hold_target_text.len > 0 and mappings.mode_map.contains(hold_target_text)) {
+            log.warn(
+                "ignoring .remap {{tap, hold: {s}}} on device {s} — layer holds are not yet implemented (D6+ scope); other rules in this config still apply",
+                .{ hold_target_text, alias_name },
+            );
+            return;
+        }
+        self.error_info = try ParseError.fromToken(self.allocator, src_token, "Missing required field 'hold' in .remap block. (For a plain remap with no tap-vs-hold, use the colon form: .remap KEY [device D] : TARGET)", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    mappings.add_taphold(.{
+        .src_usage = src_usage,
+        .tap_usage = tap_usage.?,
+        .hold_usage = hold_usage.?,
+        .device_alias = alias_name,
+        .timeout_ms = timeout_ms,
+        .permissive_hold = permissive_hold,
+        .hold_on_other_key_press = hold_on_other_key_press,
+        .retro_tap = retro_tap,
+    }) catch |err| {
+        if (err == error.RemapConflict) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Source key '{s}' is already claimed by another .remap or .remap{{}} on device '{s}'", .{ src_token.text, alias_name });
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, src_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return err;
+    };
+}
+
+fn parse_keysym_value(self: *Parser) !u32 {
+    const token = self.peek() orelse {
+        self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Expected key name", self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+    switch (token.type) {
+        .Token_Literal, .Token_Modifier, .Token_Identifier, .Token_Key => {},
+        else => {
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected key name (e.g., escape, lctrl, space)", self.current_file_path);
+            return error.ParseErrorOccurred;
+        },
+    }
+    self.advance();
+    return HidKeyMap.lookup(token.text) orelse {
+        const msg = try std.fmt.allocPrint(self.allocator, "Unknown key '{s}'. Supported names live in src/HidKeyMap.zig.", .{token.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+}
+
+fn parse_duration_ms(self: *Parser) !u32 {
+    if (!self.match(.Token_Key)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected number for duration (e.g., 120 or 120ms)", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const num_token = self.previous();
+    const value = std.fmt.parseInt(u32, num_token.text, 10) catch {
+        const msg = try std.fmt.allocPrint(self.allocator, "Invalid duration '{s}'", .{num_token.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, num_token, msg, self.current_file_path);
+        return error.ParseErrorOccurred;
+    };
+    // Optional `ms` unit suffix. Accepted-and-ignored (timeouts already
+    // in ms). Reserved for future seconds support.
+    if (self.peek_check(.Token_Identifier)) {
+        if (self.peek()) |t| {
+            if (std.mem.eql(u8, t.text, "ms")) _ = self.advance();
+        }
+    }
+    return value;
+}
+
+fn parse_bool_on_off(self: *Parser) !bool {
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected 'on' or 'off'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const t = self.previous();
+    if (std.mem.eql(u8, t.text, "on") or std.mem.eql(u8, t.text, "true")) return true;
+    if (std.mem.eql(u8, t.text, "off") or std.mem.eql(u8, t.text, "false")) return false;
+    const msg = try std.fmt.allocPrint(self.allocator, "Expected 'on' or 'off', got '{s}'", .{t.text});
+    defer self.allocator.free(msg);
+    self.error_info = try ParseError.fromToken(self.allocator, t, msg, self.current_file_path);
+    return error.ParseErrorOccurred;
+}
+
+/// Parse `.device <name> { vendor: 0x..., product: 0x... }`.
+fn parse_device_decl(self: *Parser, mappings: *Mappings) !void {
+    if (!self.match(.Token_Identifier)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected device alias name after '.device'", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    const name_token = self.previous();
+    const name = name_token.text;
+
+    if (!self.match(.Token_BeginBlock)) {
+        const token = self.peek() orelse self.previous();
+        self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '{' after device alias name (use form: .device <name> { vendor: 0x..., product: 0x... })", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    var vendor: ?u32 = null;
+    var product: ?u32 = null;
+
+    while (!self.match(.Token_EndBlock)) {
+        if (!self.match(.Token_Identifier)) {
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected field name (vendor / product) or '}'", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        const field_token = self.previous();
+        const field_name = field_token.text;
+
+        if (!self.match(.Token_Colon)) {
+            const token = self.peek() orelse self.previous();
+            const msg = try std.fmt.allocPrint(self.allocator, "Expected ':' after field name '{s}'", .{field_name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        if (!self.match(.Token_Key_Hex)) {
+            const token = self.peek() orelse self.previous();
+            const msg = try std.fmt.allocPrint(self.allocator, "Expected hex value (e.g., 0x05AC) for field '{s}'", .{field_name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        const value = try self.parse_key_hex();
+
+        if (std.mem.eql(u8, field_name, "vendor")) {
+            if (vendor != null) {
+                self.error_info = try ParseError.fromToken(self.allocator, field_token, "Duplicate field 'vendor'", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+            vendor = value;
+        } else if (std.mem.eql(u8, field_name, "product")) {
+            if (product != null) {
+                self.error_info = try ParseError.fromToken(self.allocator, field_token, "Duplicate field 'product'", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+            product = value;
+        } else {
+            const msg = try std.fmt.allocPrint(self.allocator, "Unknown field '{s}' in .device block. Supported fields: vendor, product", .{field_name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, field_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+
+        _ = self.match(.Token_Comma);
+    }
+
+    if (vendor == null) {
+        self.error_info = try ParseError.fromToken(self.allocator, name_token, "Missing required field 'vendor' in .device block", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+    if (product == null) {
+        self.error_info = try ParseError.fromToken(self.allocator, name_token, "Missing required field 'product' in .device block", self.current_file_path);
+        return error.ParseErrorOccurred;
+    }
+
+    mappings.add_device_alias(name, vendor.?, product.?) catch |err| {
+        if (err == error.DeviceAliasAlreadyExists) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Device alias '{s}' already declared", .{name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, name_token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        return err;
+    };
 }
 
 test "init" {

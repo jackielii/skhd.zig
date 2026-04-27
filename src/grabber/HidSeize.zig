@@ -84,6 +84,15 @@ pub fn deinit(self: *Self) void {
 
 /// Build a CFArray of dictionaries, one per match, and apply it as
 /// the manager's matching filter. Must be called before `start`.
+///
+/// We deliberately constrain to (Generic Desktop / Keyboard) only.
+/// Apple's built-in MacBook keyboard exposes other HID services on
+/// the same (vendor, product) — Apple Vendor at (0xFF00, 0x0B) for
+/// media keys, AppleMultitouchDevice at (0x0D, 0x0C) for the
+/// trackpad, etc. Seizing those is either disallowed by the kernel
+/// (`kIOReturnExclusiveAccess`) or breaks pointer/media input. By
+/// matching the keyboard service alone, the media-key service emits
+/// directly to the OS unchanged — F-row default actions keep working.
 pub fn setMatches(self: *Self, matches: []const Match) !void {
     if (self.running) return error.AlreadyRunning;
 
@@ -105,11 +114,6 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         defer c.CFRelease(vendor_key);
         const product_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDProductIDKey, c.kCFStringEncodingUTF8);
         defer c.CFRelease(product_key);
-        // Without these two extra keys the matcher catches every HID
-        // interface on the composite device — keyboard, trackpad,
-        // touch bar, etc. Seizing a trackpad interface kills cursor
-        // movement. Constrain the match to "Generic Desktop /
-        // Keyboard" so other interfaces stay live.
         const usage_page_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsagePageKey, c.kCFStringEncodingUTF8);
         defer c.CFRelease(usage_page_key);
         const usage_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsageKey, c.kCFStringEncodingUTF8);

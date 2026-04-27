@@ -1199,30 +1199,26 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
         .pressed = ev.pressed,
     };
 
-    // Build the set of source-key usages currently in .pending
-    // across all slots. If the event we're about to dispatch is a
-    // fellow source (i.e. the source key of *another* slot that's
-    // currently pending), the foreign slot must NOT buffer it —
-    // letting it do so leads to double-emit pathologies (e.g. user
-    // presses caps+space; caps's pending buffer captures space-down,
-    // and on caps's hold-commit it replays space-down to the OS,
-    // which sees space held under ctrl and autorepeats). The slot
-    // whose own source matches still processes normally.
-    var pending_sources: std.BoundedArray(u16, 8) = .{};
-    for (cx.slots) |*slot| {
-        if (slot.engine.state == .pending) {
-            pending_sources.append(slot.engine.rule.src_usage) catch {};
-        }
-    }
-    const event_is_fellow_source = blk: for (pending_sources.constSlice()) |u| {
-        if (u == usage16) break :blk true;
+    // If this event is the source of some slot's tap-hold rule,
+    // only deliver it to that slot — never to other slots. Letting
+    // a foreign slot buffer a fellow source leads to double-emit
+    // pathologies: user presses caps+space, caps_slot (still
+    // pending) snapshots space-down into its buffer, and on caps's
+    // hold-commit replays space-down to the OS, which then sees
+    // space held under ctrl and autorepeats.
+    //
+    // The check has to be "is this any slot's source?", not "is
+    // this a *currently-pending* slot's source?": at the moment
+    // space-down arrives, space_slot hasn't yet transitioned to
+    // pending (this event is what triggers it), so the pending-
+    // state-filtered version of the check would miss this case.
+    const event_is_some_slot_source = blk: for (cx.slots) |*slot| {
+        if (slot.engine.rule.src_usage == usage16) break :blk true;
     } else false;
 
     var any_consumed = false;
     for (cx.slots) |*slot| {
-        if (event_is_fellow_source and slot.engine.rule.src_usage != usage16) {
-            // Another slot's source key — let it handle it; we stay
-            // out of the way so we don't snapshot it into our buffer.
+        if (event_is_some_slot_source and slot.engine.rule.src_usage != usage16) {
             continue;
         }
         const r = slot.engine.feed(taphold_event);

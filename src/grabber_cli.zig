@@ -154,22 +154,119 @@ pub fn uninstallGrabber(allocator: std.mem.Allocator) !void {
     if (term != .Exited or term.Exited != 0) return error.UninstallFailed;
 }
 
+/// Walk every prerequisite for caps_lock-class tap-hold and report
+/// where the chain breaks. One command users can run when something
+/// isn't working — gives a clear "this is where it's broken, this is
+/// how to fix it" without them having to know the layered design.
 pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !void {
+    std.debug.print("skhd-grabber status\n", .{});
+    std.debug.print("===================\n\n", .{});
+
+    var ok_count: u32 = 0;
+    var fail_count: u32 = 0;
+
+    // 1. Karabiner DriverKit dext (provides the virtual HID device
+    //    that the grabber injects through). Loaded dext shows up as
+    //    a running process under _driverkit owned by launchd.
+    if (try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice")) {
+        std.debug.print("  [OK]      Karabiner-DriverKit-VirtualHIDDevice (dext) loaded\n", .{});
+        ok_count += 1;
+    } else {
+        std.debug.print(
+            \\  [MISSING] Karabiner-DriverKit-VirtualHIDDevice (dext) not loaded
+            \\            Required for HID injection. Install from
+            \\              https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice
+            \\            Then approve it in System Settings > Privacy & Security.
+            \\
+        , .{});
+        fail_count += 1;
+    }
+
+    // 2. Karabiner-VirtualHIDDevice-Daemon (userland helper that
+    //    bridges our IPC to the dext). It's the process we connect
+    //    to via vhidd_server socket.
+    if (try processRunning(allocator, "Karabiner-VirtualHIDDevice-Daemon")) {
+        std.debug.print("  [OK]      Karabiner-VirtualHIDDevice-Daemon running\n", .{});
+        ok_count += 1;
+    } else {
+        std.debug.print(
+            \\  [MISSING] Karabiner-VirtualHIDDevice-Daemon not running
+            \\            Comes with the dext install. Try:
+            \\              sudo launchctl kickstart -k system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon
+            \\
+        , .{});
+        fail_count += 1;
+    }
+
+    // 3. skhd-grabber LaunchDaemon plist (we installed it via
+    //    --install-grabber).
+    if (isGrabberInstalled()) {
+        std.debug.print("  [OK]      skhd-grabber LaunchDaemon plist installed\n", .{});
+        ok_count += 1;
+    } else {
+        std.debug.print(
+            \\  [MISSING] skhd-grabber LaunchDaemon plist not found
+            \\            Install with:
+            \\              sudo skhd --install-grabber
+            \\
+        , .{});
+        fail_count += 1;
+    }
+
+    // 4. skhd-grabber process running.
+    if (try processRunning(allocator, "skhd-grabber")) {
+        std.debug.print("  [OK]      skhd-grabber process running\n", .{});
+        ok_count += 1;
+    } else {
+        std.debug.print(
+            \\  [MISSING] skhd-grabber not running
+            \\            Try:
+            \\              sudo launchctl kickstart -k system/com.jackielii.skhd.grabber
+            \\
+        , .{});
+        fail_count += 1;
+    }
+
+    // 5. IPC socket reachable + protocol version match.
     var client = Client.connect(allocator, socket_path) catch |err| {
         std.debug.print(
-            \\skhd-grabber: not reachable at {s} ({s})
-            \\Install with: sudo skhd --install-grabber
+            \\  [FAIL]    IPC socket not reachable at {s} ({s})
             \\
-        , .{ socket_path, @errorName(err) });
+            \\Summary: {d} OK, {d} failing — fix the [MISSING]/[FAIL] items above.
+            \\
+        , .{ socket_path, @errorName(err), ok_count, fail_count + 1 });
         return err;
     };
     defer client.close();
+    client.hello() catch |err| {
+        std.debug.print(
+            \\  [FAIL]    IPC handshake failed ({s}) — protocol version mismatch?
+            \\            agent expects v{d}; grabber may be older.
+            \\
+        , .{ @errorName(err), protocol.protocol_version });
+        return err;
+    };
+    client.bye() catch {};
+    std.debug.print("  [OK]      IPC socket reachable at {s} (protocol v{d})\n", .{ socket_path, protocol.protocol_version });
+    ok_count += 1;
 
-    try client.hello();
-    // No way to query rule state yet — D5 will add `status` request type.
-    // For now, a successful hello+bye is the heartbeat.
-    try client.bye();
-    std.debug.print("skhd-grabber: reachable at {s}, protocol v{d}\n", .{ socket_path, protocol.protocol_version });
+    if (fail_count == 0) {
+        std.debug.print("\nSummary: {d} OK, 0 failing — everything looks good.\n", .{ok_count});
+    } else {
+        std.debug.print("\nSummary: {d} OK, {d} failing — fix the [MISSING] items above.\n", .{ ok_count, fail_count });
+    }
+}
+
+/// True if at least one running process matches `needle` in its
+/// argv. Uses pgrep so we don't need root for system-domain queries.
+fn processRunning(allocator: std.mem.Allocator, needle: []const u8) !bool {
+    var child = std.process.Child.init(&.{ "/usr/bin/pgrep", "-f", needle }, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    const term = try child.wait();
+    return term == .Exited and term.Exited == 0;
 }
 
 /// Send a hard-coded sample rule to the grabber so we can validate the

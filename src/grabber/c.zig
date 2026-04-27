@@ -29,6 +29,10 @@ pub const CFNumberRef = ?*anyopaque;
 pub const CFStringRef = ?*anyopaque;
 pub const CFRunLoopRef = ?*anyopaque;
 pub const CFRunLoopTimerRef = ?*anyopaque;
+pub const CFRunLoopSourceRef = ?*anyopaque;
+pub const CFFileDescriptorRef = ?*anyopaque;
+pub const CFFileDescriptorNativeDescriptor = c_int;
+pub const CFOptionFlags = u64;
 
 pub const CFIndex = isize;
 pub const CFTimeInterval = f64;
@@ -82,6 +86,32 @@ pub extern fn CFRunLoopRunInMode(mode: CFStringRef, seconds: CFTimeInterval, ret
 pub extern fn CFRunLoopStop(rl: CFRunLoopRef) void;
 pub extern fn CFRunLoopAddTimer(rl: CFRunLoopRef, timer: CFRunLoopTimerRef, mode: CFStringRef) void;
 pub extern fn CFRunLoopTimerInvalidate(timer: CFRunLoopTimerRef) void;
+pub extern fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef) void;
+pub extern fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef) void;
+
+pub const CFFileDescriptorCallBack = ?*const fn (CFFileDescriptorRef, CFOptionFlags, ?*anyopaque) callconv(.C) void;
+
+pub const CFFileDescriptorContext = extern struct {
+    version: CFIndex = 0,
+    info: ?*anyopaque = null,
+    retain: ?*const fn (?*const anyopaque) callconv(.C) ?*const anyopaque = null,
+    release: ?*const fn (?*const anyopaque) callconv(.C) void = null,
+    copyDescription: ?*const fn (?*const anyopaque) callconv(.C) CFStringRef = null,
+};
+
+pub const kCFFileDescriptorReadCallBack: CFOptionFlags = 1 << 0;
+pub const kCFFileDescriptorWriteCallBack: CFOptionFlags = 1 << 1;
+
+pub extern fn CFFileDescriptorCreate(
+    allocator: CFAllocatorRef,
+    fd: CFFileDescriptorNativeDescriptor,
+    closeOnInvalidate: Boolean,
+    callout: CFFileDescriptorCallBack,
+    context: *CFFileDescriptorContext,
+) CFFileDescriptorRef;
+pub extern fn CFFileDescriptorEnableCallBacks(f: CFFileDescriptorRef, callBackTypes: CFOptionFlags) void;
+pub extern fn CFFileDescriptorCreateRunLoopSource(allocator: CFAllocatorRef, f: CFFileDescriptorRef, order: CFIndex) CFRunLoopSourceRef;
+pub extern fn CFFileDescriptorInvalidate(f: CFFileDescriptorRef) void;
 pub extern fn CFRunLoopTimerCreate(
     allocator: CFAllocatorRef,
     fireDate: CFAbsoluteTime,

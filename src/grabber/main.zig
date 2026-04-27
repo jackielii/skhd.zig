@@ -155,98 +155,325 @@ pub fn main() !void {
 
     log.info("skhd-grabber starting (socket={s}, pid={d})", .{ socket_path, std.c.getpid() });
 
-    try ensureSocketParentDir(socket_path);
-    // Stale socket from a crashed previous run: bind() would EADDRINUSE.
-    posix.unlink(socket_path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
+    var daemon = Daemon.init(gpa, socket_path) catch |err| {
+        log.err("daemon init failed: {s}", .{@errorName(err)});
+        return err;
     };
+    defer daemon.deinit();
 
-    var addr = try std.net.Address.initUnix(socket_path);
-    var server = try addr.listen(.{ .reuse_address = false });
-    defer server.deinit();
-    bound_socket_path = socket_path;
-    defer {
-        posix.unlink(socket_path) catch {};
+    installSignalHandlers();
+    daemon.run();
+
+    log.info("shutting down", .{});
+}
+
+/// Long-lived daemon state. The IPC listener stays alive for the
+/// process's whole life so the agent can re-apply rules without
+/// restarting the grabber. vhidd connection / HID seize / engine
+/// slots are all rebuilt from scratch on each apply_rules — that's
+/// the simple-and-correct policy until rule churn is high enough
+/// that a diff-and-patch path would be a meaningful win.
+const Daemon = struct {
+    allocator: std.mem.Allocator,
+    socket_path: []const u8,
+    server: std.net.Server,
+    ruleset: RuleSet,
+
+    /// CFFileDescriptor wrapping `server.stream.handle`. Drives the
+    /// listener callback off the same CFRunLoop that handles HID
+    /// seize events, so accept() and seize callbacks don't compete.
+    cf_listener: c.CFFileDescriptorRef = null,
+    cf_listener_source: c.CFRunLoopSourceRef = null,
+
+    /// Lazy: connected on the first apply_rules so a daemon with no
+    /// rules pending doesn't spend 3s probing vhidd at startup.
+    vhidd: ?*Vhidd.Client = null,
+    /// Lazy: created on first apply_rules, recreated each rebuild.
+    seize: ?*HidSeize = null,
+    /// Slot array owned by the Daemon, sized to the current rule list.
+    slots: []EngineSlot = &.{},
+    /// Live agent connection used to push mode_change for layer holds.
+    /// Replaced on each apply_rules; the previous one (if any) is
+    /// closed.
+    agent_layer_conn: ?std.net.Stream = null,
+
+    /// Stable-address state for callbacks. Kept on the Daemon so the
+    /// CFFileDescriptor / CFRunLoopTimer / IOHIDManager callbacks have
+    /// a fixed `info` pointer across rebuilds.
+    seize_ctx: SeizeCtx,
+    layer_ctx: LayerPushCtx,
+
+    pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) !Daemon {
+        try ensureSocketParentDir(socket_path);
+        // Stale socket from a crashed previous run: bind() would EADDRINUSE.
+        posix.unlink(socket_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+
+        var addr = try std.net.Address.initUnix(socket_path);
+        var server = try addr.listen(.{ .reuse_address = false });
+        errdefer server.deinit();
+
+        bound_socket_path = socket_path;
+        // Mode 0666 so any logged-in user's agent can connect. Per-uid
+        // auth lands in D5 (uid is already carried in `hello`).
+        chmodPath(socket_path, 0o666) catch |err| {
+            log.warn("chmod {s} failed: {s}", .{ socket_path, @errorName(err) });
+        };
+
+        return .{
+            .allocator = allocator,
+            .socket_path = socket_path,
+            .server = server,
+            .ruleset = RuleSet.init(allocator),
+            .seize_ctx = .{
+                .state = .{},
+                // vhidd pointer set on lazy connect.
+                .vhidd = undefined,
+            },
+            .layer_ctx = .{ .stream = null, .allocator = allocator },
+        };
+    }
+
+    pub fn deinit(self: *Daemon) void {
+        self.teardownSeize();
+        if (self.vhidd) |v| {
+            v.close();
+            self.allocator.destroy(v);
+            self.vhidd = null;
+        }
+        if (self.agent_layer_conn) |s| {
+            s.close();
+            self.agent_layer_conn = null;
+        }
+        if (self.cf_listener_source) |src| {
+            c.CFRunLoopRemoveSource(c.CFRunLoopGetCurrent(), src, c.kCFRunLoopDefaultMode);
+            c.CFRelease(src);
+            self.cf_listener_source = null;
+        }
+        if (self.cf_listener) |fd| {
+            c.CFFileDescriptorInvalidate(fd);
+            c.CFRelease(fd);
+            self.cf_listener = null;
+        }
+        self.ruleset.deinit();
+        self.server.deinit();
+        posix.unlink(self.socket_path) catch {};
         bound_socket_path = null;
     }
 
-    // World-writable so any logged-in user's agent can connect. D5 will
-    // tighten this when per-uid auth lands; for D1 the protocol carries
-    // uid in the hello and we trust it.
-    chmodPath(socket_path, 0o666) catch |err| {
-        log.warn("chmod {s} failed: {s}", .{ socket_path, @errorName(err) });
-    };
-
-    installSignalHandlers();
-
-    var ruleset = RuleSet.init(gpa);
-    defer ruleset.deinit();
-
-    log.info("listening on {s}", .{socket_path});
-
-    while (!should_exit.load(.acquire)) {
-        const conn = server.accept() catch |err| switch (err) {
-            // Interrupted by signal: re-check should_exit and either loop
-            // around to a clean shutdown or keep listening.
-            error.ConnectionAborted, error.SocketNotListening => break,
-            else => {
-                log.warn("accept failed: {s}", .{@errorName(err)});
-                continue;
-            },
+    pub fn run(self: *Daemon) void {
+        self.startListenerSource() catch |err| {
+            log.err("failed to start IPC listener: {s}", .{@errorName(err)});
+            return;
         };
-        // We deliberately don't `defer conn.stream.close()` here —
-        // when rules arrive we hand the still-open connection to
-        // runDaemonSeize so layer-hold rules can push mode_change
-        // back to the agent. The seize loop closes it on exit.
-        const result = Ipc.serve(gpa, conn.stream, &ruleset) catch |err| blk: {
+
+        log.info("listening on {s}", .{self.socket_path});
+
+        while (!should_exit.load(.acquire)) {
+            const rc = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 60.0, 0);
+            switch (rc) {
+                c.kCFRunLoopRunStopped, c.kCFRunLoopRunFinished => break,
+                else => {},
+            }
+        }
+    }
+
+    fn startListenerSource(self: *Daemon) !void {
+        var ctx: c.CFFileDescriptorContext = .{
+            .version = 0,
+            .info = self,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+        const cf_fd = c.CFFileDescriptorCreate(
+            c.kCFAllocatorDefault,
+            self.server.stream.handle,
+            0, // closeOnInvalidate=false: server owns the fd
+            listenerCallback,
+            &ctx,
+        );
+        if (cf_fd == null) return error.CFFileDescriptorCreateFailed;
+        errdefer c.CFRelease(cf_fd);
+        self.cf_listener = cf_fd;
+
+        const src = c.CFFileDescriptorCreateRunLoopSource(c.kCFAllocatorDefault, cf_fd, 0);
+        if (src == null) return error.RunLoopSourceCreateFailed;
+        self.cf_listener_source = src;
+
+        c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), src, c.kCFRunLoopDefaultMode);
+        c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
+    }
+
+    fn handleListener(self: *Daemon) void {
+        const conn = self.server.accept() catch |err| {
+            log.warn("accept failed: {s}", .{@errorName(err)});
+            return;
+        };
+
+        const result = Ipc.serve(self.allocator, conn.stream, &self.ruleset) catch |err| blk: {
             log.warn("client session ended: {s}", .{@errorName(err)});
             break :blk Ipc.ServeResult.closed;
         };
 
         if (result == .rules_applied) {
-            const rules = firstRulesInRuleSet(&ruleset) orelse {
+            self.applyLatestRules(conn.stream) catch |err| {
+                log.err("applyLatestRules failed: {s}", .{@errorName(err)});
                 conn.stream.close();
-                continue;
             };
-            const has_layer_rule = blk: {
-                for (rules) |r| if (r.hold_layer != null) break :blk true;
-                break :blk false;
-            };
-            log.info(
-                "apply_rules received — transitioning to seize loop ({d} rule(s), layer_push={})",
-                .{ rules.len, has_layer_rule },
-            );
-
-            // Drop the IPC listener socket — re-applies require a
-            // daemon restart for now. The accepted connection
-            // (conn.stream) lives on into runDaemonSeize for layer
-            // pushes.
-            posix.unlink(socket_path) catch {};
-            server.deinit();
-            bound_socket_path = null;
-
-            const agent_stream: ?std.net.Stream = if (has_layer_rule) conn.stream else null;
-            if (!has_layer_rule) conn.stream.close();
-            defer if (has_layer_rule) conn.stream.close();
-
-            runDaemonSeize(gpa, rules, agent_stream) catch |err| {
-                log.err("seize loop failed: {s}", .{@errorName(err)});
-                std.process.exit(1);
-            };
-            return;
+        } else {
+            conn.stream.close();
         }
-
-        // No rules applied this session — close and keep accepting.
-        conn.stream.close();
     }
 
-    log.info("shutting down", .{});
+    /// (Re)build vhidd / seize / engine slots from whatever rules the
+    /// ruleset currently holds. `agent_conn` is the connection that
+    /// just sent apply_rules — used as the layer-push target if any
+    /// rule is a layer-hold rule. Ownership of `agent_conn` transfers
+    /// here; on exit it's either kept (layer rules present) or
+    /// closed.
+    fn applyLatestRules(self: *Daemon, agent_conn: std.net.Stream) !void {
+        const rules = firstRulesInRuleSet(&self.ruleset) orelse {
+            // Empty rule set after apply: tear everything down so we
+            // stop seizing devices.
+            log.info("apply_rules cleared the rule set — releasing seize", .{});
+            self.teardownSeize();
+            agent_conn.close();
+            return;
+        };
+
+        var has_layer_rule = false;
+        var matches = std.ArrayList(HidSeize.Match).init(self.allocator);
+        defer matches.deinit();
+
+        for (rules) |rule| {
+            const dev = rule.device orelse {
+                log.err("rule src=0x{X:0>2} has no device match — global seize not supported yet", .{rule.src_usage});
+                agent_conn.close();
+                return error.MissingDevice;
+            };
+            if (rule.hold_layer != null) has_layer_rule = true;
+            var seen = false;
+            for (matches.items) |m| {
+                if (m.vendor == dev.vendor and m.product == dev.product) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) try matches.append(.{ .vendor = dev.vendor, .product = dev.product });
+        }
+
+        log.info("apply_rules: {d} rule(s) across {d} device(s) layer_push={}", .{ rules.len, matches.items.len, has_layer_rule });
+        for (rules, 0..) |rule, i| {
+            const hold_str: []const u8 = if (rule.hold_layer) |l| l else "<hid_usage>";
+            log.info(
+                "  rule[{d}]: src=0x{X:0>2} tap=0x{X:0>2} hold={s} timeout={d}ms perm={} hokp={}",
+                .{ i, rule.src_usage, rule.tap_usage, hold_str, rule.timeout_ms, rule.permissive_hold, rule.hold_on_other_key_press },
+            );
+        }
+
+        // Lazy vhidd init on first apply.
+        if (self.vhidd == null) {
+            log.info("connecting to vhidd_server", .{});
+            const v = try self.allocator.create(Vhidd.Client);
+            errdefer self.allocator.destroy(v);
+            v.* = try Vhidd.Client.connect(self.allocator);
+            errdefer v.close();
+            log.info("initializing virtual keyboard", .{});
+            try v.initializeKeyboard(.{});
+            try v.waitForBoolTrue(.virtual_hid_keyboard_ready, 5000);
+            log.info("virtual keyboard ready", .{});
+            self.vhidd = v;
+            self.seize_ctx.vhidd = v;
+        }
+
+        // Swap layer push target — close the previous agent
+        // connection so the agent's old listener cleans up.
+        if (self.agent_layer_conn) |old| old.close();
+        if (has_layer_rule) {
+            self.agent_layer_conn = agent_conn;
+        } else {
+            self.agent_layer_conn = null;
+            agent_conn.close();
+        }
+        self.layer_ctx.stream = self.agent_layer_conn;
+
+        // Tear down old seize + slots before allocating new ones.
+        // HidSeize is the singleton (one-process IOHIDManager); we
+        // must release it before calling HidSeize.init again.
+        self.teardownSeize();
+
+        const slots = try self.allocator.alloc(EngineSlot, rules.len);
+        errdefer self.allocator.free(slots);
+
+        for (rules, 0..) |rule, i| {
+            const hold_action: TapHold.HoldAction = if (rule.hold_layer) |layer_name| .{ .layer = layer_name } else .{
+                .hid_usage = std.math.cast(u16, rule.hold_usage) orelse return error.HoldUsageOverflow,
+            };
+            const th_rule: TapHold.Rule = .{
+                .src_usage = std.math.cast(u16, rule.src_usage) orelse return error.SourceUsageOverflow,
+                .tap_usage = std.math.cast(u16, rule.tap_usage) orelse return error.TapUsageOverflow,
+                .hold = hold_action,
+                .timeout_ms = rule.timeout_ms,
+                .permissive_hold = rule.permissive_hold,
+                .hold_on_other_key_press = rule.hold_on_other_key_press,
+                .retro_tap = rule.retro_tap,
+            };
+            slots[i] = .{
+                .seize_ctx = &self.seize_ctx,
+                .engine = TapHold.initWithLayerSink(
+                    th_rule,
+                    emitToVhidd,
+                    &self.seize_ctx,
+                    layerPushSink,
+                    &self.layer_ctx,
+                ),
+            };
+        }
+        self.slots = slots;
+        self.seize_ctx.slots = slots;
+
+        const seize = try HidSeize.init(self.allocator, seizeInputCallback, &self.seize_ctx);
+        errdefer seize.deinit();
+        try seize.setMatches(matches.items);
+        try seize.start(.seize);
+        self.seize = seize;
+
+        log.info("seize active — re-apply by sending another apply_rules over the IPC socket", .{});
+    }
+
+    fn teardownSeize(self: *Daemon) void {
+        if (self.seize) |s| {
+            s.stop();
+            s.deinit();
+            self.seize = null;
+        }
+        for (self.slots) |*slot| cancelTapHoldTimer(slot);
+        if (self.slots.len > 0) self.allocator.free(self.slots);
+        self.slots = &.{};
+        self.seize_ctx.slots = &.{};
+        // Drop any virtual keys we left held so a re-apply starts clean.
+        if (self.vhidd) |v| {
+            v.postKeyboardReport(.{}, &.{}) catch {};
+        }
+    }
+};
+
+fn listenerCallback(
+    cf_fd: c.CFFileDescriptorRef,
+    callback_types: c.CFOptionFlags,
+    info: ?*anyopaque,
+) callconv(.C) void {
+    _ = callback_types;
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    d.handleListener();
+    // CFFileDescriptor is one-shot: re-arm so the next pending
+    // accept fires another callback.
+    c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
 }
 
-/// Return the first non-empty per-uid rules slice in the ruleset.
-/// D5 will iterate the active console user; D5-precursor (this) just
-/// uses whatever's there so a single agent can drive end-to-end tests.
 fn firstRulesInRuleSet(rs: *const RuleSet) ?[]const protocol.Rule {
     var it = rs.per_uid.iterator();
     while (it.next()) |entry| {
@@ -254,130 +481,6 @@ fn firstRulesInRuleSet(rs: *const RuleSet) ?[]const protocol.Rule {
         if (rules.len > 0) return rules;
     }
     return null;
-}
-
-/// Run the seize + TapHold loop driven by IPC-supplied rules. Single-
-/// rule for now (uses the first entry in `rules`). Returns only on
-/// hard error; SIGTERM bypasses this via the signal handler's _exit.
-///
-/// `agent_stream` is the live IPC connection from the agent that
-/// applied these rules. It's borrowed for the lifetime of this call
-/// — used to push `mode_change` messages back to the agent when a
-/// layer-hold rule commits/releases. May be null when no rule is a
-/// layer rule (no pushes needed).
-fn runDaemonSeize(
-    allocator: std.mem.Allocator,
-    rules: []const protocol.Rule,
-    agent_stream: ?std.net.Stream,
-) !void {
-    if (rules.len == 0) return;
-
-    var has_layer_rule = false;
-    var matches = std.ArrayList(HidSeize.Match).init(allocator);
-    defer matches.deinit();
-
-    // Pre-flight: every rule needs a device match (global seize not
-    // supported yet). Dedup so we don't pass the same (vendor, product)
-    // twice to IOHIDManager.
-    for (rules) |rule| {
-        const dev = rule.device orelse {
-            log.err("rule src=0x{X:0>2} has no device match — global seize not supported yet", .{rule.src_usage});
-            return error.MissingDevice;
-        };
-        if (rule.hold_layer != null) has_layer_rule = true;
-        var seen = false;
-        for (matches.items) |m| {
-            if (m.vendor == dev.vendor and m.product == dev.product) {
-                seen = true;
-                break;
-            }
-        }
-        if (!seen) try matches.append(.{ .vendor = dev.vendor, .product = dev.product });
-    }
-    if (has_layer_rule and agent_stream == null) {
-        log.warn("layer-hold rule received but agent connection is closed — mode pushes will be dropped", .{});
-    }
-
-    log.info("daemon seize: {d} rule(s) across {d} device(s)", .{ rules.len, matches.items.len });
-    for (rules, 0..) |rule, i| {
-        const hold_str: []const u8 = if (rule.hold_layer) |l| l else "<hid_usage>";
-        log.info(
-            "  rule[{d}]: src=0x{X:0>2} tap=0x{X:0>2} hold={s} timeout={d}ms perm={} hokp={}",
-            .{ i, rule.src_usage, rule.tap_usage, hold_str, rule.timeout_ms, rule.permissive_hold, rule.hold_on_other_key_press },
-        );
-    }
-
-    log.info("connecting to vhidd_server", .{});
-    var vhidd = try Vhidd.Client.connect(allocator);
-    defer vhidd.close();
-
-    log.info("initializing virtual keyboard", .{});
-    try vhidd.initializeKeyboard(.{});
-    try vhidd.waitForBoolTrue(.virtual_hid_keyboard_ready, 5000);
-    log.info("virtual keyboard ready", .{});
-
-    var layer_ctx = LayerPushCtx{
-        .stream = agent_stream,
-        .allocator = allocator,
-    };
-    var ctx = SeizeCtx{ .state = .{}, .vhidd = &vhidd };
-
-    // Allocate one slot per rule. Slots must outlive the run loop;
-    // free on exit. Each slot holds an engine and its pending timer.
-    const slots = try allocator.alloc(EngineSlot, rules.len);
-    defer {
-        for (slots) |*s| cancelTapHoldTimer(s);
-        allocator.free(slots);
-    }
-
-    for (rules, 0..) |rule, i| {
-        const hold_action: TapHold.HoldAction = if (rule.hold_layer) |layer_name| .{ .layer = layer_name } else .{
-            .hid_usage = std.math.cast(u16, rule.hold_usage) orelse return error.HoldUsageOverflow,
-        };
-        const th_rule: TapHold.Rule = .{
-            .src_usage = std.math.cast(u16, rule.src_usage) orelse return error.SourceUsageOverflow,
-            .tap_usage = std.math.cast(u16, rule.tap_usage) orelse return error.TapUsageOverflow,
-            .hold = hold_action,
-            .timeout_ms = rule.timeout_ms,
-            // Layer rules buffer non-source events automatically (the
-            // engine handles it). permissive_hold and
-            // hold_on_other_key_press here are passed through verbatim
-            // — the engine knows to treat them differently for layer
-            // vs. modifier holds.
-            .permissive_hold = rule.permissive_hold,
-            .hold_on_other_key_press = rule.hold_on_other_key_press,
-            .retro_tap = rule.retro_tap,
-        };
-        slots[i] = .{
-            .seize_ctx = &ctx,
-            .engine = TapHold.initWithLayerSink(
-                th_rule,
-                emitToVhidd,
-                &ctx,
-                layerPushSink,
-                &layer_ctx,
-            ),
-        };
-    }
-    ctx.slots = slots;
-
-    var seize = try HidSeize.init(allocator, seizeInputCallback, &ctx);
-    defer seize.deinit();
-    try seize.setMatches(matches.items);
-    try seize.start(.seize);
-
-    log.info("daemon seize active — handling events until SIGTERM", .{});
-
-    while (!should_exit.load(.acquire)) {
-        const rc = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 60.0, 0);
-        switch (rc) {
-            c.kCFRunLoopRunStopped, c.kCFRunLoopRunFinished => break,
-            else => {},
-        }
-    }
-
-    seize.stop();
-    vhidd.postKeyboardReport(.{}, &.{}) catch {};
 }
 
 fn ensureSocketParentDir(socket_path: []const u8) !void {

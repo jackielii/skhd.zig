@@ -13,11 +13,18 @@ const TrackingAllocator = @import("TrackingAllocator.zig");
 const version = std.mem.trimRight(u8, @embedFile("VERSION"), "\n\r\t ");
 const log = std.log.scoped(.main);
 
-/// Default Zig only emits `err` in ReleaseFast/Small, which would suppress
-/// the session-start marker, watchdog notices, and other diagnostic lines we
-/// rely on from the deployed daemon's log file. Floor at `.warn` so anything
-/// we deliberately raise to warn-level survives in every build mode.
-pub const std_options: std.Options = .{ .log_level = .warn };
+/// Build-mode-aware log level: full debug locally, info in safe
+/// release builds (so production daemons keep their session-start
+/// marker, watchdog notices, etc.), warn-only in fast/small release
+/// builds where the noise floor matters and we don't want info
+/// chatter in user terminals. Mirrors the policy used by skhd-grabber.
+pub const std_options: std.Options = .{
+    .log_level = switch (builtin.mode) {
+        .Debug => .debug,
+        .ReleaseSafe => .info,
+        .ReleaseFast, .ReleaseSmall => .warn,
+    },
+};
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 

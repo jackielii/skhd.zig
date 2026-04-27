@@ -56,6 +56,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Shared protocol module: types + framing for the agent ↔ grabber
+    // IPC. Both binaries (and tests that exercise either side of the
+    // protocol) addImport this so they agree on the wire format.
+    const grabber_protocol_mod = b.createModule(.{
+        .root_source_file = b.path("src/grabber_protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Main executable
     const exe = b.addExecutable(.{
         .name = "skhd",
@@ -70,8 +79,24 @@ pub fn build(b: *std.Build) void {
     linkFrameworks(exe);
     addVersionImport(b, exe);
     exe.root_module.addOptions("build_options", options);
+    exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
 
     b.installArtifact(exe);
+
+    // skhd-grabber: system daemon (root) for caps_lock-class tap-hold.
+    // Plain Mach-O — installed by `skhd --install-grabber` to
+    // /usr/local/libexec/skhd-grabber and started by launchd. Links the
+    // same Apple frameworks for now (D2/D3 will need IOKit + CF for
+    // seize and Karabiner vhidd injection).
+    const grabber_exe = b.addExecutable(.{
+        .name = "skhd-grabber",
+        .root_source_file = b.path("src/grabber/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    linkFrameworks(grabber_exe);
+    grabber_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
+    b.installArtifact(grabber_exe);
 
     const installed_exe = b.getInstallPath(.bin, exe.name);
     const installed_app = b.getInstallPath(.prefix, "skhd.app");
@@ -217,6 +242,7 @@ pub fn build(b: *std.Build) void {
     const alloc_options = b.addOptions();
     alloc_options.addOption(bool, track_alloc_option, true);
     alloc_exe.root_module.addOptions("build_options", alloc_options);
+    alloc_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     b.installArtifact(alloc_exe);
     const installed_alloc_exe = b.getInstallPath(.bin, alloc_exe.name);
 
@@ -256,6 +282,7 @@ pub fn build(b: *std.Build) void {
     addVersionImport(b, exe_unit_tests);
 
     exe_unit_tests.root_module.addOptions("build_options", options);
+    exe_unit_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     test_step.dependOn(&run_exe_unit_tests.step);
 
@@ -268,6 +295,7 @@ pub fn build(b: *std.Build) void {
     linkFrameworks(tests_unit_tests);
     addVersionImport(b, exe_unit_tests);
     tests_unit_tests.root_module.addOptions("build_options", options);
+    tests_unit_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     const run_tests_unit_tests = b.addRunArtifact(tests_unit_tests);
     test_step.dependOn(&run_tests_unit_tests.step);
 
@@ -279,6 +307,8 @@ pub fn build(b: *std.Build) void {
         "src/Keycodes.zig",
         "src/EventTap.zig",
         "src/synthesize.zig",
+        "src/grabber_protocol.zig",
+        "src/grabber/RuleSet.zig",
         // "src/Hotload.zig", // Skip hot load test for local test only
     };
 
@@ -291,6 +321,12 @@ pub fn build(b: *std.Build) void {
         linkFrameworks(module_tests);
         addVersionImport(b, module_tests);
         module_tests.root_module.addOptions("build_options", options);
+        // RuleSet's test imports the shared protocol module by name;
+        // grabber_protocol.zig itself is the module's root, so it
+        // doesn't need (and can't have) an import of itself.
+        if (!std.mem.eql(u8, test_file, "src/grabber_protocol.zig")) {
+            module_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
+        }
         const run_module_tests = b.addRunArtifact(module_tests);
         test_step.dependOn(&run_module_tests.step);
     }

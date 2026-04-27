@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const track_alloc = @import("build_options").track_alloc;
 
 const c = @import("c.zig");
+const grabber_cli = @import("grabber_cli.zig");
+const grabber_protocol = @import("grabber_protocol");
 const service = @import("service.zig");
 const Skhd = @import("skhd.zig");
 const synthesize = @import("synthesize.zig");
@@ -122,6 +124,20 @@ pub fn main() !void {
             no_hotload = true;
         } else if (std.mem.eql(u8, args[i], "-P") or std.mem.eql(u8, args[i], "--profile")) {
             profile = true;
+        } else if (std.mem.eql(u8, args[i], "--install-grabber")) {
+            grabber_cli.installGrabber(gpa) catch std.process.exit(1);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--uninstall-grabber")) {
+            grabber_cli.uninstallGrabber(gpa) catch std.process.exit(1);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--grabber-status")) {
+            const path = consumeOptionalPath(args, &i) orelse grabber_protocol.default_socket_path;
+            grabber_cli.grabberStatus(gpa, path) catch std.process.exit(1);
+            return;
+        } else if (std.mem.eql(u8, args[i], "--grabber-test-rule")) {
+            const path = consumeOptionalPath(args, &i) orelse grabber_protocol.default_socket_path;
+            grabber_cli.grabberTestRule(gpa, path) catch std.process.exit(1);
+            return;
         }
     }
 
@@ -182,6 +198,18 @@ pub fn main() !void {
 
     // Pass the hotload flag to run
     skhd.run(!no_hotload) catch {};
+}
+
+/// Consume the next CLI arg as an optional value if it doesn't look
+/// like a new flag. Returns null and leaves the index alone otherwise.
+/// Used by --grabber-status / --grabber-test-rule which take an
+/// optional `<socket-path>` after the flag.
+fn consumeOptionalPath(args: []const [:0]u8, i: *usize) ?[]const u8 {
+    if (i.* + 1 >= args.len) return null;
+    const next = args[i.* + 1];
+    if (next.len > 0 and next[0] == '-') return null;
+    i.* += 1;
+    return next;
 }
 
 /// True iff this process was spawned by launchd as an XPC service /
@@ -359,6 +387,14 @@ fn printHelp() void {
         \\                          on next login)
         \\      --restart-service   Restart the service
         \\      --status            Check service status
+        \\
+        \\System Grabber (caps_lock-class tap-hold, opt-in):
+        \\      --install-grabber       Install skhd-grabber LaunchDaemon (sudo)
+        \\      --uninstall-grabber     Remove skhd-grabber LaunchDaemon (sudo)
+        \\      --grabber-status [path] Ping the grabber's IPC socket
+        \\      --grabber-test-rule [path]
+        \\                              Send a sample tap-hold rule to the grabber
+        \\                              for IPC plumbing verification
         \\
     , .{});
 }

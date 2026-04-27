@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template launchd plist for skhd-grabber.
+
+  Installed at /Library/LaunchDaemons/com.jackielii.skhd.grabber.plist
+  by `skhd --install-grabber` (which shells out to install-grabber.sh).
+
+  This is a system daemon (NOT a LaunchAgent) — runs as root, regardless
+  of which user is logged in, because IOHIDDeviceOpen(seize) and the
+  Karabiner vhidd_server both require root.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jackielii.skhd.grabber</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/skhd-grabber</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!--
+      Interactive ProcessType: macOS won't throttle us under user-driven
+      load. Same setting Karabiner-Elements uses for grabber_server.
+    -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/skhd-grabber.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/skhd-grabber.log</string>
+</dict>
+</plist>

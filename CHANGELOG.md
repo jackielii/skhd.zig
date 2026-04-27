@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24] - 2026-04-28
+
+### Fixed
+- **v0.0.23 binaries refused to launch on macOS 15.x** with `You can't use this version of the application 'skhd' with this version of macOS.` (#35). Without an explicit `os_version_min`, Zig stamps the Mach-O's `LC_BUILD_VERSION minos` with the build host's OS version, and the `macos-latest` CI runner is now Tahoe 26 — so the binary's minimum-OS field jumped past Sequoia. `build.zig` now pins `os_version_min` to 13.0 (matching `Info.plist`'s `LSMinimumSystemVersion` and the SMAppService floor); setting `os_version_min` flips Zig out of native-SDK mode, so the build also probes `xcrun` once and threads the SDK's framework / include / lib paths into every artifact.
+- **`PATH` inheritance under SMAppService now works for users without `SHELL` set, and fails loudly when it doesn't.** v0.0.22's `$SHELL -ilc` approach silently returned the launchd minimal `PATH` in several real cases: `SHELL` was unset under launchd, or `-i` triggered shell-specific weirdness with no controlling tty (zsh `compinit` warnings, fish prompt probes, rc files assuming a tty). `detectLoginShell` now prefers `$SHELL` and falls back to `getpwuid(getuid()).pw_shell` — the same Open Directory source `login(1)` uses, so it resolves even when launchd doesn't set `SHELL`. `capturePath` uses shell-specific argv: fish runs `-c 'string join : $PATH'` (fish's `PATH` is a list and `config.fish`/`conf.d` are always sourced), bash/zsh run `-lc 'printenv PATH'` (`-l` sources `~/.zprofile` / `~/.bash_profile` where Homebrew's `shellenv` lives, dropping `-i` avoids the interactive-init noise). Every failure path now logs at `warn` so the breakdown appears in `~/Library/Logs/skhd.log` instead of being invisible, and the final inherited PATH is logged so users can see what skhd actually resolved.
+
+### Added
+- **`.path` directive for explicit PATH additions.** Escape hatch for the cases where shell-inherited `PATH` isn't enough — mostly version-manager shims (mise/asdf/nvm) which only land in `PATH` via shell hooks that `-lc` doesn't always trigger, and any directory the user wants resolved before system tools of the same name. Single-entry and list forms (matching `.shell` / `.blacklist` style):
+  ```
+  .path "/opt/homebrew/bin"
+  .path [
+      "$HOME/.local/share/mise/shims"
+      "~/bin"
+  ]
+  ```
+  `~` and `$HOME` expand at parse time; no arbitrary `$VAR` because parse-time env can differ from command-exec-time env. Entries are prepended to `PATH` after the shell-inherited `PATH` is resolved (declaration order preserved), so explicit user paths take precedence.
+
+### Changed
+- **x86_64 prebuilt releases are back, paused since v0.0.19.** Instead of spinning up a `macos-13` Intel runner (slow queue, on GitHub's deprecation timeline), the arm64 runner cross-compiles via `-Dtarget=x86_64-macos.13.0`. The macOS SDK is universal so x86_64 stubs are present, and `codesign` on arm64 signs x86_64 Mach-Os fine.
+
+### Internal
+- **Portable `BOOL` marshalling in `sm_app_service.zig` for x86_64.** Apple's `objc.h` gates `BOOL` on `__OBJC_BOOL_IS_BOOL`, which Clang only sets for arm64-darwin — so `c.BOOL` translates to Zig `bool` on arm64 but to `i8` on x86_64, and the existing `if (!ok)` only typechecked on arm64. The `objc_msgSend` return is now declared `u8` (both archs return `BOOL` in the low byte regardless of C-level typedef) with explicit `!= 0` comparisons. Unblocks the cross-compile.
+
 ## [0.0.23] - 2026-04-26
 
 ### Fixed
@@ -380,7 +403,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.23...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.24...HEAD
+[0.0.24]: https://github.com/jackielii/skhd.zig/compare/v0.0.23...v0.0.24
 [0.0.23]: https://github.com/jackielii/skhd.zig/compare/v0.0.22...v0.0.23
 [0.0.22]: https://github.com/jackielii/skhd.zig/compare/v0.0.21...v0.0.22
 [0.0.21]: https://github.com/jackielii/skhd.zig/compare/v0.0.20...v0.0.21

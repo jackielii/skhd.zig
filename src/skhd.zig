@@ -858,7 +858,22 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         return .not_found;
     }
 
-    try self.logKeyPress("Found hotkey: '{s}' for process: '{s}' in mode '{s}'", eventkey.*, .{ process_name, mode.name });
+    // Format the matched hotkey to mirror the config-file syntax —
+    // `mode < key` so the log line reads the same way the binding
+    // is written. Default mode prints just the key (no `default <`
+    // prefix in user configs). Compile out entirely in release
+    // builds (log.debug is filtered there anyway).
+    if (comptime builtin.mode == .Debug) {
+        if (self.verbose) {
+            var key_buf: [256]u8 = undefined;
+            const key_str = try Keycodes.formatKeyPressBuffer(&key_buf, eventkey.flags, eventkey.key);
+            if (std.mem.eql(u8, mode.name, "default")) {
+                log.debug("Found hotkey: '{s}' for process: '{s}'", .{ key_str, process_name });
+            } else {
+                log.debug("Found hotkey: '{s} < {s}' for process: '{s}'", .{ mode.name, key_str, process_name });
+            }
+        }
+    }
     self.tracer.traceHotkeyFound(true);
     const hotkey = found_hotkey.?;
 
@@ -1025,10 +1040,12 @@ fn hotloadCallback(path: []const u8) void {
     }
 }
 
-/// Log a keypress with formatted key string
+/// Log a keypress with formatted key string. Compile out in any
+/// non-Debug build — log.debug is filtered above ReleaseSafe and
+/// even ReleaseSafe sets `log_level = .info`, so the format work
+/// would be wasted there.
 inline fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPress, rest: anytype) !void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    // Only log in interactive mode to avoid allocation in hot path
+    if (comptime builtin.mode != .Debug) return;
     if (!self.verbose) return;
 
     var buf: [256]u8 = undefined;

@@ -505,8 +505,14 @@ const Daemon = struct {
         self.seize_ctx.caps_remap_active = false;
         self.seize_ctx.remap_table = @splat(0);
         // Drop any virtual keys we left held so a re-apply starts clean.
+        self.seize_ctx.consumer_state.clear();
+        self.seize_ctx.apple_top_case_state.clear();
+        self.seize_ctx.apple_keyboard_state.clear();
         if (self.vhidd) |v| {
             v.postKeyboardReport(.{}, &.{}) catch {};
+            v.postConsumerReport(&.{}) catch {};
+            v.postAppleVendorTopCaseReport(&.{}) catch {};
+            v.postAppleVendorKeyboardReport(&.{}) catch {};
         }
     }
 };
@@ -655,6 +661,16 @@ const EngineSlot = struct {
 /// a struct and pass its address as the void* context.
 const SeizeCtx = struct {
     state: KbState,
+    /// Per-page snapshot state for the non-keyboard HID pages we
+    /// forward through vhidd. Apple's built-in keyboard reports
+    /// media keys (volume, brightness, play/pause, …) on these pages
+    /// when the "Use F1, F2… as standard function keys" setting is
+    /// off, and seize captures them alongside the keyboard page —
+    /// so we have to forward them ourselves or the user loses every
+    /// F-row default action.
+    consumer_state: KbState.PageState = .{},
+    apple_top_case_state: KbState.PageState = .{},
+    apple_keyboard_state: KbState.PageState = .{},
     vhidd: *Vhidd.Client,
     /// One slot per active rule. Empty in --inject-test-key /
     /// --seize-test pass-through paths; populated in the daemon
@@ -797,10 +813,35 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
         ev.pressed,
     });
 
-    // Keyboard usage page only for D3/D4. Consumer (0x0C) / Apple
-    // vendor (0xFF00) traffic is dropped while seized — D5+ scope.
+    // Forward non-keyboard pages straight through vhidd so the F-row
+    // default media actions (volume, brightness, play/pause, …) keep
+    // working on the seized device. These pages don't run through
+    // tap-hold or the colon-form remap table — they're pass-through
+    // only.
     if (ev.usage_page != 0x07) {
         cx.skipped_other_pages += 1;
+        const usage16 = std.math.cast(u16, ev.usage) orelse return;
+        switch (ev.usage_page) {
+            0x0C => {
+                if (!cx.consumer_state.apply(usage16, ev.pressed)) return;
+                cx.vhidd.postConsumerReport(cx.consumer_state.compacted()) catch |err| {
+                    log.warn("vhidd consumer post failed: {s}", .{@errorName(err)});
+                };
+            },
+            0xFF => {
+                if (!cx.apple_top_case_state.apply(usage16, ev.pressed)) return;
+                cx.vhidd.postAppleVendorTopCaseReport(cx.apple_top_case_state.compacted()) catch |err| {
+                    log.warn("vhidd apple-top-case post failed: {s}", .{@errorName(err)});
+                };
+            },
+            0xFF01 => {
+                if (!cx.apple_keyboard_state.apply(usage16, ev.pressed)) return;
+                cx.vhidd.postAppleVendorKeyboardReport(cx.apple_keyboard_state.compacted()) catch |err| {
+                    log.warn("vhidd apple-keyboard post failed: {s}", .{@errorName(err)});
+                };
+            },
+            else => {}, // unknown page; ignore
+        }
         return;
     }
 

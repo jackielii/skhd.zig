@@ -185,6 +185,45 @@ pub const Client = struct {
         try self.sendRequestWithPayload(.post_keyboard_input_report, &report);
     }
 
+    /// Reports for non-keyboard pages share an identical shape:
+    ///   [u8 report_id][32 × u16 le keys] = 65 bytes
+    /// Differs from the keyboard report only by report_id and the
+    /// driver-side request that carries it.
+    fn postKeysReport(
+        self: *Client,
+        request: Request,
+        report_id: u8,
+        keys: []const u16,
+    ) !void {
+        if (keys.len > 32) return error.TooManyKeys;
+        var report: [65]u8 = @splat(0);
+        report[0] = report_id;
+        for (keys, 0..) |k, i| {
+            std.mem.writeInt(u16, report[1 + i * 2 ..][0..2], k, .little);
+        }
+        try self.sendRequestWithPayload(request, &report);
+    }
+
+    /// Consumer page (HID 0x0C) report — volume, play/pause, mute, etc.
+    /// On Apple keyboards in the default F-row mode (the "Use F1, F2…
+    /// as standard function keys" setting OFF), the F-row keys emit on
+    /// this page.
+    pub fn postConsumerReport(self: *Client, keys: []const u16) !void {
+        try self.postKeysReport(.post_consumer_input_report, 2, keys);
+    }
+
+    /// Apple Vendor Top Case page (HID 0xFF). Brightness up/down, the
+    /// fn key state, and a few other Apple-specific keys.
+    pub fn postAppleVendorTopCaseReport(self: *Client, keys: []const u16) !void {
+        try self.postKeysReport(.post_apple_vendor_top_case_input_report, 3, keys);
+    }
+
+    /// Apple Vendor Keyboard page (HID 0xFF01). Spotlight, mission
+    /// control, dictation, etc. on modern MacBooks.
+    pub fn postAppleVendorKeyboardReport(self: *Client, keys: []const u16) !void {
+        try self.postKeysReport(.post_apple_vendor_keyboard_input_report, 4, keys);
+    }
+
     /// Block until the given vhidd response arrives with body byte
     /// non-zero (`true`), or the timeout expires.
     ///

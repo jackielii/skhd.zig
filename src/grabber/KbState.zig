@@ -145,6 +145,64 @@ fn eraseKey(self: *Self, key: u16) bool {
     return changed;
 }
 
+/// State for a HID page that has no modifiers — Consumer (0x0C),
+/// Apple Vendor Top Case (0xFF), Apple Vendor Keyboard (0xFF01).
+/// Same insert/erase/compact pattern as the keyboard page above, just
+/// without the modifier byte.
+pub const PageState = struct {
+    keys: [max_keys]u16 = @splat(0),
+
+    pub fn apply(self: *PageState, usage: u16, pressed: bool) bool {
+        return if (pressed) insertInto(&self.keys, usage) else eraseFrom(&self.keys, usage);
+    }
+
+    pub fn compacted(self: *PageState) []const u16 {
+        var write: usize = 0;
+        for (self.keys) |k| {
+            if (k != 0) {
+                self.keys[write] = k;
+                write += 1;
+            }
+        }
+        while (write < self.keys.len) : (write += 1) {
+            self.keys[write] = 0;
+        }
+        var n: usize = 0;
+        for (self.keys) |k| {
+            if (k == 0) break;
+            n += 1;
+        }
+        return self.keys[0..n];
+    }
+
+    pub fn clear(self: *PageState) void {
+        self.* = .{};
+    }
+};
+
+fn insertInto(arr: *[max_keys]u16, key: u16) bool {
+    for (arr) |k| if (k == key) return false;
+    for (arr) |*k| {
+        if (k.* == 0) {
+            k.* = key;
+            return true;
+        }
+    }
+    log.warn("page-keys[] overflow — dropping insert of usage 0x{X:0>2}", .{key});
+    return false;
+}
+
+fn eraseFrom(arr: *[max_keys]u16, key: u16) bool {
+    var changed = false;
+    for (arr) |*k| {
+        if (k.* == key) {
+            k.* = 0;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 test "modifier press/release flips the bit" {
     var s: Self = .{};
     try std.testing.expect(s.applyKeyboardEvent(0xE0, true)); // lctrl down

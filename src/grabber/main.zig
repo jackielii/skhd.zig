@@ -561,6 +561,13 @@ fn applyTapHoldTimer(slot: *EngineSlot, action: TapHold.TimerAction) void {
 
 fn cancelTapHoldTimer(slot: *EngineSlot) void {
     if (slot.timer != null) {
+        // Invalidate first so the run loop drops its strong ref AND
+        // so the timer never fires (otherwise CFRelease alone would
+        // keep the timer scheduled — the run loop still owns its own
+        // retain via CFRunLoopAddTimer, and the timer would later fire
+        // a stale callback that could mis-commit a hold during the
+        // next tap's pending state).
+        c.CFRunLoopTimerInvalidate(slot.timer);
         c.CFRelease(slot.timer);
         slot.timer = null;
     }
@@ -574,6 +581,7 @@ fn tapHoldTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) 
     // CFRelease a freed-by-runloop reference if the engine asks
     // for cancel.
     if (slot.timer != null) {
+        c.CFRunLoopTimerInvalidate(slot.timer);
         c.CFRelease(slot.timer);
         slot.timer = null;
     }

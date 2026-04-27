@@ -81,6 +81,7 @@ pub extern fn CFRunLoopGetCurrent() CFRunLoopRef;
 pub extern fn CFRunLoopRunInMode(mode: CFStringRef, seconds: CFTimeInterval, returnAfterSourceHandled: Boolean) CFRunLoopRunResult;
 pub extern fn CFRunLoopStop(rl: CFRunLoopRef) void;
 pub extern fn CFRunLoopAddTimer(rl: CFRunLoopRef, timer: CFRunLoopTimerRef, mode: CFStringRef) void;
+pub extern fn CFRunLoopTimerInvalidate(timer: CFRunLoopTimerRef) void;
 pub extern fn CFRunLoopTimerCreate(
     allocator: CFAllocatorRef,
     fireDate: CFAbsoluteTime,

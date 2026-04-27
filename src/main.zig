@@ -3,8 +3,11 @@ const builtin = @import("builtin");
 const track_alloc = @import("build_options").track_alloc;
 
 const c = @import("c.zig");
+const DeviceCheck = @import("DeviceCheck.zig");
 const grabber_cli = @import("grabber_cli.zig");
 const grabber_protocol = @import("grabber_protocol");
+const Mappings = @import("Mappings.zig");
+const Parser = @import("Parser.zig");
 const service = @import("service.zig");
 const Skhd = @import("skhd.zig");
 const synthesize = @import("synthesize.zig");
@@ -108,6 +111,7 @@ pub fn main() !void {
             return;
         } else if (std.mem.eql(u8, args[i], "--install-service")) {
             try service.installService(gpa);
+            try maybeInstallGrabber(gpa);
             return;
         } else if (std.mem.eql(u8, args[i], "--uninstall-service")) {
             try service.uninstallService(gpa);
@@ -364,6 +368,113 @@ pub fn getConfigFile(allocator: std.mem.Allocator, filename: []const u8) ![]cons
 fn fileExists(path: []const u8) bool {
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
+}
+
+/// Run after a successful `--install-service`. Checks whether the
+/// user's config has any caps_lock-class `.remap` block-form rules
+/// targeting a currently-connected device — those need the system
+/// grabber. If so and the grabber isn't already installed, prints
+/// the situation and offers to install it now via sudo. The user
+/// always has the choice to decline and run `sudo skhd
+/// --install-grabber` themselves.
+///
+/// Skips silently on Mac Studio / external-keyboard-only setups
+/// where no caps-class rule's target device is connected — the
+/// agent's runtime path (DeviceCheck in forwardTapholdsToGrabber)
+/// also handles this, so installing the grabber there would just be
+/// dead weight.
+fn maybeInstallGrabber(allocator: std.mem.Allocator) !void {
+    if (grabber_cli.isGrabberInstalled()) {
+        std.debug.print("\nskhd-grabber is already installed.\n", .{});
+        return;
+    }
+
+    // Parse the user's config to find caps-class rules.
+    const config_path = getConfigFile(allocator, "skhdrc") catch |err| {
+        std.debug.print("\n(could not resolve config file: {s})\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(config_path);
+
+    var mappings = Mappings.init(allocator) catch return;
+    defer mappings.deinit();
+
+    var parser = Parser.init(allocator) catch return;
+    defer parser.deinit();
+
+    const content = std.fs.cwd().readFileAlloc(allocator, config_path, 1 << 20) catch |err| {
+        std.debug.print("\n(could not read config {s}: {s} — skipping grabber check)\n", .{ config_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(content);
+
+    parser.parseWithPath(&mappings, content, config_path) catch return;
+    parser.processLoadDirectives(&mappings) catch return;
+
+    if (mappings.tapholds.items.len == 0) {
+        std.debug.print("\nNo caps_lock-class rules in config — skhd-grabber not needed.\n", .{});
+        return;
+    }
+
+    // Filter by device presence so a config shared between a laptop
+    // and a Mac Studio doesn't force grabber install on the Studio.
+    var any_present = false;
+    var first_alias: ?[]const u8 = null;
+    for (mappings.tapholds.items) |th| {
+        const alias = mappings.device_aliases.get(th.device_alias) orelse continue;
+        if (DeviceCheck.isPresent(alias.vendor, alias.product)) {
+            any_present = true;
+            if (first_alias == null) first_alias = th.device_alias;
+            break;
+        }
+    }
+    if (!any_present) {
+        std.debug.print("\nConfig has caps_lock-class rules, but none of the targeted devices are connected — skhd-grabber not needed on this machine.\n", .{});
+        return;
+    }
+
+    std.debug.print(
+        \\
+        \\Config has caps_lock-class rules for connected device '{s}'.
+        \\skhd-grabber is required to handle them — it runs as a system
+        \\daemon (root) and seizes the keyboard for tap-hold processing.
+        \\
+        \\Install it now? (you'll be prompted for your sudo password) [Y/n]
+    , .{first_alias.?});
+
+    const answer = readLine(allocator) catch {
+        std.debug.print("\n(could not read answer; run `sudo skhd --install-grabber` to install manually)\n", .{});
+        return;
+    };
+    defer allocator.free(answer);
+    const trimmed = std.mem.trim(u8, answer, " \t\r");
+    if (trimmed.len > 0 and (trimmed[0] == 'n' or trimmed[0] == 'N')) {
+        std.debug.print(
+            \\Skipping. To install later:
+            \\  sudo skhd --install-grabber
+            \\
+        , .{});
+        return;
+    }
+
+    grabber_cli.installGrabberViaSudo(allocator) catch |err| {
+        std.debug.print(
+            \\
+            \\Grabber install via sudo failed ({s}). Try running it directly:
+            \\  sudo skhd --install-grabber
+            \\
+        , .{@errorName(err)});
+        return;
+    };
+    std.debug.print("\nskhd-grabber installed.\n", .{});
+}
+
+/// Read one line from stdin (up to newline). Returns owned slice
+/// including any trailing carriage return; caller is responsible for
+/// trimming.
+fn readLine(allocator: std.mem.Allocator) ![]u8 {
+    const stdin = std.io.getStdIn().reader();
+    return try stdin.readUntilDelimiterAlloc(allocator, '\n', 64);
 }
 
 fn printHelp() void {

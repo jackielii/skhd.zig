@@ -98,6 +98,36 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     if (term != .Exited or term.Exited != 0) return error.InstallFailed;
 }
 
+/// Path of the system LaunchDaemon plist installed by the
+/// `--install-grabber` flow. If this file exists, the grabber is
+/// already registered with launchd (whether currently running or not).
+const grabber_plist_path = "/Library/LaunchDaemons/com.jackielii.skhd.grabber.plist";
+
+/// True when the grabber LaunchDaemon plist is installed. Used by
+/// the smart `--install-service` flow to skip the sudo prompt for
+/// users who already installed the grabber separately.
+pub fn isGrabberInstalled() bool {
+    std.fs.accessAbsolute(grabber_plist_path, .{}) catch return false;
+    return true;
+}
+
+/// Re-exec ourselves under sudo with `--install-grabber`. Sudo
+/// prompts the user for their password inline (stdio is inherited),
+/// so this only works in an interactive terminal context. Returns an
+/// error if sudo or the install fails — caller logs and tells the
+/// user how to retry by hand.
+pub fn installGrabberViaSudo(allocator: std.mem.Allocator) !void {
+    const self_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(self_path);
+
+    var child = std.process.Child.init(&.{ "/usr/bin/sudo", self_path, "--install-grabber" }, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    const term = try child.spawnAndWait();
+    if (term != .Exited or term.Exited != 0) return error.GrabberInstallFailed;
+}
+
 pub fn uninstallGrabber(allocator: std.mem.Allocator) !void {
     const script = resolveScript(allocator, uninstall_script_rel) catch {
         std.debug.print(

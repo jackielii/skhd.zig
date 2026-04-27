@@ -508,11 +508,13 @@ const Daemon = struct {
         self.seize_ctx.consumer_state.clear();
         self.seize_ctx.apple_top_case_state.clear();
         self.seize_ctx.apple_keyboard_state.clear();
+        self.seize_ctx.generic_desktop_state.clear();
         if (self.vhidd) |v| {
             v.postKeyboardReport(.{}, &.{}) catch {};
             v.postConsumerReport(&.{}) catch {};
             v.postAppleVendorTopCaseReport(&.{}) catch {};
             v.postAppleVendorKeyboardReport(&.{}) catch {};
+            v.postGenericDesktopReport(&.{}) catch {};
         }
     }
 };
@@ -671,6 +673,7 @@ const SeizeCtx = struct {
     consumer_state: KbState.PageState = .{},
     apple_top_case_state: KbState.PageState = .{},
     apple_keyboard_state: KbState.PageState = .{},
+    generic_desktop_state: KbState.PageState = .{},
     vhidd: *Vhidd.Client,
     /// One slot per active rule. Empty in --inject-test-key /
     /// --seize-test pass-through paths; populated in the daemon
@@ -804,6 +807,57 @@ fn makeTapHoldTimer(after_ms: u32, slot: *EngineSlot) c.CFRunLoopTimerRef {
     );
 }
 
+/// Where to route a translated F-row press. Indexes into the
+/// non-keyboard-page states owned by SeizeCtx.
+const FRowTarget = union(enum) {
+    consumer: u16,
+    apple_vendor_keyboard: u16,
+    generic_desktop: u16,
+};
+
+/// F1..F12 → media-key translation, matches Karabiner's defaults
+/// for Apple built-in keyboards (see fn_function_keys_manipulator).
+/// Indexed by `usage - 0x3A`.
+const f_row_translation = [12]FRowTarget{
+    .{ .consumer = 0x70 }, // F1  display_brightness_decrement
+    .{ .consumer = 0x6F }, // F2  display_brightness_increment
+    .{ .apple_vendor_keyboard = 0x10 }, // F3  mission_control
+    .{ .apple_vendor_keyboard = 0x01 }, // F4  spotlight
+    .{ .consumer = 0xCF }, // F5  voice_command (dictation)
+    .{ .generic_desktop = 0x9B }, // F6  do_not_disturb
+    .{ .consumer = 0xB4 }, // F7  rewind
+    .{ .consumer = 0xCD }, // F8  play_or_pause
+    .{ .consumer = 0xB3 }, // F9  fast_forward
+    .{ .consumer = 0xE2 }, // F10 mute
+    .{ .consumer = 0xEA }, // F11 volume_decrement
+    .{ .consumer = 0xE9 }, // F12 volume_increment
+};
+
+fn translateFRow(cx: *SeizeCtx, raw_usage16: u16, pressed: bool) void {
+    const idx: usize = raw_usage16 - 0x3A;
+    const target = f_row_translation[idx];
+    switch (target) {
+        .consumer => |u| {
+            if (!cx.consumer_state.apply(u, pressed)) return;
+            cx.vhidd.postConsumerReport(cx.consumer_state.compacted()) catch |err| {
+                log.warn("vhidd consumer post failed: {s}", .{@errorName(err)});
+            };
+        },
+        .apple_vendor_keyboard => |u| {
+            if (!cx.apple_keyboard_state.apply(u, pressed)) return;
+            cx.vhidd.postAppleVendorKeyboardReport(cx.apple_keyboard_state.compacted()) catch |err| {
+                log.warn("vhidd apple-keyboard post failed: {s}", .{@errorName(err)});
+            };
+        },
+        .generic_desktop => |u| {
+            if (!cx.generic_desktop_state.apply(u, pressed)) return;
+            cx.vhidd.postGenericDesktopReport(cx.generic_desktop_state.compacted()) catch |err| {
+                log.warn("vhidd generic-desktop post failed: {s}", .{@errorName(err)});
+            };
+        },
+    }
+}
+
 fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     const cx: *SeizeCtx = @ptrCast(@alignCast(ctx orelse return));
 
@@ -853,6 +907,20 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     // should drive our state machine.
     const raw_usage16 = std.math.cast(u16, ev.usage) orelse return;
     if (raw_usage16 < 0x04) return;
+
+    // F1..F12 on Apple's built-in keyboard need translation. With
+    // the "Use F1, F2…" setting OFF (default), the user expects
+    // F-row → media actions. The keyboard's apple-vendor service
+    // does emit corresponding media events, but seizing the
+    // keyboard service silences the OS's media-key path for that
+    // device — we have to do the translation ourselves and post
+    // through vhidd's consumer / apple-vendor / generic-desktop
+    // reports. Mirrors Karabiner's `fn_function_keys_manipulator`
+    // default mapping for built-in MacBook keyboards.
+    if (raw_usage16 >= 0x3A and raw_usage16 <= 0x45) {
+        translateFRow(cx, raw_usage16, ev.pressed);
+        return;
+    }
 
     // Apply colon-form `.remap` rewrites BEFORE the slots see the
     // event — hidutil's UserKeyMapping doesn't reach seized devices

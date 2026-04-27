@@ -224,6 +224,12 @@ pub const Client = struct {
         try self.postKeysReport(.post_apple_vendor_keyboard_input_report, 4, keys);
     }
 
+    /// Generic Desktop page (HID 0x01). Used for `do_not_disturb`
+    /// (usage 0x9B) — F6 on modern MacBooks.
+    pub fn postGenericDesktopReport(self: *Client, keys: []const u16) !void {
+        try self.postKeysReport(.post_generic_desktop_input_report, 7, keys);
+    }
+
     /// Block until the given vhidd response arrives with body byte
     /// non-zero (`true`), or the timeout expires.
     ///

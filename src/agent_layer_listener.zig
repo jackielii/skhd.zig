@@ -21,11 +21,22 @@ const log = std.log.scoped(.agent_layer_listener);
 /// means "exit current layer back to default".
 pub const ModeCallback = *const fn (ctx: ?*anyopaque, mode_name: []const u8) void;
 
+/// Called once when the grabber socket goes EndOfStream (grabber
+/// exited or restarted). Owner uses this to schedule a reconnect
+/// timer.
+pub const DisconnectCallback = *const fn (ctx: ?*anyopaque) void;
+
 pub const Listener = struct {
     allocator: std.mem.Allocator,
     fd: c_int,
     cb: ModeCallback,
     cb_ctx: ?*anyopaque,
+    on_disconnect: ?DisconnectCallback = null,
+    on_disconnect_ctx: ?*anyopaque = null,
+    /// Set after we fire the disconnect callback so we don't fire it
+    /// again on subsequent (no-op) callbacks. The owner is expected
+    /// to deinit this listener as part of the reconnect path.
+    disconnected: bool = false,
     cf_fd: c.CFFileDescriptorRef,
     runloop_source: c.CFRunLoopSourceRef,
 
@@ -100,7 +111,11 @@ fn cfFdCallback(
     const stream = std.net.Stream{ .handle = self.fd };
     const n = protocol.readFrame(stream, &buf) catch |err| switch (err) {
         error.EndOfStream => {
-            log.warn("grabber connection closed; layer pushes will not arrive", .{});
+            if (!self.disconnected) {
+                self.disconnected = true;
+                log.warn("grabber connection closed; layer pushes will not arrive", .{});
+                if (self.on_disconnect) |cb| cb(self.on_disconnect_ctx);
+            }
             return;
         },
         else => {

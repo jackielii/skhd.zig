@@ -51,6 +51,11 @@ watchdog_timer: c.CFRunLoopTimerRef = null,
 /// CFRunLoop source. Both freed on deinit.
 grabber_client: ?*agent_grabber_client.Client = null,
 layer_listener: ?*agent_layer_listener.Listener = null,
+/// Periodic retry timer for re-dialing the grabber after a
+/// disconnect. Null while connected (or when no rules need
+/// forwarding); created on disconnect, cancelled on successful
+/// forward.
+grabber_reconnect_timer: c.CFRunLoopTimerRef = null,
 /// Per-device `hidutil` UserKeyMapping owner. Allocated only when the
 /// config has at least one colon-form `.remap`. On deinit (graceful or
 /// signal), restoreAll() clears the OS-level mapping so the keyboard
@@ -164,6 +169,7 @@ pub fn deinit(self: *Skhd) void {
         hotloader.destroy();
     }
     self.stopWatchdog();
+    self.cancelGrabberReconnect();
     if (self.layer_listener) |ll| ll.deinit();
     if (self.grabber_client) |gc| {
         gc.close();
@@ -291,6 +297,9 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
             modeChangePushed,
             self,
         );
+        // Wire reconnect: if the grabber dies, schedule a retry.
+        self.layer_listener.?.on_disconnect = grabberDisconnected;
+        self.layer_listener.?.on_disconnect_ctx = self;
         log.info("grabber acknowledged {d} rule(s); layer listener installed", .{rules.items.len});
     } else {
         try client.bye();
@@ -298,6 +307,9 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
         self.allocator.destroy(client);
         log.info("grabber acknowledged {d} rule(s)", .{rules.items.len});
     }
+    // Successful forward: cancel any pending reconnect timer from a
+    // prior outage.
+    self.cancelGrabberReconnect();
 }
 
 /// Run-loop callback fired by `agent_layer_listener` whenever the
@@ -363,6 +375,72 @@ fn stopWatchdog(self: *Skhd) void {
         c.CFRelease(t);
         self.watchdog_timer = null;
     }
+}
+
+/// Listener-side disconnect callback. Tear down the dead client +
+/// listener so the next reconnect attempt starts clean, then schedule
+/// a retry timer.
+fn grabberDisconnected(ctx: ?*anyopaque) void {
+    const self = @as(*Skhd, @ptrCast(@alignCast(ctx orelse return)));
+    if (self.layer_listener) |ll| {
+        ll.deinit();
+        self.layer_listener = null;
+    }
+    if (self.grabber_client) |gc| {
+        gc.close();
+        self.allocator.destroy(gc);
+        self.grabber_client = null;
+    }
+    self.scheduleGrabberReconnect();
+}
+
+fn scheduleGrabberReconnect(self: *Skhd) void {
+    if (self.grabber_reconnect_timer != null) return;
+    var ctx = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = self,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    // 2-second cadence — grabber respawn under launchd is typically
+    // <1s, manual restart (`zig build run-grabber` Ctrl+C cycle)
+    // a few seconds. Repeats until forward succeeds.
+    const interval: f64 = 2.0;
+    const fire_at = c.CFAbsoluteTimeGetCurrent() + interval;
+    self.grabber_reconnect_timer = c.CFRunLoopTimerCreate(
+        c.kCFAllocatorDefault,
+        fire_at,
+        interval,
+        0,
+        0,
+        grabberReconnectCallback,
+        &ctx,
+    );
+    if (self.grabber_reconnect_timer == null) {
+        log.warn("could not create grabber reconnect timer; rules will only be forwarded on next reload", .{});
+        return;
+    }
+    c.CFRunLoopAddTimer(c.CFRunLoopGetMain(), self.grabber_reconnect_timer, c.kCFRunLoopCommonModes);
+    log.info("grabber connection lost — retrying every {d}s", .{@as(u32, @intFromFloat(interval))});
+}
+
+fn cancelGrabberReconnect(self: *Skhd) void {
+    if (self.grabber_reconnect_timer) |t| {
+        c.CFRunLoopTimerInvalidate(t);
+        c.CFRelease(t);
+        self.grabber_reconnect_timer = null;
+    }
+}
+
+fn grabberReconnectCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const self = @as(*Skhd, @ptrCast(@alignCast(info orelse return)));
+    self.forwardTapholdsToGrabber() catch {
+        // Forward failed (likely "socket not found" or
+        // "connection refused"). Timer stays armed, will fire again.
+        return;
+    };
+    // forwardTaphold... already calls cancelGrabberReconnect on success.
 }
 
 fn watchdogCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
@@ -1088,6 +1166,27 @@ pub fn reloadConfig(self: *Skhd) !void {
             };
         }
     }
+
+    // Tear down the previous grabber connection so forwardTapholds...
+    // can dial fresh with the updated rules. Do this even when the
+    // new config has no caps-class rules — closing the old socket
+    // is how the grabber learns we don't want our previous rules
+    // applied any more (D5 will make this a hard "drop on close",
+    // for now this matches what grabber does when no apply_rules
+    // arrive).
+    if (self.layer_listener) |ll| {
+        ll.deinit();
+        self.layer_listener = null;
+    }
+    if (self.grabber_client) |gc| {
+        gc.bye() catch {};
+        gc.close();
+        self.allocator.destroy(gc);
+        self.grabber_client = null;
+    }
+    self.forwardTapholdsToGrabber() catch |err| {
+        log.warn("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
+    };
 
     // Note: We don't re-enable hot reload here because this function
     // might be called from within the hotload callback. Instead, we'll

@@ -120,6 +120,12 @@ pub const IOHIDValueCallback = ?*const fn (
 // Matching dictionary keys (string constants in IOHIDKeys.h).
 pub const kIOHIDVendorIDKey: [*:0]const u8 = "VendorID";
 pub const kIOHIDProductIDKey: [*:0]const u8 = "ProductID";
+pub const kIOHIDPrimaryUsagePageKey: [*:0]const u8 = "PrimaryUsagePage";
+pub const kIOHIDPrimaryUsageKey: [*:0]const u8 = "PrimaryUsage";
+
+// HID usage pages / usages relevant to seize matching.
+pub const kHIDPage_GenericDesktop: i32 = 0x01;
+pub const kHIDUsage_GD_Keyboard: i32 = 0x06;
 
 pub extern fn IOHIDManagerCreate(allocator: CFAllocatorRef, options: IOOptionBits) IOHIDManagerRef;
 pub extern fn IOHIDManagerOpen(manager: IOHIDManagerRef, options: IOOptionBits) IOReturn;

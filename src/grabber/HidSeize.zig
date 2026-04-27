@@ -94,7 +94,7 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
     for (matches) |m| {
         const dict = c.CFDictionaryCreateMutable(
             c.kCFAllocatorDefault,
-            2,
+            4,
             &c.kCFTypeDictionaryKeyCallBacks,
             &c.kCFTypeDictionaryValueCallBacks,
         );
@@ -105,17 +105,34 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         defer c.CFRelease(vendor_key);
         const product_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDProductIDKey, c.kCFStringEncodingUTF8);
         defer c.CFRelease(product_key);
+        // Without these two extra keys the matcher catches every HID
+        // interface on the composite device — keyboard, trackpad,
+        // touch bar, etc. Seizing a trackpad interface kills cursor
+        // movement. Constrain the match to "Generic Desktop /
+        // Keyboard" so other interfaces stay live.
+        const usage_page_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsagePageKey, c.kCFStringEncodingUTF8);
+        defer c.CFRelease(usage_page_key);
+        const usage_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsageKey, c.kCFStringEncodingUTF8);
+        defer c.CFRelease(usage_key);
 
         var vendor: i32 = @intCast(m.vendor);
         var product: i32 = @intCast(m.product);
+        var usage_page: i32 = c.kHIDPage_GenericDesktop;
+        var usage: i32 = c.kHIDUsage_GD_Keyboard;
 
         const vendor_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &vendor);
         defer c.CFRelease(vendor_num);
         const product_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &product);
         defer c.CFRelease(product_num);
+        const usage_page_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &usage_page);
+        defer c.CFRelease(usage_page_num);
+        const usage_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &usage);
+        defer c.CFRelease(usage_num);
 
         c.CFDictionarySetValue(dict, vendor_key, vendor_num);
         c.CFDictionarySetValue(dict, product_key, product_num);
+        c.CFDictionarySetValue(dict, usage_page_key, usage_page_num);
+        c.CFDictionarySetValue(dict, usage_key, usage_num);
 
         c.CFArrayAppendValue(dicts, dict);
     }

@@ -133,8 +133,15 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     }
     errdefer if (hidutil) |h| h.deinit();
 
-    // Create event tap with keyboard and system defined events
-    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
+    // Create event tap with keyboard, system-defined, and mouse-down events.
+    // Mouse-down is opt-in only via `mouse1`–`mouse5` bindings, but the tap
+    // mask is set unconditionally — `processHotkey` returns `.not_found` for
+    // un-bound mouse events and we pass them through, so an unused mask bit
+    // costs only a couple of dispatches per click.
+    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED) //
+    | (1 << c.kCGEventLeftMouseDown) //
+    | (1 << c.kCGEventRightMouseDown) //
+    | (1 << c.kCGEventOtherMouseDown);
 
     return Skhd{
         .allocator = gpa,
@@ -653,6 +660,26 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
                 return event;
             };
         },
+        c.kCGEventLeftMouseDown => return self.handleMouseDown(event, 1) catch |err| {
+            log.err("Error handling mouse down: {}", .{err});
+            return event;
+        },
+        c.kCGEventRightMouseDown => return self.handleMouseDown(event, 2) catch |err| {
+            log.err("Error handling mouse down: {}", .{err});
+            return event;
+        },
+        c.kCGEventOtherMouseDown => {
+            // CGMouseEventButtonNumber is 0-based: 0=left, 1=right, 2=middle,
+            // 3=back, 4=forward. Left/right come through their own event
+            // types, so here we expect button >= 2 → mouse3..mouse5+.
+            const btn_raw = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
+            if (btn_raw < 2 or btn_raw > 4) return event;
+            const mouse_n: u8 = @intCast(btn_raw + 1);
+            return self.handleMouseDown(event, mouse_n) catch |err| {
+                log.err("Error handling mouse down: {}", .{err});
+                return event;
+            };
+        },
         else => return event,
     }
 }
@@ -680,6 +707,24 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     }
 
     const eventkey = createEventKey(event);
+    const result = try self.processHotkey(&eventkey, event, process_name);
+    return try self.handleHotkeyResult(result, event, eventkey, process_name);
+}
+
+inline fn handleMouseDown(self: *Skhd, event: c.CGEventRef, mouse_n: u8) !c.CGEventRef {
+    if (self.current_mode == null) return event;
+
+    // Skip self-generated events.
+    const marker = c.CGEventGetIntegerValueField(event, c.kCGEventSourceUserData);
+    if (marker == SKHD_EVENT_MARKER) return event;
+
+    const process_name = self.carbon_event.getProcessName();
+    if (self.mappings.blacklist.contains(process_name)) return event;
+
+    const eventkey = Hotkey.KeyPress{
+        .key = Keycodes.mouseButtonCode(mouse_n),
+        .flags = cgeventFlagsToHotkeyFlags(c.CGEventGetFlags(event)),
+    };
     const result = try self.processHotkey(&eventkey, event, process_name);
     return try self.handleHotkeyResult(result, event, eventkey, process_name);
 }

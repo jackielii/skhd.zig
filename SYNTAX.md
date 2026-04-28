@@ -149,6 +149,28 @@ command   = command is executed through '$SHELL -c'
 - `play`, `previous`, `next` - Media playback
 - `rewind`, `fast` - Media navigation
 
+### Mouse Buttons (New in skhd.zig!)
+- `mouse1` - Left button
+- `mouse2` - Right button
+- `mouse3` - Middle button
+- `mouse4` - Back / fourth button
+- `mouse5` - Forward / fifth button
+
+Used the same way as keys — combine with modifiers via `-`, or stand alone:
+
+```bash
+cmd - mouse1 : echo "cmd-click"
+meh - mouse3 : open -a "Mission Control"
+mouse4 -> : echo "back button"   # passthrough: still goes to the app
+```
+
+⚠️ Binding `mouse1` (or any mouse button) **without** a modifier and
+**without** `->` consumes every click in non-blacklisted apps and
+effectively breaks the trackpad. Pair with a modifier (`cmd - mouse1`)
+or use passthrough (`mouse1 -> : ...`) unless you really mean it. Mouse
+synthesis as a forward target (`cmd - x | mouse1`) and mouse-up / drag
+events are not supported.
+
 ## Configuration Directives
 
 Configuration directives follow this syntax:

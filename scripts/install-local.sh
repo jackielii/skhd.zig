@@ -17,9 +17,11 @@ SRC_BINARY="${1:?usage: install-local.sh <built-binary>}"
 PROD_LABEL="com.jackielii.skhd"
 DOMAIN="gui/$(id -u)"
 
-# Prefer /Applications/skhd.app (the symlink brew creates); fall back to the
-# brew opt dir. The OS dereferences the symlink for cp / codesign so we don't
-# need to resolve it manually.
+# Prefer /Applications/skhd.app if the user manually `ln -sfn`'d the bundle
+# there (caveats document this as optional — brew's sandbox can't create the
+# symlink in post_install). Otherwise write to the brew opt dir directly. The
+# OS dereferences the symlink for cp / codesign, so when /Applications is
+# present we don't need to resolve it manually.
 APP_PATH="/Applications/skhd.app"
 if [ ! -d "$APP_PATH" ]; then
     APP_PATH="/opt/homebrew/opt/skhd-zig/skhd.app"

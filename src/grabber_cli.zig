@@ -166,6 +166,7 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
         printHidDaemonRemediation(hid_state);
         return switch (hid_state) {
             .not_installed => error.DextMissing,
+            .dext_disabled => error.DextDisabled,
             .plist_unregistered, .stopped => error.VhiddDaemonMissing,
             .running => unreachable,
         };
@@ -391,9 +392,29 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
     // 1. Karabiner DriverKit dext (provides the virtual HID device
     //    that the grabber injects through). Loaded dext shows up as
     //    a running process under _driverkit owned by launchd.
+    //    Loaded-but-disabled (System Settings → Login Items & Extensions
+    //    toggled off) is also a fail — the dext process keeps running so
+    //    pgrep matches, but the kernel detaches it from HID dispatch.
     if (try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice")) {
-        std.debug.print("  [OK]      Karabiner-DriverKit-VirtualHIDDevice (dext) loaded\n", .{});
-        ok_count += 1;
+        if (isDextEnabled(allocator)) |enabled| {
+            if (enabled) {
+                std.debug.print("  [OK]      Karabiner-DriverKit-VirtualHIDDevice (dext) loaded and enabled\n", .{});
+                ok_count += 1;
+            } else {
+                std.debug.print(
+                    \\  [FAIL]    Karabiner-DriverKit-VirtualHIDDevice (dext) loaded but DISABLED in System Settings
+                    \\            Re-enable: System Settings → General → Login Items & Extensions →
+                    \\            Driver Extensions → toggle Karabiner-VirtualHIDDevice Manager Extensions on.
+                    \\
+                , .{});
+                fail_count += 1;
+            }
+        } else {
+            // Probe failed (systemextensionsctl unavailable / output
+            // unparseable). Don't false-alarm; trust the pgrep signal.
+            std.debug.print("  [OK]      Karabiner-DriverKit-VirtualHIDDevice (dext) loaded (enabled-state probe inconclusive)\n", .{});
+            ok_count += 1;
+        }
     } else {
         std.debug.print(
             \\  [MISSING] Karabiner-DriverKit-VirtualHIDDevice (dext) not loaded
@@ -476,7 +497,7 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
     if (fail_count == 0) {
         std.debug.print("\nSummary: {d} OK, 0 failing — everything looks good.\n", .{ok_count});
     } else {
-        std.debug.print("\nSummary: {d} OK, {d} failing — fix the [MISSING] items above.\n", .{ ok_count, fail_count });
+        std.debug.print("\nSummary: {d} OK, {d} failing — fix the [MISSING]/[FAIL] items above.\n", .{ ok_count, fail_count });
     }
 }
 
@@ -496,14 +517,23 @@ fn processRunning(allocator: std.mem.Allocator, needle: []const u8) !bool {
 /// installed Karabiner DriverKit version (matches what's in the dext).
 const vhidd_info_plist = "/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/Info.plist";
 
-/// HID daemon dependency state, in priority order: missing dext → broken
-/// launchd registration → just-stopped → running. Each state has a distinct
-/// remediation so callers (--install-grabber, --status) can give specific
-/// guidance instead of a generic "something's wrong".
+/// HID daemon dependency state, in priority order: missing dext →
+/// dext-disabled → broken launchd registration → just-stopped →
+/// running. Each state has a distinct remediation so callers
+/// (--install-grabber, --status) can give specific guidance instead of
+/// a generic "something's wrong".
 pub const HidDaemonState = enum {
     /// The DriverKit dext isn't loaded. User needs to install the
     /// Karabiner-DriverKit-VirtualHIDDevice .pkg from pqrs releases.
     not_installed,
+    /// Dext is loaded as a system extension but the user has toggled it
+    /// off in System Settings → Login Items & Extensions → Driver
+    /// Extensions. The dext process keeps running so a pgrep-only check
+    /// reports it as loaded, but the kernel won't dispatch HID requests
+    /// through it — vhidd injection silently no-ops and seize calls
+    /// fail. Recovery is UI-only: SIP gates `systemextensionsctl
+    /// activate` from the command line.
+    dext_disabled,
     /// Dext is loaded but the daemon binary's launchd plist isn't
     /// registered. Happens after a partial uninstall or when only the
     /// dext was installed without its companion plist. `kickstart` will
@@ -526,6 +556,18 @@ pub fn checkHidDaemonState(allocator: std.mem.Allocator) !HidDaemonState {
     const dext_loaded = try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice");
     if (!dext_loaded) return .not_installed;
 
+    // The dext can be loaded-but-disabled — user toggled it off in
+    // System Settings → Login Items & Extensions → Driver Extensions.
+    // The dext process keeps running (so the pgrep above reports
+    // "loaded") but the kernel detaches it from HID dispatch. Without
+    // this check the status would lie: `--grabber-status` and
+    // `--status` reported 5/5 OK while seize / injection silently
+    // failed. `systemextensionsctl list` is the only programmatic
+    // signal we have for this state.
+    if (isDextEnabled(allocator)) |enabled| {
+        if (!enabled) return .dext_disabled;
+    }
+
     const daemon_running = try processRunning(allocator, "Karabiner-VirtualHIDDevice-Daemon");
     if (daemon_running) return .running;
 
@@ -537,6 +579,46 @@ pub fn checkHidDaemonState(allocator: std.mem.Allocator) !HidDaemonState {
     const registered = try launchdServiceRegistered(allocator);
     return if (registered) .stopped else .plist_unregistered;
 }
+
+/// Tri-state probe of the dext's enabled status via `systemextensionsctl
+/// list`. Returns `true` only if the bundle's state line shows
+/// `[activated enabled]`. Returns `false` for `[activated disabled]` or
+/// any other recognized non-enabled state. Returns `null` when we can't
+/// tell (command failed, output unparseable, bundle not in the list at
+/// all) — caller treats that as "give the user the benefit of the doubt"
+/// to avoid false alarms in unusual environments.
+fn isDextEnabled(allocator: std.mem.Allocator) ?bool {
+    var child = std.process.Child.init(
+        &.{ "/usr/bin/systemextensionsctl", "list" },
+        allocator,
+    );
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return null;
+
+    var buf: [16 * 1024]u8 = undefined;
+    var n: usize = 0;
+    if (child.stdout) |stdout| {
+        n = stdout.reader().read(&buf) catch 0;
+    }
+    const term = child.wait() catch return null;
+    if (term != .Exited or term.Exited != 0) return null;
+
+    const dext_id = "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice";
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, dext_id) == null) continue;
+        if (std.mem.indexOf(u8, line, "[activated enabled]") != null) return true;
+        if (std.mem.indexOf(u8, line, "[activated disabled]") != null) return false;
+        // Other states (`[deactivated]`, `[uninstalling]`, `[activated
+        // waiting for user]`, …) — anything that isn't explicitly
+        // `enabled` won't dispatch HID, so report as not-enabled.
+        return false;
+    }
+    return null;
+}
+
 
 fn launchdServiceRegistered(allocator: std.mem.Allocator) !bool {
     const target = "system/" ++ vhidd_launchd_label;
@@ -793,6 +875,10 @@ pub fn printHidDaemonStatus(allocator: std.mem.Allocator) HidDaemonState {
             }
         },
         .not_installed => std.debug.print("  HID daemon:           Not installed (required for .remap / .taphold rules; pinned v{s})\n", .{pinned_dext_version}),
+        .dext_disabled => {
+            const v_str = version orelse "?";
+            std.debug.print("  HID daemon:           DEXT v{s} loaded but DISABLED in System Settings (re-enable in Login Items & Extensions → Driver Extensions)\n", .{v_str});
+        },
         .plist_unregistered => {
             const v_str = version orelse "?";
             std.debug.print("  HID daemon:           DEXT v{s} loaded but launchd entry missing\n", .{v_str});
@@ -825,6 +911,21 @@ pub fn printHidDaemonRemediation(state: HidDaemonState) void {
             \\Approve the system extension in System Settings → Privacy &
             \\Security, then re-run:
             \\  skhd --install-service
+            \\
+        , .{}),
+        .dext_disabled => std.debug.print(
+            \\
+            \\Karabiner-DriverKit-VirtualHIDDevice is loaded but currently
+            \\DISABLED in System Settings. The dext process keeps running so
+            \\pgrep finds it, but the kernel won't dispatch HID requests
+            \\through it — seize fails and vhidd injection silently no-ops.
+            \\
+            \\Re-enable: System Settings → General → Login Items & Extensions
+            \\→ Driver Extensions → toggle Karabiner-VirtualHIDDevice
+            \\Manager Extensions on.
+            \\
+            \\(SIP gates `systemextensionsctl activate` from the command line
+            \\so this can only be done via the System Settings UI.)
             \\
         , .{}),
         .plist_unregistered => std.debug.print(

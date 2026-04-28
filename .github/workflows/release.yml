@@ -36,6 +36,16 @@ jobs:
         TAG_NAME="${{ github.ref_name }}"
         VERSION="${TAG_NAME#v}"
 
+        # Detect pre-release tags (-alpha / -beta / -rc, optionally
+        # followed by .N or -N). GitHub keeps pre-releases out of the
+        # repo's "latest release" badge and labels them clearly so
+        # watchers don't read the email as "you should upgrade".
+        PRERELEASE_FLAG=""
+        if [[ "$TAG_NAME" =~ -(alpha|beta|rc)([.-][A-Za-z0-9]+)?$ ]]; then
+          PRERELEASE_FLAG="--prerelease"
+          echo "Detected pre-release tag: $TAG_NAME"
+        fi
+
         # Verify the tag is annotated. A lightweight tag would make
         # `%(contents)` silently return the commit message — refuse the
         # release rather than ship surprising notes.
@@ -67,7 +77,8 @@ jobs:
           --repo ${{ github.repository }} \
           --title "$TAG_NAME" \
           --notes "$FULL_NOTES" \
-          --draft
+          --draft \
+          $PRERELEASE_FLAG
 
   build-release:
     needs: create-release
@@ -193,6 +204,12 @@ jobs:
 
   update-homebrew:
     needs: publish-release
+    # Skip on pre-releases (-alpha / -beta / -rc) — bumping the formula
+    # would silently push every brew-installed user onto the pre-release
+    # via `brew upgrade`. Stable users stay on whatever the last final
+    # tag was; we install pre-releases manually via `gh release download`
+    # for testing.
+    if: ${{ !contains(github.ref_name, '-alpha') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-rc') }}
     runs-on: ubuntu-latest
     steps:
     - name: Checkout homebrew-tap

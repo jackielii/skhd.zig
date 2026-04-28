@@ -891,6 +891,12 @@ inline fn interceptSystemKey(event: c.CGEventRef, eventkey: *Hotkey.KeyPress) bo
 const SKHD_EVENT_MARKER: i64 = 0x736B6864; // "skhd" in hex
 
 inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
+    // Mouse buttons live in a separate keycode space (≥ 0x10000) and need
+    // CGEventCreateMouseEvent rather than CGEventCreateKeyboardEvent.
+    if (Keycodes.isMouseButton(target_key.key)) {
+        try postMouseClick(target_key);
+        return;
+    }
     // Check if this is an NX media key (requires different event type)
     if (target_key.flags.nx) {
         try postMediaKeyEvent(target_key.key);
@@ -924,6 +930,51 @@ inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
     // Post both key down and key up events
     c.CGEventPost(c.kCGSessionEventTap, key_down);
     c.CGEventPost(c.kCGSessionEventTap, key_up);
+}
+
+/// Synthesize a mouse-down + mouse-up at the current cursor position.
+/// Used for `... | mouse1` forwards. The cursor doesn't move; we just
+/// fire a click in place.
+inline fn postMouseClick(target_key: Hotkey.KeyPress) !void {
+    const button: u32 = target_key.key & 0xFF; // 1..5
+    const down_type: c.CGEventType, const up_type: c.CGEventType, const cg_button: c.CGMouseButton = switch (button) {
+        1 => .{ c.kCGEventLeftMouseDown, c.kCGEventLeftMouseUp, c.kCGMouseButtonLeft },
+        2 => .{ c.kCGEventRightMouseDown, c.kCGEventRightMouseUp, c.kCGMouseButtonRight },
+        else => .{ c.kCGEventOtherMouseDown, c.kCGEventOtherMouseUp, @intCast(button - 1) },
+    };
+
+    // CGEventCreate(NULL) returns an empty event whose location field is
+    // populated with the current cursor position — cheaper than a Cocoa
+    // round-trip via NSEvent.mouseLocation.
+    const probe = c.CGEventCreate(null);
+    if (probe == null) return error.FailedToProbeMouse;
+    defer c.CFRelease(probe);
+    const cursor = c.CGEventGetLocation(probe);
+
+    const source = c.CGEventSourceCreate(c.kCGEventSourceStateHIDSystemState);
+    if (source == null) return error.FailedToCreateEventSource;
+    defer c.CFRelease(source);
+
+    const down = c.CGEventCreateMouseEvent(source, down_type, cursor, cg_button);
+    if (down == null) return error.FailedToCreateMouseEvent;
+    defer c.CFRelease(down);
+
+    const up = c.CGEventCreateMouseEvent(source, up_type, cursor, cg_button);
+    if (up == null) return error.FailedToCreateMouseEvent;
+    defer c.CFRelease(up);
+
+    // Carry any modifier flags from the forward target so syntax like
+    // `key | cmd - mouse1` synthesizes a cmd-click rather than a plain click.
+    const target_flags = hotkeyFlagsToCGEventFlags(target_key.flags);
+    c.CGEventSetFlags(down, target_flags);
+    c.CGEventSetFlags(up, target_flags);
+
+    // Mark as self-generated so handleMouseDown re-entry skips them.
+    c.CGEventSetIntegerValueField(down, c.kCGEventSourceUserData, SKHD_EVENT_MARKER);
+    c.CGEventSetIntegerValueField(up, c.kCGEventSourceUserData, SKHD_EVENT_MARKER);
+
+    c.CGEventPost(c.kCGSessionEventTap, down);
+    c.CGEventPost(c.kCGSessionEventTap, up);
 }
 
 /// Synthesize and post a media key event (play, next, previous, etc.)
@@ -1222,7 +1273,12 @@ pub fn reloadConfig(self: *Skhd) !void {
         }
         return err;
     };
-    try parser.processLoadDirectives(&new_mappings);
+    parser.processLoadDirectives(&new_mappings) catch |err| {
+        if (parser.error_info) |parse_err| {
+            log.err("skhd: {}", .{parse_err});
+        }
+        return err;
+    };
 
     // Swap old mappings with new ones
     self.mappings.deinit();

@@ -164,12 +164,20 @@ meh - mouse3 : open -a "Mission Control"
 mouse4 -> : echo "back button"   # passthrough: still goes to the app
 ```
 
+Mouse buttons can also be the **target** of a forward, so you can
+synthesize a click from a key (e.g. inside a layer):
+
+```bash
+fn_layer < enter | mouse1        # in fn_layer, enter = left-click
+fn_layer < space | cmd - mouse1  # cmd-click via the layer
+```
+
 ⚠️ Binding `mouse1` (or any mouse button) **without** a modifier and
 **without** `->` consumes every click in non-blacklisted apps and
 effectively breaks the trackpad. Pair with a modifier (`cmd - mouse1`)
-or use passthrough (`mouse1 -> : ...`) unless you really mean it. Mouse
-synthesis as a forward target (`cmd - x | mouse1`) and mouse-up / drag
-events are not supported.
+or use passthrough (`mouse1 -> : ...`) unless you really mean it.
+Mouse-up and drag events are not captured (skhd only sees the down
+edge); scroll-wheel events aren't bindable either.
 
 ## Configuration Directives
 

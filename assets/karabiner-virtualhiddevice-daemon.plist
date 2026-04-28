@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchDaemon plist for Karabiner-DriverKit-VirtualHIDDevice's userland
+  helper daemon. Installed by `skhd --install-dext` to
+  /Library/LaunchDaemons/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist.
+
+  Why we ship this: pqrs's standalone DriverKit .pkg has a no-op
+  postinstall (it just `killall`s the existing daemon and lets launchd
+  respawn). The launchd plist that historically registered the daemon
+  ships with Karabiner-Elements, not the DriverKit pkg itself. Without
+  Karabiner-Elements installed, the daemon never gets a launchd entry —
+  the dext loads but the userland half stays dark, and grabber-side
+  vhidd_server connect attempts fail silently. This plist fills that gap.
+
+  Idempotent — `--install-dext` skips writing it if a file already
+  exists at this path (so a Karabiner-Elements user keeps theirs).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!--
+      Interactive: don't throttle under user-driven keyboard load. Same
+      reasoning as skhd-grabber's plist.
+    -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/karabiner-virtualhiddevice-daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/karabiner-virtualhiddevice-daemon.log</string>
+</dict>
+</plist>

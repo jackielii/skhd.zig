@@ -62,6 +62,20 @@ fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
     });
 }
 
+/// Register the embedded launchd plists used by `--install-grabber` and
+/// `--install-dext`. Plists live outside `src/` so anonymous imports are
+/// the right shape (Zig restricts `@embedFile` to within the module's
+/// package). Call this on every binary that links grabber_cli (currently
+/// skhd, skhd-alloc, and unit-test executables).
+fn addGrabberPlistImports(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    exe.root_module.addAnonymousImport("grabber_plist", .{
+        .root_source_file = b.path("scripts/com.jackielii.skhd.grabber.plist"),
+    });
+    exe.root_module.addAnonymousImport("vhidd_plist", .{
+        .root_source_file = b.path("assets/karabiner-virtualhiddevice-daemon.plist"),
+    });
+}
+
 const track_alloc_option = "track_alloc";
 
 // Pinned Karabiner-DriverKit-VirtualHIDDevice version. skhd-grabber's IPC
@@ -130,6 +144,7 @@ pub fn build(b: *std.Build) void {
 
     linkFrameworks(b, exe);
     addVersionImport(b, exe);
+    addGrabberPlistImports(b, exe);
     exe.root_module.addOptions("build_options", options);
     exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
 
@@ -371,6 +386,7 @@ pub fn build(b: *std.Build) void {
     });
     linkFrameworks(b, alloc_exe);
     addVersionImport(b, alloc_exe);
+    addGrabberPlistImports(b, alloc_exe);
 
     const alloc_options = b.addOptions();
     alloc_options.addOption(bool, track_alloc_option, true);
@@ -416,6 +432,7 @@ pub fn build(b: *std.Build) void {
     });
     linkFrameworks(b, exe_unit_tests);
     addVersionImport(b, exe_unit_tests);
+    addGrabberPlistImports(b, exe_unit_tests);
 
     exe_unit_tests.root_module.addOptions("build_options", options);
     exe_unit_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
@@ -430,6 +447,7 @@ pub fn build(b: *std.Build) void {
     });
     linkFrameworks(b, tests_unit_tests);
     addVersionImport(b, exe_unit_tests);
+    addGrabberPlistImports(b, tests_unit_tests);
     tests_unit_tests.root_module.addOptions("build_options", options);
     tests_unit_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     const run_tests_unit_tests = b.addRunArtifact(tests_unit_tests);
@@ -459,6 +477,7 @@ pub fn build(b: *std.Build) void {
         });
         linkFrameworks(b, module_tests);
         addVersionImport(b, module_tests);
+        addGrabberPlistImports(b, module_tests);
         module_tests.root_module.addOptions("build_options", options);
         // RuleSet's test imports the shared protocol module by name;
         // grabber_protocol.zig itself is the module's root, so it

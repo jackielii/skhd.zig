@@ -3,11 +3,17 @@
   Template launchd plist for skhd-grabber.
 
   Installed at /Library/LaunchDaemons/com.jackielii.skhd.grabber.plist
-  by `skhd --install-grabber` (which shells out to install-grabber.sh).
+  by `skhd --install-grabber` (Zig in-process — no shell script needed).
 
   This is a system daemon (NOT a LaunchAgent) — runs as root, regardless
   of which user is logged in, because IOHIDDeviceOpen(seize) and the
   Karabiner vhidd_server both require root.
+
+  ProgramArguments is filled in at install time with the absolute path
+  of `skhd-grabber` inside the running skhd's `.app` bundle. Running from
+  inside the bundle is what makes TCC bundle-keyed — granting Input
+  Monitoring to skhd.app once covers both the agent and the grabber,
+  since both binaries are signed with `-i com.jackielii.skhd`.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -17,7 +23,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/libexec/skhd-grabber</string>
+        <string>__GRABBER_PATH__</string>
     </array>
 
     <key>RunAtLoad</key>

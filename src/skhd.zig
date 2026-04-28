@@ -536,6 +536,14 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
                 "Foreground run — grant manually in System Settings → Privacy & Security → Accessibility, or run the daemon (install-local) to get the prompt.",
         });
     }
+    // Note: Input Monitoring prompt deliberately NOT triggered here.
+    // IOHIDRequestAccess blocks the calling thread until the user clicks
+    // Allow/Deny ("The user response is required before this function
+    // returns" — Apple docs). Calling it from agent startup hangs the
+    // daemon's main thread, which in turn hangs `launchctl bootstrap`
+    // (and thus `zig build install-local`). The IM prompt fires from the
+    // interactive `--install-service` flow instead, where the user is at
+    // a terminal and expects dialogs.
     log.info("Starting event tap", .{});
     self.event_tap.begin(keyHandler, self) catch |err| {
         if (err == error.AccessibilityPermissionDenied) {

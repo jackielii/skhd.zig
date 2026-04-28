@@ -560,6 +560,31 @@ fn maybeInstallGrabber(allocator: std.mem.Allocator) !void {
         return;
     };
     std.debug.print("\nskhd-grabber installed.\n", .{});
+
+    // Trigger the Input Monitoring approval dialog now, while the user is
+    // at an interactive terminal and expects system prompts. Granting IM
+    // to skhd.app covers the grabber via bundle-shared TCC (both binaries
+    // are signed with `-i com.jackielii.skhd` and the grabber runs from
+    // inside the bundle). IOHIDRequestAccess blocks until the user
+    // clicks Allow/Deny — fine here, broken if called at agent startup.
+    std.debug.print(
+        \\
+        \\Requesting Input Monitoring permission (a System Settings dialog
+        \\will appear; approving it covers both skhd and skhd-grabber)...
+        \\
+    , .{});
+    const im_granted = service.promptForInputMonitoring();
+    if (im_granted) {
+        std.debug.print("Input Monitoring granted.\n", .{});
+    } else {
+        std.debug.print(
+            \\Input Monitoring not granted yet. If you missed the dialog or
+            \\denied by accident, open System Settings → Privacy & Security
+            \\→ Input Monitoring and toggle skhd on, then run:
+            \\  sudo launchctl kickstart -k system/com.jackielii.skhd.grabber
+            \\
+        , .{});
+    }
 }
 
 /// Read one line from stdin (up to newline). Returns owned slice

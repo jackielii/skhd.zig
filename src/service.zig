@@ -46,6 +46,16 @@ pub fn checkInputMonitoringAccess() InputMonitoringAccess {
     };
 }
 
+/// Trigger the Input Monitoring approval dialog for this bundle. Same
+/// auto-pop UX as `promptForAccessibility` — first call shows the system
+/// prompt; subsequent calls just return the current grant state. Used to
+/// extend the bundle-keyed IM grant to skhd-grabber: when the daemon and
+/// the agent are both signed with `com.jackielii.skhd` and the daemon
+/// runs from inside skhd.app, granting the dialog covers both processes.
+pub fn promptForInputMonitoring() bool {
+    return c.IOHIDRequestAccess(c.kIOHIDRequestTypeListenEvent) != 0;
+}
+
 /// Like hasAccessibilityPermissions() but uses the prompting variant. The
 /// first time an unknown bundle calls this, macOS pops the "X would like to
 /// control this computer" dialog and opens System Settings → Accessibility.
@@ -203,6 +213,64 @@ pub fn uninstallService(allocator: std.mem.Allocator) !void {
         log.info("Unregister returned: {}", .{err});
     };
     std.debug.print("Service unregistered.\n", .{});
+
+    // The agent uninstall is what users reach for first; the grabber and
+    // the Karabiner DriverKit pieces don't get auto-removed because
+    // they're root-owned and need a separate sudo step. Surface them
+    // here so a user reading the terminal output knows what's still on
+    // disk and how to finish the cleanup.
+    printPostUninstallHints();
+}
+
+/// Print follow-up cleanup instructions if the grabber or VHIDD daemon
+/// LaunchDaemons are still on disk after `--uninstall-service`. Silent
+/// when nothing else is installed (the agent-only path doesn't need
+/// extra noise). Mirrors the tail message from `--uninstall-grabber` but
+/// scoped to whatever's actually present.
+fn printPostUninstallHints() void {
+    const grabber_plist = "/Library/LaunchDaemons/com.jackielii.skhd.grabber.plist";
+    const vhidd_plist = "/Library/LaunchDaemons/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist";
+    const pqrs_payload = "/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice";
+
+    const has_grabber = fileExistsAbsolute(grabber_plist);
+    const has_vhidd = fileExistsAbsolute(vhidd_plist);
+    const has_pqrs = fileExistsAbsolute(pqrs_payload);
+
+    if (!has_grabber and !has_vhidd and !has_pqrs) return;
+
+    std.debug.print("\nStill installed (run these to fully clean up):\n", .{});
+
+    if (has_grabber or has_vhidd) {
+        std.debug.print(
+            \\  sudo skhd --uninstall-grabber
+            \\    Removes:
+        , .{});
+        if (has_grabber) std.debug.print("\n      - skhd-grabber LaunchDaemon ({s})", .{grabber_plist});
+        if (has_vhidd) std.debug.print("\n      - VHIDD daemon LaunchDaemon ({s})", .{vhidd_plist});
+        std.debug.print("\n", .{});
+    }
+
+    if (has_pqrs) {
+        std.debug.print(
+            \\
+            \\  Karabiner-DriverKit-VirtualHIDDevice .pkg payload + dext
+            \\    pqrs's domain — skhd doesn't ship its own uninstaller for these.
+            \\    Run pqrs's scripts:
+            \\      sudo bash "/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/scripts/uninstall/remove_files.sh"
+            \\      sudo bash "/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/scripts/uninstall/deactivate_driver.sh"
+            \\    The dext (kernel-side) needs SIP-aware removal — toggle it
+            \\    off in System Settings → Login Items & Extensions →
+            \\    Driver Extensions if you want it gone.
+            \\
+        , .{});
+    } else {
+        std.debug.print("\n", .{});
+    }
+}
+
+fn fileExistsAbsolute(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
 }
 
 pub fn startService(allocator: std.mem.Allocator) !void {
@@ -418,15 +486,15 @@ fn getProcessUptimeSeconds(pid: i32) ?u64 {
 ///    quiet on the happy path).
 /// 2. **Log tail fallback** for daemons too young for #1 to be conclusive,
 ///    or when the daemon is loaded but currently in the throttle window.
-///    Recent "ACCESSIBILITY PERMISSIONS REQUIRED" / "Event tap creation
-///    failed" entries point to denial. Success-side patterns are also
-///    matched for Debug/ReleaseSafe builds where `log.info` reaches the
-///    file.
+///    Anchored on the *current* daemon's start marker so a stale
+///    "ACCESSIBILITY PERMISSIONS REQUIRED" block from a previously
+///    crashed instance doesn't poison the read. Recent "ACCESSIBILITY
+///    PERMISSIONS REQUIRED" / "Event tap creation failed" entries after
+///    that marker point to denial; success-side patterns are matched for
+///    Debug / ReleaseSafe builds where `log.info` reaches the file.
 fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) EventTapHealth {
-    var daemon_uptime: ?u64 = null;
     if (daemon_state == .running) {
-        daemon_uptime = getProcessUptimeSeconds(daemon_state.running);
-        if (daemon_uptime) |uptime| {
+        if (getProcessUptimeSeconds(daemon_state.running)) |uptime| {
             if (uptime >= 30) return .working;
         }
     }
@@ -439,26 +507,37 @@ fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) Ev
     defer file.close();
 
     const stat = file.stat() catch return .unknown;
-    const tail_size: u64 = 8192;
     if (stat.size == 0) return .unknown;
 
-    // SMAppService doesn't redirect the daemon's stderr (no StandardErrorPath
-    // in LaunchAgent.plist), so the file holds messages from a previous run.
-    // If it's older than the current daemon, scanning it would surface stale
-    // "ACCESSIBILITY PERMISSIONS REQUIRED" lines and report a false denied —
-    // bail out as unknown instead.
-    if (daemon_uptime) |uptime| {
-        const log_mtime_s = @divFloor(stat.mtime, std.time.ns_per_s);
-        const now_s: i128 = std.time.timestamp();
-        if (now_s - log_mtime_s > @as(i128, uptime)) return .unknown;
-    }
+    // Read enough of the tail to almost certainly contain the current
+    // daemon's startup marker. 64 KiB covers tens of restart cycles even
+    // with PATH dumps; if the daemon is so young its marker isn't here
+    // yet, we'll just bail out as unknown rather than risk a stale read.
+    const tail_size: u64 = 64 * 1024;
     const start: u64 = if (stat.size > tail_size) stat.size - tail_size else 0;
     file.seekTo(start) catch return .unknown;
 
     const content = file.readToEndAlloc(allocator, tail_size) catch return .unknown;
     defer allocator.free(content);
 
-    var lines = std.mem.splitScalar(u8, content, '\n');
+    // Find the last `=== skhd … (PID <daemon_pid>) ===` start marker.
+    // Without anchoring on the current daemon's PID, log entries from a
+    // previous crashed run (the cdHash-mismatch case in particular) keep
+    // showing as "denied" forever. Scanning only after the marker is the
+    // simplest way to make the status reflect the *current* daemon.
+    const scan_start: usize = scan_start: {
+        if (daemon_state == .running) {
+            var pid_buf: [32]u8 = undefined;
+            const pid_marker = std.fmt.bufPrint(&pid_buf, "(PID {d})", .{daemon_state.running}) catch break :scan_start 0;
+            if (std.mem.lastIndexOf(u8, content, pid_marker)) |idx| break :scan_start idx;
+        }
+        // No running daemon to anchor on, or its marker isn't in the tail
+        // window — caller hasn't established whether *this* run is broken,
+        // so don't make claims either way.
+        return .unknown;
+    };
+
+    var lines = std.mem.splitScalar(u8, content[scan_start..], '\n');
     var last: EventTapHealth = .unknown;
     while (lines.next()) |line| {
         if (std.mem.indexOf(u8, line, "Event tap created successfully") != null or

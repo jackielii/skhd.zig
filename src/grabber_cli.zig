@@ -58,9 +58,30 @@ test "compareVersions: same major" {
 
 const log = std.log.scoped(.grabber_cli);
 
-const install_script_rel = "scripts/install-grabber.sh";
-const uninstall_script_rel = "scripts/uninstall-grabber.sh";
 const grabber_binary_rel = "zig-out/bin/skhd-grabber";
+
+const grabber_launchd_label = "com.jackielii.skhd.grabber";
+const grabber_plist_path = "/Library/LaunchDaemons/" ++ grabber_launchd_label ++ ".plist";
+
+const grabber_socket_dir = "/var/run/skhd";
+const grabber_socket_default = grabber_socket_dir ++ "/grabber.sock";
+
+/// Path to the VHIDD daemon's launchd plist. installDext writes this so the
+/// userland half of Karabiner-DriverKit-VirtualHIDDevice gets registered —
+/// the standalone pqrs .pkg's postinstall is a no-op `killall` that assumes
+/// some other component (Karabiner-Elements, historically) provides the
+/// launchd entry. Without Karabiner-Elements, that entry never lands.
+const vhidd_plist_path = "/Library/LaunchDaemons/" ++ vhidd_launchd_label ++ ".plist";
+
+/// Embedded LaunchDaemon plist for `skhd-grabber`. Single source of truth
+/// for the launchd config, baked into the skhd binary so `--install-grabber`
+/// works from any cwd (and on a brew install where scripts/ isn't on disk).
+/// Wired up as an anonymous import in build.zig (`addGrabberPlistImports`).
+const grabber_plist_template = @embedFile("grabber_plist");
+
+/// Embedded LaunchDaemon plist for `Karabiner-VirtualHIDDevice-Daemon`.
+/// See the file's comment block for why we ship it.
+const vhidd_plist_template = @embedFile("vhidd_plist");
 
 /// Path to the installed grabber binary, used by --install-grabber to
 /// know what to copy. We resolve it relative to the running skhd
@@ -92,32 +113,52 @@ fn fileExists(path: []const u8) bool {
     return true;
 }
 
-/// Resolve the absolute path to a script in the repo's scripts/
-/// directory. Used by install/uninstall, both of which shell out to
-/// bash.
-fn resolveScript(allocator: std.mem.Allocator, rel: []const u8) ![]const u8 {
-    // Two candidate roots: cwd (dev runs from the repo) and the dir
-    // alongside the binary (bundled installs may carry scripts in a
-    // sibling resources dir; for now we just look in the repo).
-    if (fileExists(rel)) {
-        return std.fs.realpathAlloc(allocator, rel) catch try allocator.dupe(u8, rel);
-    }
-    return error.ScriptNotFound;
+/// Run `/bin/launchctl <args...>`. Stdio is inherited so launchctl's own
+/// error messages reach the user. Returns error on non-zero exit.
+fn runLaunchctl(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+    try argv.append("/bin/launchctl");
+    try argv.appendSlice(args);
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    const term = try child.spawnAndWait();
+    if (term != .Exited or term.Exited != 0) return error.LaunchctlFailed;
+}
+
+/// Create or overwrite an absolute path with `content`, mode 0644. Used
+/// for system plists.
+fn writePlistAbsolute(path: []const u8, content: []const u8) !void {
+    var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o644 });
+    defer file.close();
+    try file.writeAll(content);
 }
 
 pub fn installGrabber(allocator: std.mem.Allocator) !void {
+    if (c.geteuid() != 0) {
+        std.debug.print(
+            \\skhd --install-grabber needs root.
+            \\Re-run with: sudo skhd --install-grabber
+            \\
+        , .{});
+        return error.NotRoot;
+    }
+
     // Pre-check: the dext is what makes vhidd injection possible.
     // Without it, the grabber starts but its first connect attempt to the
-    // vhidd_server fails. Branch on the specific failure mode so the user
-    // gets actionable guidance (install pkg vs. reinstall pkg vs.
-    // kickstart) rather than a generic "something's missing".
+    // vhidd_server fails. installDext now handles both `not_installed`
+    // (no dext at all) and `plist_unregistered` (dext loaded but the
+    // VHIDD launchd entry is missing — common after a partial Karabiner
+    // uninstall) by re-running the .pkg + writing our shipped VHIDD plist.
     var hid_state = try checkHidDaemonState(allocator);
-    if (hid_state == .not_installed) {
-        // Auto-install the pinned DriverKit. We're already root here
-        // (--install-grabber is gated behind sudo), so installDext won't
-        // need to re-elevate. After install, macOS may need a beat for
-        // launchd to bootstrap the userland daemon — re-probe state.
-        std.debug.print("\nKarabiner-DriverKit-VirtualHIDDevice not installed. Installing pinned v{s}...\n", .{pinned_dext_version});
+    if (hid_state == .not_installed or hid_state == .plist_unregistered) {
+        std.debug.print(
+            "\nKarabiner-DriverKit-VirtualHIDDevice setup needed (state: {s}). Installing pinned v{s}...\n",
+            .{ @tagName(hid_state), pinned_dext_version },
+        );
         try installDext(allocator);
         hid_state = try checkHidDaemonState(allocator);
     }
@@ -132,14 +173,14 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     // Daemon is running — check the major version matches our pinned one.
     // Refuse on `.older` (IPC likely broken). `.newer` is allowed with a
     // warning; the user opted into a newer version explicitly.
-    if (readHidDaemonVersion(allocator)) |installed| {
-        defer allocator.free(installed);
-        const compat = compareVersions(installed, pinned_dext_version);
+    if (readHidDaemonVersion(allocator)) |installed_dext| {
+        defer allocator.free(installed_dext);
+        const compat = compareVersions(installed_dext, pinned_dext_version);
         if (compat == .older) {
-            printVersionMismatchRemediation(installed, compat);
+            printVersionMismatchRemediation(installed_dext, compat);
             return error.DextVersionIncompatible;
         }
-        if (compat == .newer) printVersionMismatchRemediation(installed, compat);
+        if (compat == .newer) printVersionMismatchRemediation(installed_dext, compat);
     }
     if (isKarabinerElementsActive(allocator)) {
         std.debug.print(
@@ -151,20 +192,14 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
         , .{});
     }
 
-    const script = resolveScript(allocator, install_script_rel) catch {
-        std.debug.print(
-            "error: {s} not found. Run --install-grabber from the repo root.\n",
-            .{install_script_rel},
-        );
-        return error.ScriptNotFound;
-    };
-    defer allocator.free(script);
-
     const binary = resolveGrabberBinary(allocator) catch {
         std.debug.print(
-            "error: skhd-grabber binary not found. Run 'zig build' first.\n",
-            .{},
-        );
+            \\error: skhd-grabber binary not found.
+            \\Looked next to skhd at <bundle>/Contents/MacOS/skhd-grabber and
+            \\at zig-out/bin/skhd-grabber. On a brew install, this means the
+            \\bundled grabber is missing — try `brew reinstall skhd-zig`.
+            \\
+        , .{});
         return error.GrabberBinaryNotFound;
     };
     defer allocator.free(binary);
@@ -172,44 +207,89 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     const binary_abs = std.fs.realpathAlloc(allocator, binary) catch try allocator.dupe(u8, binary);
     defer allocator.free(binary_abs);
 
-    if (c.geteuid() != 0) {
+    // The plist's ProgramArguments path is critical for bundle-keyed TCC:
+    // when the grabber runs from inside skhd.app, TCC walks up to the
+    // bundle and uses the bundle ID (com.jackielii.skhd) — same client
+    // identifier as the agent. A single Input Monitoring grant on
+    // skhd.app then covers both processes. If the path resolves to a bare
+    // binary outside any .app, TCC keys the grant by path+cdHash and the
+    // user has to approve the daemon binary separately.
+    const grabber_path_for_plist = grabber_path_for_plist: {
+        if (std.mem.indexOf(u8, binary_abs, ".app/Contents/MacOS/") != null) {
+            break :grabber_path_for_plist try allocator.dupe(u8, binary_abs);
+        }
         std.debug.print(
-            \\skhd --install-grabber needs root.
-            \\Re-run with: sudo {s} {s}
+            \\warning: grabber binary at {s} is not inside a .app bundle.
+            \\TCC will key its Input Monitoring grant by path+cdHash, so the
+            \\user has to add this path to System Settings manually and
+            \\re-grant after every rebuild. For production installs run
+            \\--install-grabber from a brew-installed bundle, or use
+            \\`zig build install-local` to overlay into the bundle.
             \\
-        , .{ script, binary_abs });
-        return error.NotRoot;
-    }
+        , .{binary_abs});
+        break :grabber_path_for_plist try allocator.dupe(u8, binary_abs);
+    };
+    defer allocator.free(grabber_path_for_plist);
 
-    var child = std.process.Child.init(&.{ "/bin/bash", script, binary_abs }, allocator);
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    const term = try child.spawnAndWait();
-    if (term != .Exited or term.Exited != 0) return error.InstallFailed;
+    // 1. Render plist with the resolved grabber path.
+    const rendered_plist = try renderGrabberPlist(allocator, grabber_path_for_plist);
+    defer allocator.free(rendered_plist);
 
-    // Tahoe TCC quirk: IOHIDManager seize needs Input Monitoring,
-    // and the launchd-managed binary doesn't trigger the approval
-    // dialog on its own. The user has to add the binary to the
-    // Input Monitoring list by hand the first time.
+    // 2. Write the LaunchDaemon plist (no binary copy — we run the grabber
+    //    in place from inside the bundle so TCC bundle-shares the grant).
+    std.debug.print("Installing plist → {s} (program={s})\n", .{ grabber_plist_path, grabber_path_for_plist });
+    try writePlistAbsolute(grabber_plist_path, rendered_plist);
+
+    // 3. bootout-then-bootstrap so re-runs are idempotent. enable +
+    //    kickstart in case launchd has the service disabled or stopped
+    //    (e.g. after a previous uninstall).
+    const target = "system/" ++ grabber_launchd_label;
+    runLaunchctl(allocator, &.{ "bootout", target }) catch {};
+    try runLaunchctl(allocator, &.{ "bootstrap", "system", grabber_plist_path });
+    runLaunchctl(allocator, &.{ "enable", target }) catch {};
+    runLaunchctl(allocator, &.{ "kickstart", "-k", target }) catch {};
+
+    // Brief pause for the daemon to bind its socket so a follow-up
+    // --grabber-status reports "running" instead of "socket absent".
+    std.time.sleep(400 * std.time.ns_per_ms);
+
     std.debug.print(
         \\
-        \\Next step: grant Input Monitoring to the grabber binary.
+        \\Done. Daemon should now be running.
+        \\Logs:    /var/log/skhd-grabber.log
+        \\Socket:  {s}
         \\
-        \\1. Open System Settings > Privacy & Security > Input Monitoring.
-        \\2. Click '+' and add: /usr/local/libexec/skhd-grabber
-        \\3. Toggle the entry on.
-        \\4. Re-kick the daemon so it picks up the grant:
-        \\     sudo launchctl kickstart -k system/com.jackielii.skhd.grabber
+        \\Input Monitoring permission: the agent (skhd) prompts for this on
+        \\next launch. Granting it to skhd.app covers the grabber too —
+        \\both binaries are signed with the same bundle ID and run from
+        \\inside the bundle, so TCC bundle-shares the grant.
         \\
         \\Verify with:  skhd --grabber-status
         \\
-    , .{});
+    , .{grabber_socket_default});
 }
 
-/// Path of the system LaunchDaemon plist installed by the
-/// `--install-grabber` flow. If this file exists, the grabber is
-/// already registered with launchd (whether currently running or not).
-const grabber_plist_path = "/Library/LaunchDaemons/com.jackielii.skhd.grabber.plist";
+/// Substitute every `__GRABBER_PATH__` placeholder in the embedded plist
+/// template with the absolute path to the running bundle's grabber. This
+/// is the path launchd will exec — picking the bundle path is what
+/// enables bundle-keyed TCC. replaceAll (not first-match) so a stray
+/// reference in the template's comment block doesn't shadow the one in
+/// `<string>`, which would give launchd a literal `__GRABBER_PATH__`
+/// program path and a cryptic EX_CONFIG (78) crash on bootstrap.
+fn renderGrabberPlist(allocator: std.mem.Allocator, grabber_path: []const u8) ![]const u8 {
+    const placeholder = "__GRABBER_PATH__";
+    if (std.mem.indexOf(u8, grabber_plist_template, placeholder) == null) {
+        std.debug.print(
+            "internal error: grabber plist template missing __GRABBER_PATH__ placeholder\n",
+            .{},
+        );
+        return error.PlistTemplateMalformed;
+    }
+    const out_size = std.mem.replacementSize(u8, grabber_plist_template, placeholder, grabber_path);
+    const out = try allocator.alloc(u8, out_size);
+    _ = std.mem.replace(u8, grabber_plist_template, placeholder, grabber_path, out);
+    return out;
+}
 
 /// True when the grabber LaunchDaemon plist is installed. Used by
 /// the smart `--install-service` flow to skip the sudo prompt for
@@ -237,29 +317,64 @@ pub fn installGrabberViaSudo(allocator: std.mem.Allocator) !void {
 }
 
 pub fn uninstallGrabber(allocator: std.mem.Allocator) !void {
-    const script = resolveScript(allocator, uninstall_script_rel) catch {
-        std.debug.print(
-            "error: {s} not found. Run --uninstall-grabber from the repo root.\n",
-            .{uninstall_script_rel},
-        );
-        return error.ScriptNotFound;
-    };
-    defer allocator.free(script);
-
     if (c.geteuid() != 0) {
         std.debug.print(
             \\skhd --uninstall-grabber needs root.
-            \\Re-run with: sudo {s}
+            \\Re-run with: sudo skhd --uninstall-grabber
             \\
-        , .{script});
+        , .{});
         return error.NotRoot;
     }
 
-    var child = std.process.Child.init(&.{ "/bin/bash", script }, allocator);
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    const term = try child.spawnAndWait();
-    if (term != .Exited or term.Exited != 0) return error.UninstallFailed;
+    // 1. skhd-grabber LaunchDaemon (always ours).
+    const grabber_target = "system/" ++ grabber_launchd_label;
+    if (fileExists(grabber_plist_path)) {
+        std.debug.print("Stopping skhd-grabber...\n", .{});
+        runLaunchctl(allocator, &.{ "bootout", grabber_target }) catch {};
+        std.debug.print("Removing {s}\n", .{grabber_plist_path});
+        std.fs.deleteFileAbsolute(grabber_plist_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+
+    // 2. VHIDD daemon LaunchDaemon — only ours if a file exists at this
+    //    path. Karabiner-Elements registers via SMAppService and never
+    //    writes to /Library/LaunchDaemons/, so the file's presence is a
+    //    reliable signal that --install-dext put it there. Bootout first
+    //    so a Karabiner install that follows can SMAppService-register
+    //    against the same label without colliding.
+    if (fileExists(vhidd_plist_path)) {
+        const vhidd_target = "system/" ++ vhidd_launchd_label;
+        std.debug.print("Stopping VHIDD daemon...\n", .{});
+        runLaunchctl(allocator, &.{ "bootout", vhidd_target }) catch {};
+        std.debug.print("Removing {s}\n", .{vhidd_plist_path});
+        std.fs.deleteFileAbsolute(vhidd_plist_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+
+    // 3. Best-effort socket dir cleanup. Harmless if empty/missing.
+    std.fs.deleteFileAbsolute(grabber_socket_default) catch {};
+    std.fs.deleteDirAbsolute(grabber_socket_dir) catch {};
+
+    std.debug.print(
+        \\
+        \\Done. Removed:
+        \\  - skhd-grabber LaunchDaemon
+        \\  - VHIDD daemon LaunchDaemon (if installed by --install-dext)
+        \\
+        \\Left in place:
+        \\  - Karabiner-DriverKit-VirtualHIDDevice .pkg payload at
+        \\    /Library/Application Support/org.pqrs/. Run pqrs's uninstall
+        \\    scripts under .../scripts/uninstall/ to fully remove.
+        \\  - The kernel-loaded dext (system extension; SIP gates removal
+        \\    via systemextensionsctl — toggle off in System Settings →
+        \\    Login Items & Extensions → Driver Extensions if you want it
+        \\    gone).
+        \\
+    , .{});
 }
 
 /// Walk every prerequisite for caps_lock-class tap-hold and report
@@ -585,6 +700,13 @@ pub fn installDext(allocator: std.mem.Allocator) !void {
     const term = try inst.spawnAndWait();
     if (term != .Exited or term.Exited != 0) return error.InstallerFailed;
 
+    // 4. Register the VHIDD daemon with launchd. The pqrs .pkg's
+    //    postinstall is a no-op `killall` — the launchd plist that
+    //    historically registered the daemon ships with Karabiner-Elements,
+    //    not the standalone DriverKit pkg, so without our help the daemon
+    //    never gets a launchd entry on a fresh box.
+    try installVhiddDaemon(allocator);
+
     std.debug.print(
         \\
         \\Karabiner-DriverKit-VirtualHIDDevice {s} installed. macOS may
@@ -592,6 +714,53 @@ pub fn installDext(allocator: std.mem.Allocator) !void {
         \\Privacy & Security; approve it before running skhd-grabber.
         \\
     , .{pinned_dext_version});
+}
+
+/// Install + bootstrap the VHIDD daemon's launchd entry. Coexists with
+/// Karabiner-Elements: KE registers the same launchd label
+/// (`org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon`) via
+/// `SMAppService.daemon(plistName:)` from inside its app bundle, NOT via
+/// `/Library/LaunchDaemons/`. Two registrations under the same label
+/// would conflict, so we check whether launchd already has it (regardless
+/// of source) and either:
+///   - existing registration → skip plist write + bootstrap, just kickstart
+///   - no registration → write our plist to /Library/LaunchDaemons/,
+///     bootstrap, kickstart
+///
+/// Side effect on uninstall: we deliberately do NOT remove our VHIDD plist
+/// in `uninstallGrabber` — leaving it behind keeps the daemon working for
+/// any other consumer (e.g. user installs Karabiner-Elements after us).
+fn installVhiddDaemon(allocator: std.mem.Allocator) !void {
+    const target = "system/" ++ vhidd_launchd_label;
+
+    if (try launchdServiceRegistered(allocator)) {
+        std.debug.print(
+            \\VHIDD launchd entry already registered (Karabiner-Elements or a
+            \\prior --install-dext run). Skipping plist install to avoid a
+            \\duplicate registration; will just (re)kick the daemon.
+            \\
+        , .{});
+        runLaunchctl(allocator, &.{ "kickstart", "-k", target }) catch {};
+        std.time.sleep(400 * std.time.ns_per_ms);
+        return;
+    }
+
+    // Stale plist on disk but launchd doesn't know about it: bootout is a
+    // no-op (will fail silently), then bootstrap from the path on disk.
+    if (fileExists(vhidd_plist_path)) {
+        runLaunchctl(allocator, &.{ "bootout", target }) catch {};
+    } else {
+        std.debug.print("Installing VHIDD launchd plist → {s}\n", .{vhidd_plist_path});
+        try writePlistAbsolute(vhidd_plist_path, vhidd_plist_template);
+    }
+
+    try runLaunchctl(allocator, &.{ "bootstrap", "system", vhidd_plist_path });
+    runLaunchctl(allocator, &.{ "enable", target }) catch {};
+    runLaunchctl(allocator, &.{ "kickstart", "-k", target }) catch {};
+
+    // Pause so checkHidDaemonState() right after this reports running
+    // instead of the in-flight bootstrapped-but-not-yet-spawned state.
+    std.time.sleep(400 * std.time.ns_per_ms);
 }
 
 /// Print the one-line `--status` summary for the HID daemon. Returns the

@@ -30,3 +30,15 @@ pub const kIOHIDAccessTypeDenied: IOHIDAccessType = 1;
 pub const kIOHIDAccessTypeUnknown: IOHIDAccessType = 2;
 
 pub extern fn IOHIDCheckAccess(requestType: IOHIDRequestType) IOHIDAccessType;
+
+// IOHIDRequestAccess is the *prompting* variant of IOHIDCheckAccess — calling
+// it triggers the macOS Input Monitoring approval dialog the first time the
+// bundle hits it, same way AXIsProcessTrustedWithOptions(prompt=true) does
+// for Accessibility. Returns true if access is currently granted; false
+// otherwise (whether the user denied, the prompt is pending, or this is a
+// first-launch unknown state). Available since macOS 10.15.
+//
+// IOKit returns Apple's `Boolean` typedef (CoreFoundation: unsigned char,
+// not C99 _Bool), so we declare the FFI return as `u8` for arch-portable
+// marshalling and treat any non-zero value as success at the call site.
+pub extern fn IOHIDRequestAccess(requestType: IOHIDRequestType) u8;

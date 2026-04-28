@@ -51,6 +51,21 @@ cp "$LAUNCH_AGENT_PLIST" "$TMP_APP/Contents/Library/LaunchAgents/${BUNDLE_ID}.pl
 cp "$BINARY_PATH" "$TMP_APP/Contents/MacOS/skhd"
 chmod 755 "$TMP_APP/Contents/MacOS/skhd"
 
+# Bundle skhd-grabber alongside skhd if it was built. resolveGrabberBinary()
+# in src/grabber_cli.zig looks for `skhd-grabber` next to the running skhd
+# binary first, so this is what makes `--install-grabber` work for brew
+# users (no checked-out repo, no zig-out/bin/skhd-grabber to fall back to).
+GRABBER_BIN="$(dirname "$BINARY_PATH")/skhd-grabber"
+if [ -f "$GRABBER_BIN" ]; then
+    cp "$GRABBER_BIN" "$TMP_APP/Contents/MacOS/skhd-grabber"
+    chmod 755 "$TMP_APP/Contents/MacOS/skhd-grabber"
+    echo "  + bundled skhd-grabber"
+else
+    echo "  ! skhd-grabber not found at $GRABBER_BIN — bundle will not"
+    echo "    include the grabber binary; --install-grabber will fail"
+    echo "    unless run from the repo root with zig-out/bin/skhd-grabber."
+fi
+
 rm -rf "$APP_PATH"
 mv "$TMP_APP" "$APP_PATH"
 echo "Bundle created at $APP_PATH"

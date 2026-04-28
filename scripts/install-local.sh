@@ -60,6 +60,17 @@ fi
 cp "$SRC_BINARY" "$INNER_DST"
 chmod 755 "$INNER_DST"
 
+# Bundle skhd-grabber alongside skhd if it was built. resolveGrabberBinary()
+# in src/grabber_cli.zig looks for `skhd-grabber` next to the running skhd
+# binary first; without this overlay step a brew bundle would still lack it.
+GRABBER_SRC="$(dirname "$SRC_BINARY")/skhd-grabber"
+GRABBER_DST="$APP_PATH/Contents/MacOS/skhd-grabber"
+if [ -f "$GRABBER_SRC" ]; then
+    cp "$GRABBER_SRC" "$GRABBER_DST"
+    chmod 755 "$GRABBER_DST"
+    echo "  + overlaid skhd-grabber"
+fi
+
 echo "Signing with skhd-cert (prod bundle id)..."
 SKHD_CERT="skhd-cert" SKHD_BUNDLE_ID="$PROD_LABEL" \
     bash "$REPO_ROOT/scripts/codesign.sh" "$APP_PATH" >/dev/null

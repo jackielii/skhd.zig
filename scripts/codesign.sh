@@ -108,9 +108,18 @@ EOF
 fi
 
 if [ -n "$APP_PATH" ]; then
-    # Sign inner-out: Mach-O first, then the bundle.
+    # Sign inner-out: every Mach-O in Contents/MacOS/ first, then the bundle.
+    # skhd.app ships both `skhd` (CFBundleExecutable) and `skhd-grabber`
+    # (sibling helper used by --install-grabber). Signing both with the
+    # bundle's identifier keeps the bundle layer's seal valid.
     echo "Signing inner binary: $INNER_BINARY"
     codesign -f -s "$CERT_NAME" -i "$BUNDLE_ID" "$INNER_BINARY"
+    if [ -f "$APP_PATH/Contents/MacOS/skhd-grabber" ] && \
+       [ "$INNER_BINARY" != "$APP_PATH/Contents/MacOS/skhd-grabber" ]; then
+        echo "Signing helper:       $APP_PATH/Contents/MacOS/skhd-grabber"
+        codesign -f -s "$CERT_NAME" -i "$BUNDLE_ID" \
+            "$APP_PATH/Contents/MacOS/skhd-grabber"
+    fi
     echo "Signing bundle: $APP_PATH"
     codesign -f -s "$CERT_NAME" -i "$BUNDLE_ID" "$APP_PATH"
     VERIFY_TARGET="$APP_PATH"

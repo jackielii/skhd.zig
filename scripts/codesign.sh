@@ -35,12 +35,15 @@ else
     exit 1
 fi
 
-# Check if certificate exists in the default keychain search list (covers
-# both local dev — login.keychain — and CI's temporary keychain set via
-# `security list-keychain -d user -s ...`). The `security find-identity
-# -p codesigning` form filters by codeSigning EKU so an unrelated cert
-# with the same CN doesn't satisfy this check.
-if ! security find-identity -p codesigning -v 2>/dev/null | grep -F "\"$CERT_NAME\"" >/dev/null; then
+# Check if a certificate with this CN exists in the default keychain
+# search list. `security find-certificate -c <name>` (no explicit path)
+# walks the user's default search list, which covers both local dev
+# (login.keychain) and CI's temporary keychain swapped in via
+# `security list-keychain -d user -s ...`. We deliberately don't filter
+# by codeSigning EKU here: the user's CI cert is a self-signed import
+# that codesign accepts but find-identity -p codesigning rejects (no
+# EKU in the cert), so the EKU filter would false-negative in CI.
+if ! security find-certificate -c "$CERT_NAME" >/dev/null 2>&1; then
     if [ -n "$SKHD_NO_AUTO_GENERATE_CERT" ]; then
         echo -e "${RED}Certificate '$CERT_NAME' not found in any keychain.${NC}"
         echo "SKHD_NO_AUTO_GENERATE_CERT is set — refusing to generate a"

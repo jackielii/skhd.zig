@@ -17,23 +17,24 @@ zig build -Doptimize=ReleaseFast
 zig build -Doptimize=ReleaseSmall
 zig build -Doptimize=ReleaseSafe
 
-# Run with arguments
+# Run skhd locally (signed dev .app — bare binary can't be granted
+# Accessibility / Input Monitoring on Tahoe)
 zig build run -- [args]
 
-# Run tests
+# Run tests (use this — single-file `zig test` no longer works since
+# module tests now need build_options / grabber_protocol / plist imports)
 zig build test
+ZIG_PROGRESS=0 zig build test   # if it hangs
 
-# Note: If tests hang, use one of these alternatives:
-ZIG_PROGRESS=0 zig build test
+# Run benchmarks (ReleaseFast)
+zig build bench
+
+# Run the grabber daemon from this checkout. Requires sudo. If
+# `skhd --install-grabber` was run, stop the installed LaunchDaemon
+# first or it will hold the IPC socket:
+#     sudo launchctl bootout system/com.jackielii.skhd.grabber
+zig build run-grabber -- [args]
 ```
-
-To run a single test you need to link the frameworks manually:
-
-```bash
-zig test -lc -framework Cocoa -framework Carbon src/Hotload.zig
-```
-
-It's preferred to use the `zig build test` command as it automatically links the required frameworks.
 
 ## Architecture
 

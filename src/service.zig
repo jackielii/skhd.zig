@@ -584,8 +584,14 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
     // first. Only print it when the grabber is actually installed —
     // for users who never set up `.remap` / `.taphold`, "Not installed"
     // is an informational line, not an actionable problem.
-    if (hid_state != .running and grabber_cli.isGrabberInstalled()) {
-        grabber_cli.printHidDaemonRemediation(hid_state);
+    if (grabber_cli.isGrabberInstalled()) {
+        if (hid_state != .running) {
+            grabber_cli.printHidDaemonRemediation(hid_state);
+        } else if (grabber_cli.readHidDaemonVersion(allocator)) |installed_dext| {
+            defer allocator.free(installed_dext);
+            const compat = grabber_cli.compareVersions(installed_dext, grabber_cli.pinned_dext_version);
+            grabber_cli.printVersionMismatchRemediation(installed_dext, compat);
+        }
     }
 }
 

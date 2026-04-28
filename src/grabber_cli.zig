@@ -6,10 +6,55 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 const c = @import("c.zig");
 const protocol = @import("grabber_protocol");
 const Client = @import("agent_grabber_client.zig").Client;
+
+/// The Karabiner-DriverKit-VirtualHIDDevice version skhd-grabber's IPC has
+/// been validated against. Set in build.zig (`karabiner_dext_version`),
+/// passed through `build_options`. Used as the source of truth for both
+/// `zig build install-dext` and runtime compatibility checks.
+pub const pinned_dext_version = build_options.karabiner_dext_version;
+
+/// Result of comparing the installed dext version (`readHidDaemonVersion`)
+/// against `pinned_dext_version`. The pqrs project follows SemVer and uses
+/// the major as their compat boundary, so we treat any non-major-matching
+/// install as incompatible — wire format may differ, IPC may break.
+pub const Compatibility = enum {
+    /// Same major version (or same exact version). IPC contract holds.
+    ok,
+    /// Installed major is older than pinned. User likely has an older
+    /// Karabiner-Elements bundled DriverKit; IPC is not guaranteed.
+    older,
+    /// Installed major is newer than pinned. User upgraded the dext; we
+    /// haven't validated against this version.
+    newer,
+    /// Either string failed to parse.
+    parse_error,
+};
+
+fn parseMajor(version: []const u8) ?u32 {
+    const dot = std.mem.indexOfScalar(u8, version, '.') orelse version.len;
+    return std.fmt.parseInt(u32, version[0..dot], 10) catch null;
+}
+
+pub fn compareVersions(installed: []const u8, pinned: []const u8) Compatibility {
+    const installed_major = parseMajor(installed) orelse return .parse_error;
+    const pinned_major = parseMajor(pinned) orelse return .parse_error;
+    if (installed_major == pinned_major) return .ok;
+    if (installed_major < pinned_major) return .older;
+    return .newer;
+}
+
+test "compareVersions: same major" {
+    try std.testing.expectEqual(Compatibility.ok, compareVersions("6.14.0", "6.0.0"));
+    try std.testing.expectEqual(Compatibility.ok, compareVersions("6.0.0", "6.0.0"));
+    try std.testing.expectEqual(Compatibility.older, compareVersions("5.9.9", "6.0.0"));
+    try std.testing.expectEqual(Compatibility.newer, compareVersions("7.0.0", "6.0.0"));
+    try std.testing.expectEqual(Compatibility.parse_error, compareVersions("garbage", "6.0.0"));
+}
 
 const log = std.log.scoped(.grabber_cli);
 
@@ -74,6 +119,18 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
             .plist_unregistered, .stopped => error.VhiddDaemonMissing,
             .running => unreachable,
         };
+    }
+    // Daemon is running — check the major version matches our pinned one.
+    // Refuse on `.older` (IPC likely broken). `.newer` is allowed with a
+    // warning; the user opted into a newer version explicitly.
+    if (readHidDaemonVersion(allocator)) |installed| {
+        defer allocator.free(installed);
+        const compat = compareVersions(installed, pinned_dext_version);
+        if (compat == .older) {
+            printVersionMismatchRemediation(installed, compat);
+            return error.DextVersionIncompatible;
+        }
+        if (compat == .newer) printVersionMismatchRemediation(installed, compat);
     }
     if (isKarabinerElementsActive(allocator)) {
         std.debug.print(
@@ -418,12 +475,19 @@ pub fn printHidDaemonStatus(allocator: std.mem.Allocator) HidDaemonState {
     switch (state) {
         .running => {
             if (version) |v| {
-                std.debug.print("  HID daemon:           Running (Karabiner DriverKit v{s})\n", .{v});
+                const compat = compareVersions(v, pinned_dext_version);
+                const tag = switch (compat) {
+                    .ok => "✓",
+                    .older => "INCOMPATIBLE — older major",
+                    .newer => "untested — newer major",
+                    .parse_error => "version parse failed",
+                };
+                std.debug.print("  HID daemon:           Running (Karabiner DriverKit v{s}, pinned v{s} {s})\n", .{ v, pinned_dext_version, tag });
             } else {
-                std.debug.print("  HID daemon:           Running\n", .{});
+                std.debug.print("  HID daemon:           Running (version unknown, pinned v{s})\n", .{pinned_dext_version});
             }
         },
-        .not_installed => std.debug.print("  HID daemon:           Not installed (required for .remap / .taphold rules)\n", .{}),
+        .not_installed => std.debug.print("  HID daemon:           Not installed (required for .remap / .taphold rules; pinned v{s})\n", .{pinned_dext_version}),
         .plist_unregistered => {
             const v_str = version orelse "?";
             std.debug.print("  HID daemon:           DEXT v{s} loaded but launchd entry missing\n", .{v_str});
@@ -447,7 +511,7 @@ pub fn printHidDaemonStatus(allocator: std.mem.Allocator) HidDaemonState {
 /// is the privileged subcommand it invokes once prereqs are in place.
 pub fn printHidDaemonRemediation(state: HidDaemonState) void {
     switch (state) {
-        .running => {},
+        .running => {}, // version-mismatch case handled by printVersionMismatchRemediation
         .not_installed => std.debug.print(
             \\
             \\HID daemon (Karabiner-DriverKit-VirtualHIDDevice) is not installed.
@@ -477,6 +541,35 @@ pub fn printHidDaemonRemediation(state: HidDaemonState) void {
             \\(skhd-grabber will reconnect automatically once it's back up.)
             \\
         , .{}),
+    }
+}
+
+/// Print remediation when the HID daemon is running but its major version
+/// doesn't match the pinned one. Only worth surfacing for `.older` (IPC
+/// likely broken); `.newer` is just an "untested" advisory, not blocking.
+pub fn printVersionMismatchRemediation(installed: []const u8, compat: Compatibility) void {
+    switch (compat) {
+        .ok, .parse_error => {},
+        .older => std.debug.print(
+            \\
+            \\HID daemon is running v{s}, older than the pinned major v{s}.
+            \\skhd-grabber's IPC is validated against the pinned version; this
+            \\older install may not match the wire format. Likely cause: an
+            \\older Karabiner-Elements bundled an earlier DriverKit. Resolve
+            \\by either upgrading Karabiner-Elements OR by installing our
+            \\pinned version (which will replace the installed one):
+            \\  zig build install-dext     # downloads + installs v{s}
+            \\
+        , .{ installed, pinned_dext_version, pinned_dext_version }),
+        .newer => std.debug.print(
+            \\
+            \\HID daemon is running v{s}, newer than the pinned major v{s}.
+            \\skhd-grabber hasn't been validated against this version. If
+            \\.remap / .taphold rules misbehave, downgrade to the pinned
+            \\version with:
+            \\  zig build install-dext     # installs v{s}
+            \\
+        , .{ installed, pinned_dext_version, pinned_dext_version }),
     }
 }
 

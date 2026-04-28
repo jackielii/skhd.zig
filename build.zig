@@ -64,6 +64,18 @@ fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
 
 const track_alloc_option = "track_alloc";
 
+// Pinned Karabiner-DriverKit-VirtualHIDDevice version. skhd-grabber's IPC
+// is validated against this exact version of the dext + userland daemon.
+// Same-major versions are assumed wire-compatible (pqrs project follows
+// SemVer); different major triggers a runtime warning. Bump procedure:
+//   1. Update _version to the new tag.
+//   2. Update _url accordingly.
+//   3. `curl -fsSL <url> | shasum -a 256` and paste into _sha256.
+//   4. Test `zig build install-dext` end-to-end on a clean machine.
+const karabiner_dext_version = "6.14.0";
+const karabiner_dext_url = "https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice/releases/download/v" ++ karabiner_dext_version ++ "/Karabiner-DriverKit-VirtualHIDDevice-" ++ karabiner_dext_version ++ ".pkg";
+const karabiner_dext_sha256 = "ebfb6a643ea98bb7c2e08a4f99353b2a3129e397f4302340443bbd936f12eb1c";
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -112,6 +124,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption(bool, track_alloc_option, false);
+    options.addOption([]const u8, "karabiner_dext_version", karabiner_dext_version);
 
     linkFrameworks(b, exe);
     addVersionImport(b, exe);
@@ -306,6 +319,23 @@ pub fn build(b: *std.Build) void {
     const install_local_step = b.step("install-local", "Install the local build into /Applications/skhd.app and restart the service (test the packaged path without releasing)");
     install_local_step.dependOn(&install_local_cmd.step);
 
+    // `zig build install-dext` — download + install the pinned Karabiner
+    // DriverKit .pkg. Required prerequisite for skhd-grabber's HID seize.
+    // Cached under $ZIG_GLOBAL_CACHE_DIR/karabiner-dext so re-runs skip
+    // the download. Idempotent at the installer level too — pqrs's pkg
+    // is a no-op when the same version is already installed.
+    const install_dext_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/install-dext.sh",
+        karabiner_dext_version,
+        karabiner_dext_url,
+        karabiner_dext_sha256,
+    });
+    install_dext_cmd.has_side_effects = true;
+
+    const install_dext_step = b.step("install-dext", "Download and install pinned Karabiner-DriverKit-VirtualHIDDevice (required by skhd-grabber)");
+    install_dext_step.dependOn(&install_dext_cmd.step);
+
     const test_step = b.step("test", "Run unit tests");
 
     // Benchmark executable
@@ -345,6 +375,7 @@ pub fn build(b: *std.Build) void {
 
     const alloc_options = b.addOptions();
     alloc_options.addOption(bool, track_alloc_option, true);
+    alloc_options.addOption([]const u8, "karabiner_dext_version", karabiner_dext_version);
     alloc_exe.root_module.addOptions("build_options", alloc_options);
     alloc_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     b.installArtifact(alloc_exe);
@@ -411,6 +442,7 @@ pub fn build(b: *std.Build) void {
         "src/Keycodes.zig",
         "src/EventTap.zig",
         "src/synthesize.zig",
+        "src/grabber_cli.zig",
         "src/grabber_protocol.zig",
         "src/grabber/Vhidd.zig",
         "src/grabber/KbState.zig",

@@ -189,6 +189,7 @@ The service will:
 
 ### Additional Features (New in skhd.zig!)
 
+- **Aliases**: Name a modifier combo or a single key (`.alias $hyper cmd + alt + ctrl + shift`, `.alias $grave 0x32`)
 - **Process groups**: Define named groups of applications for cleaner configs
 - **Command definitions**: Define reusable commands with placeholders to reduce repetition
 - **Key Forwarding**: Forward / remap key binding to another key binding
@@ -287,6 +288,11 @@ The configuration syntax is fully compatible with the original skhd. See [SYNTAX
 
 # Load additional config files
 .load "~/.config/skhd/extra.skhdrc"
+
+# Define aliases (New in skhd.zig!)
+.alias $hyper cmd + alt + ctrl + shift   # modifier alias
+.alias $super cmd + alt
+.alias $grave 0x32                        # key alias (UK keyboard backtick)
 
 # Define process groups for reuse (New in skhd.zig!)
 .define terminal_apps ["kitty", "wezterm", "terminal"]

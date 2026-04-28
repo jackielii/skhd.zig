@@ -237,6 +237,54 @@ take precedence over shell-inherited locations. `~` and `$HOME` are
 expanded; other `$VAR` forms are not — use absolute paths for everything
 else.
 
+### Aliases (New in skhd.zig!)
+
+Give a name to a modifier combination or to a single key. The name is
+referenced with a `$` prefix, must start with a letter, and is expanded
+at parse time (zero runtime cost).
+
+#### Modifier alias
+
+```bash
+.alias $hyper cmd + alt + ctrl + shift
+.alias $super cmd + alt
+
+# Use as the modifier prefix of a hotkey
+$hyper - h : echo "hyper-h"
+$super - return : open -a Terminal.app
+
+# Combine with other modifiers via '+'
+$super + shift - h : echo "super+shift+h"
+
+# A modifier alias may reference an earlier modifier alias
+.alias $mega $super + shift + ctrl
+```
+
+#### Key alias
+
+```bash
+.alias $grave 0x32         # Hex keycode (e.g., UK keyboard backtick)
+.alias $del   delete       # Literal key (carries any implicit fn/nx flag)
+
+# Use after the dash, or standalone
+ctrl - $grave : open -a Notes
+$del : echo plain-delete
+
+# A key alias may reference another key alias
+.alias $tilde $grave
+```
+
+#### Rules
+
+- Aliases must be defined before use; redefinition is an error.
+- A **modifier alias** appears in modifier position only (before `-`, or
+  chained with `+`). Using it as a key (`ctrl - $hyper`) is an error.
+- A **key alias** appears in key position only (after `-`, or standalone).
+  Using it as a modifier (`$grave - h`) is an error.
+- Combining modifiers into a baked-in keysym (e.g. `.alias $foo cmd - h`)
+  is not supported — define the modifier and key parts separately and
+  combine them at the use site.
+
 ### Process Groups (New in skhd.zig!)
 ```bash
 .define terminal_apps ["kitty", "wezterm", "terminal"]

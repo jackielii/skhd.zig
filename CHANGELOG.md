@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha] - 2026-04-28
+
+> Major release introducing **skhd-grabber** — a system daemon that handles caps_lock-class tap-hold rules through HID seize, enabling QMK-style keyboard remapping that the user-session-level event tap can't reach. This is an alpha; the wire format between agent and grabber and the new `.remap` / `.taphold` / `.device` directives are still subject to change. Run for a while before relying on it for everything.
+
+### Added
+- **`.remap` / `.taphold` / `.device` directives** for QMK-style keyboard remapping. Two paths depending on what the rule needs:
+  - **Colon-form `.remap key : key`** — drives `hidutil`'s `UserKeyMapping` table directly. Works for non-conflicting remaps (e.g. swap `caps_lock` → `escape`); doesn't need the grabber. Original mappings are saved on startup and restored on shutdown so the keyboard isn't left remapped when skhd exits.
+  - **Block-form `.remap { ... }` and `.taphold key : tap, hold, ...`** — handled by skhd-grabber, which seizes the keyboard at the IOKit/HID level via Karabiner-DriverKit and rewrites events before they reach the OS event chain. Required for caps_lock-class rules (the kernel layer above `hidutil` silently drops `caps_lock → modifier` mappings on Tahoe), modifier-as-hold rules, and any rule that needs to distinguish tap vs hold by timing.
+  - **`.device "alias" vendor=0xVVVV product=0xPPPP`** scopes rules to a specific keyboard. A config shared between a laptop and an external keyboard targets only the relevant device.
+  - **Layer holds** — `key : tap, hold: <mode>` switches skhd into a temporary mode for the duration of the hold and back when released. Push IPC from grabber → agent so layer modes activate on the agent's run loop.
+- **`skhd-grabber`** — system daemon (LaunchDaemon, root) for the HID-seize path. Installed via `sudo skhd --install-grabber`. Communicates with the agent over a Unix socket at `/var/run/skhd/grabber.sock`. Per-uid rule filtering tracks the active console user so fast-user-switching does the right thing. The agent forwards rules on every config load (and re-forwards on hot-reload + auto-reconnect after a grabber restart).
+- **`skhd --install-dext`** — downloads the pinned Karabiner-DriverKit-VirtualHIDDevice `.pkg` (URL + SHA-256 verified in-process via `std.crypto`), runs `installer -pkg`, self-elevates via `sudo` if not root. Cached at `~/.cache/skhd/` (or `/tmp/` under root) so re-runs skip the download. Runs entirely from the binary — no external scripts needed, so brew users get the same code path as `zig build install-dext`.
+- **`skhd --install-service` auto-installs the dext** when grabber is needed and the dext is missing. Brew install becomes one command:
+  ```
+  brew install jackielii/tap/skhd-zig
+  skhd --install-service     # registers agent, installs dext if missing, registers grabber
+  ```
+- **`HID daemon` line in `skhd --status`** — surfaces the four-state probe (`not_installed` / `plist_unregistered` / `stopped` / `running`) plus the installed dext version, with state-specific remediation. Catches the broken-launchd-registration case where the dext is loaded but `launchctl print system/<label>` returns "could not find service" (kickstart can't recover; needs a `.pkg` reinstall).
+- **`Input Monitoring` line in `skhd --status`** — calls `IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)` directly. Catches the silent cdHash-mismatch case (#36) where the grant looks granted in System Settings but TCC's stored csreq is anchored to a stale cdHash from a previous build, so key-down events are silently dropped before reaching skhd's event tap. Includes the `tccutil reset ListenEvent com.jackielii.skhd` workaround.
+- **Karabiner-Elements conflict warning** — `--status` and `--install-grabber` flag when `karabiner_grabber` is running, since both daemons compete for HID seize.
+
+### Changed
+- **Karabiner DriverKit version is pinned** in `build.zig` (currently v6.14.0). `--status` and `--install-grabber` compare the installed version against the pinned major; same major is treated as wire-compatible (pqrs follows SemVer), older major refuses to proceed with a remediation pointer to `zig build install-dext`, newer major proceeds with an "untested" advisory. Bump procedure documented inline above the constants.
+- **`scripts/install-dext.sh` removed** in favor of the in-binary `--install-dext` subcommand. Removes shell duplication and means the dev path (`zig build install-dext`) and brew path (`skhd --install-dext`) share the same code.
+
+### Internal
+- **`mappings.tapholds` / `mappings.remaps` / `mappings.device_aliases`** — parser and runtime data for the new directives.
+- **`grabber_protocol`** — shared module defining the agent ↔ grabber wire format. Versioned (`protocol_version`) so handshake mismatches surface clearly. Currently v2.
+- **Daemon refactored around `CFRunLoop`-driven IPC listener** so the agent can react to grabber pushes (layer-hold mode changes) without polling.
+- **`Hidutil.zig`** — parses + merges existing `UserKeyMapping` so colon-form `.remap` doesn't clobber whatever System Settings → Modifier Keys (or other tooling) already set. Restores on shutdown.
+- **Test surface expanded** to cover `RuleSet` parsing, the IPC framing, `KbState` / `TapHold` state machines, and the new HID-daemon version compat helpers.
+
 ## [0.0.24] - 2026-04-28
 
 ### Fixed

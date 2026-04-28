@@ -601,10 +601,11 @@ fn parse_key_literal(self: *Parser) !Hotkey.KeyPress {
             if (i > Keycodes.KEY_HAS_IMPLICIT_FN_MOD and i < Keycodes.KEY_HAS_IMPLICIT_NX_MOD) {
                 // flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_Fn);
                 flags = flags.merge(.{ .@"fn" = true });
-            } else if (i >= Keycodes.KEY_HAS_IMPLICIT_NX_MOD) {
+            } else if (i >= Keycodes.KEY_HAS_IMPLICIT_NX_MOD and i < Keycodes.KEY_FIRST_MOUSE) {
                 // flags |= @intFromEnum(consts.hotkey_flag.Hotkey_Flag_NX);
                 flags = flags.merge(.{ .nx = true });
             }
+            // Mouse buttons (i >= KEY_FIRST_MOUSE) carry no implicit modifier.
             keycode = literal_keycode_value[i];
             break;
         }
@@ -2811,4 +2812,40 @@ test "alias - key alias inherits kind from referenced alias" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     try std.testing.expectEqual(@as(u32, 0x32), hk.key);
+}
+
+test "mouse button - parses as a literal with synthetic keycode" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\cmd - mouse1 : echo m1
+        \\mouse3 -> : echo m3
+    );
+
+    const default = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 2), default.hotkey_map.count());
+
+    var saw_m1 = false;
+    var saw_m3 = false;
+    var it = default.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        const hk = entry.key_ptr.*;
+        if (hk.key == Keycodes.mouseButtonCode(1)) {
+            saw_m1 = true;
+            try std.testing.expect(hk.flags.cmd);
+            // Mouse buttons must NOT pick up the implicit nx flag.
+            try std.testing.expect(!hk.flags.nx);
+            try std.testing.expect(!hk.flags.@"fn");
+        } else if (hk.key == Keycodes.mouseButtonCode(3)) {
+            saw_m3 = true;
+            try std.testing.expect(hk.flags.passthrough);
+            try std.testing.expect(!hk.flags.nx);
+        }
+    }
+    try std.testing.expect(saw_m1);
+    try std.testing.expect(saw_m3);
 }

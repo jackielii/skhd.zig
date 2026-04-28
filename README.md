@@ -190,6 +190,7 @@ The service will:
 ### Additional Features (New in skhd.zig!)
 
 - **Aliases**: Name a modifier combo or a single key (`.alias $hyper cmd + alt + ctrl + shift`, `.alias $grave 0x32`)
+- **Mouse buttons**: Bind on `mouse1`–`mouse5` (e.g. `cmd - mouse1 : ...`); use `->` for passthrough so the click still reaches the app
 - **Process groups**: Define named groups of applications for cleaner configs
 - **Command definitions**: Define reusable commands with placeholders to reduce repetition
 - **Key Forwarding**: Forward / remap key binding to another key binding

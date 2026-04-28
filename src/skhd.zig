@@ -133,8 +133,15 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     }
     errdefer if (hidutil) |h| h.deinit();
 
-    // Create event tap with keyboard and system defined events
-    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED);
+    // Create event tap with keyboard, system-defined, and mouse-down events.
+    // Mouse-down is opt-in only via `mouse1`–`mouse5` bindings, but the tap
+    // mask is set unconditionally — `processHotkey` returns `.not_found` for
+    // un-bound mouse events and we pass them through, so an unused mask bit
+    // costs only a couple of dispatches per click.
+    const mask: u32 = (1 << c.kCGEventKeyDown) | (1 << c.NX_SYSDEFINED) //
+    | (1 << c.kCGEventLeftMouseDown) //
+    | (1 << c.kCGEventRightMouseDown) //
+    | (1 << c.kCGEventOtherMouseDown);
 
     return Skhd{
         .allocator = gpa,
@@ -653,6 +660,26 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
                 return event;
             };
         },
+        c.kCGEventLeftMouseDown => return self.handleMouseDown(event, 1) catch |err| {
+            log.err("Error handling mouse down: {}", .{err});
+            return event;
+        },
+        c.kCGEventRightMouseDown => return self.handleMouseDown(event, 2) catch |err| {
+            log.err("Error handling mouse down: {}", .{err});
+            return event;
+        },
+        c.kCGEventOtherMouseDown => {
+            // CGMouseEventButtonNumber is 0-based: 0=left, 1=right, 2=middle,
+            // 3=back, 4=forward. Left/right come through their own event
+            // types, so here we expect button >= 2 → mouse3..mouse5+.
+            const btn_raw = c.CGEventGetIntegerValueField(event, c.kCGMouseEventButtonNumber);
+            if (btn_raw < 2 or btn_raw > 4) return event;
+            const mouse_n: u8 = @intCast(btn_raw + 1);
+            return self.handleMouseDown(event, mouse_n) catch |err| {
+                log.err("Error handling mouse down: {}", .{err});
+                return event;
+            };
+        },
         else => return event,
     }
 }
@@ -680,6 +707,24 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     }
 
     const eventkey = createEventKey(event);
+    const result = try self.processHotkey(&eventkey, event, process_name);
+    return try self.handleHotkeyResult(result, event, eventkey, process_name);
+}
+
+inline fn handleMouseDown(self: *Skhd, event: c.CGEventRef, mouse_n: u8) !c.CGEventRef {
+    if (self.current_mode == null) return event;
+
+    // Skip self-generated events.
+    const marker = c.CGEventGetIntegerValueField(event, c.kCGEventSourceUserData);
+    if (marker == SKHD_EVENT_MARKER) return event;
+
+    const process_name = self.carbon_event.getProcessName();
+    if (self.mappings.blacklist.contains(process_name)) return event;
+
+    const eventkey = Hotkey.KeyPress{
+        .key = Keycodes.mouseButtonCode(mouse_n),
+        .flags = cgeventFlagsToHotkeyFlags(c.CGEventGetFlags(event)),
+    };
     const result = try self.processHotkey(&eventkey, event, process_name);
     return try self.handleHotkeyResult(result, event, eventkey, process_name);
 }
@@ -846,6 +891,12 @@ inline fn interceptSystemKey(event: c.CGEventRef, eventkey: *Hotkey.KeyPress) bo
 const SKHD_EVENT_MARKER: i64 = 0x736B6864; // "skhd" in hex
 
 inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
+    // Mouse buttons live in a separate keycode space (≥ 0x10000) and need
+    // CGEventCreateMouseEvent rather than CGEventCreateKeyboardEvent.
+    if (Keycodes.isMouseButton(target_key.key)) {
+        try postMouseClick(target_key);
+        return;
+    }
     // Check if this is an NX media key (requires different event type)
     if (target_key.flags.nx) {
         try postMediaKeyEvent(target_key.key);
@@ -879,6 +930,51 @@ inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
     // Post both key down and key up events
     c.CGEventPost(c.kCGSessionEventTap, key_down);
     c.CGEventPost(c.kCGSessionEventTap, key_up);
+}
+
+/// Synthesize a mouse-down + mouse-up at the current cursor position.
+/// Used for `... | mouse1` forwards. The cursor doesn't move; we just
+/// fire a click in place.
+inline fn postMouseClick(target_key: Hotkey.KeyPress) !void {
+    const button: u32 = target_key.key & 0xFF; // 1..5
+    const down_type: c.CGEventType, const up_type: c.CGEventType, const cg_button: c.CGMouseButton = switch (button) {
+        1 => .{ c.kCGEventLeftMouseDown, c.kCGEventLeftMouseUp, c.kCGMouseButtonLeft },
+        2 => .{ c.kCGEventRightMouseDown, c.kCGEventRightMouseUp, c.kCGMouseButtonRight },
+        else => .{ c.kCGEventOtherMouseDown, c.kCGEventOtherMouseUp, @intCast(button - 1) },
+    };
+
+    // CGEventCreate(NULL) returns an empty event whose location field is
+    // populated with the current cursor position — cheaper than a Cocoa
+    // round-trip via NSEvent.mouseLocation.
+    const probe = c.CGEventCreate(null);
+    if (probe == null) return error.FailedToProbeMouse;
+    defer c.CFRelease(probe);
+    const cursor = c.CGEventGetLocation(probe);
+
+    const source = c.CGEventSourceCreate(c.kCGEventSourceStateHIDSystemState);
+    if (source == null) return error.FailedToCreateEventSource;
+    defer c.CFRelease(source);
+
+    const down = c.CGEventCreateMouseEvent(source, down_type, cursor, cg_button);
+    if (down == null) return error.FailedToCreateMouseEvent;
+    defer c.CFRelease(down);
+
+    const up = c.CGEventCreateMouseEvent(source, up_type, cursor, cg_button);
+    if (up == null) return error.FailedToCreateMouseEvent;
+    defer c.CFRelease(up);
+
+    // Carry any modifier flags from the forward target so syntax like
+    // `key | cmd - mouse1` synthesizes a cmd-click rather than a plain click.
+    const target_flags = hotkeyFlagsToCGEventFlags(target_key.flags);
+    c.CGEventSetFlags(down, target_flags);
+    c.CGEventSetFlags(up, target_flags);
+
+    // Mark as self-generated so handleMouseDown re-entry skips them.
+    c.CGEventSetIntegerValueField(down, c.kCGEventSourceUserData, SKHD_EVENT_MARKER);
+    c.CGEventSetIntegerValueField(up, c.kCGEventSourceUserData, SKHD_EVENT_MARKER);
+
+    c.CGEventPost(c.kCGSessionEventTap, down);
+    c.CGEventPost(c.kCGSessionEventTap, up);
 }
 
 /// Synthesize and post a media key event (play, next, previous, etc.)
@@ -1158,7 +1254,7 @@ fn handleSigint(_: c_int) callconv(.C) void {
 
 /// Reload configuration from file
 pub fn reloadConfig(self: *Skhd) !void {
-    log.info("Reloading configuration from: {s}", .{self.config_file});
+    log.warn("Reloading configuration from: {s}", .{self.config_file});
 
     // Parse new configuration
     var new_mappings = try Mappings.init(self.allocator);
@@ -1177,7 +1273,12 @@ pub fn reloadConfig(self: *Skhd) !void {
         }
         return err;
     };
-    try parser.processLoadDirectives(&new_mappings);
+    parser.processLoadDirectives(&new_mappings) catch |err| {
+        if (parser.error_info) |parse_err| {
+            log.err("skhd: {}", .{parse_err});
+        }
+        return err;
+    };
 
     // Swap old mappings with new ones
     self.mappings.deinit();
@@ -1217,28 +1318,34 @@ pub fn reloadConfig(self: *Skhd) !void {
     // can dial fresh with the updated rules. Do this even when the
     // new config has no caps-class rules — closing the old socket
     // is how the grabber learns we don't want our previous rules
-    // applied any more (D5 will make this a hard "drop on close",
-    // for now this matches what grabber does when no apply_rules
-    // arrive).
+    // applied any more.
+    //
+    // No `bye` here: once apply_rules has succeeded, the grabber moves
+    // this socket out of `Ipc.serve` and into its subscriptionCallback,
+    // which only PEEKs for EOS and discards any frame the agent writes
+    // as "stray bytes". A bye on a subscription connection therefore
+    // never gets a reply — and worse, an `expectOk` read after it can
+    // pick up a queued `mode_change` push (logged as "unexpected type:
+    // mode_change") or block indefinitely. EOS-on-close is the only
+    // teardown signal the subscription path actually honors.
     if (self.layer_listener) |ll| {
         ll.deinit();
         self.layer_listener = null;
     }
     if (self.grabber_client) |gc| {
-        gc.bye() catch {};
         gc.close();
         self.allocator.destroy(gc);
         self.grabber_client = null;
     }
     self.forwardTapholdsToGrabber() catch |err| {
-        log.warn("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
+        log.err("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
     };
 
     // Note: We don't re-enable hot reload here because this function
     // might be called from within the hotload callback. Instead, we'll
     // update the watched files list when hot reload is already enabled.
 
-    log.info("Configuration reloaded successfully", .{});
+    log.warn("Configuration reloaded successfully", .{});
 }
 
 pub fn enableHotReload(self: *Skhd) !void {

@@ -149,6 +149,36 @@ command   = command is executed through '$SHELL -c'
 - `play`, `previous`, `next` - Media playback
 - `rewind`, `fast` - Media navigation
 
+### Mouse Buttons (New in skhd.zig!)
+- `mouse1` - Left button
+- `mouse2` - Right button
+- `mouse3` - Middle button
+- `mouse4` - Back / fourth button
+- `mouse5` - Forward / fifth button
+
+Used the same way as keys — combine with modifiers via `-`, or stand alone:
+
+```bash
+cmd - mouse1 : echo "cmd-click"
+meh - mouse3 : open -a "Mission Control"
+mouse4 -> : echo "back button"   # passthrough: still goes to the app
+```
+
+Mouse buttons can also be the **target** of a forward, so you can
+synthesize a click from a key (e.g. inside a layer):
+
+```bash
+fn_layer < enter | mouse1        # in fn_layer, enter = left-click
+fn_layer < space | cmd - mouse1  # cmd-click via the layer
+```
+
+⚠️ Binding `mouse1` (or any mouse button) **without** a modifier and
+**without** `->` consumes every click in non-blacklisted apps and
+effectively breaks the trackpad. Pair with a modifier (`cmd - mouse1`)
+or use passthrough (`mouse1 -> : ...`) unless you really mean it.
+Mouse-up and drag events are not captured (skhd only sees the down
+edge); scroll-wheel events aren't bindable either.
+
 ## Configuration Directives
 
 Configuration directives follow this syntax:

@@ -127,7 +127,7 @@ pub const literal_keycode_str = [_][]const u8{
     // zig fmt: off
 
     // Fn mod
-    "delete",          "home",            "end", 
+    "delete",          "home",            "end",
     "pageup",          "pagedown",        "insert",
     "left",            "right",           "up",
     "down",            "f1",              "f2",
@@ -143,11 +143,29 @@ pub const literal_keycode_str = [_][]const u8{
     "play",            "previous",        "next",
     "rewind",          "fast",            "brightness_up",
     "brightness_down", "illumination_up", "illumination_down",
+
+    // Mouse buttons (no implicit modifier; synthetic keycodes above the
+    // u8 keyboard range so they can't collide with real kVK_ values)
+    "mouse1",          "mouse2",          "mouse3",
+    "mouse4",          "mouse5",
     // zig fmt: on
 };
 
 pub const KEY_HAS_IMPLICIT_FN_MOD = 4;
 pub const KEY_HAS_IMPLICIT_NX_MOD = 35;
+pub const KEY_FIRST_MOUSE = 48;
+
+/// Synthetic keycode base for mouse buttons. Keyboard kVK_* values
+/// fit in u8, so anything ≥ 0x10000 is unambiguously a mouse button.
+pub const MOUSE_BUTTON_BASE: u32 = 0x10000;
+
+pub inline fn mouseButtonCode(n: u8) u32 {
+    return MOUSE_BUTTON_BASE | @as(u32, n);
+}
+
+pub inline fn isMouseButton(keycode: u32) bool {
+    return keycode >= MOUSE_BUTTON_BASE;
+}
 
 pub const literal_keycode_value = [_]u32{
     c.kVK_Return,                 c.kVK_Tab,                  c.kVK_Space,
@@ -172,6 +190,10 @@ pub const literal_keycode_value = [_]u32{
     c.NX_KEYTYPE_PLAY,            c.NX_KEYTYPE_PREVIOUS,        c.NX_KEYTYPE_NEXT,
     c.NX_KEYTYPE_REWIND,          c.NX_KEYTYPE_FAST,            c.NX_KEYTYPE_BRIGHTNESS_UP,
     c.NX_KEYTYPE_BRIGHTNESS_DOWN, c.NX_KEYTYPE_ILLUMINATION_UP, c.NX_KEYTYPE_ILLUMINATION_DOWN,
+
+    // Mouse buttons
+    mouseButtonCode(1), mouseButtonCode(2), mouseButtonCode(3),
+    mouseButtonCode(4), mouseButtonCode(5),
     // zig fmt: on
 };
 
@@ -281,6 +303,26 @@ test "init_keycode_map" {
     // Verify literal keycodes exist in the arrays
     try std.testing.expect(literal_keycode_str.len > 0);
     try std.testing.expect(literal_keycode_value.len == literal_keycode_str.len);
+}
+
+test "mouse button literals are present and have synthetic codes" {
+    // mouse1..mouse5 must live at indices [KEY_FIRST_MOUSE, +5).
+    try std.testing.expectEqual(@as(usize, 5), literal_keycode_str.len - KEY_FIRST_MOUSE);
+    try std.testing.expectEqualStrings("mouse1", literal_keycode_str[KEY_FIRST_MOUSE]);
+    try std.testing.expectEqualStrings("mouse5", literal_keycode_str[KEY_FIRST_MOUSE + 4]);
+
+    // Synthetic codes are above the keyboard u8 range so they can never
+    // collide with a real kVK_* value.
+    for (literal_keycode_value[KEY_FIRST_MOUSE..]) |code| {
+        try std.testing.expect(isMouseButton(code));
+        try std.testing.expect(code > 0xFF);
+    }
+    try std.testing.expectEqual(mouseButtonCode(1), literal_keycode_value[KEY_FIRST_MOUSE]);
+    try std.testing.expectEqual(mouseButtonCode(5), literal_keycode_value[KEY_FIRST_MOUSE + 4]);
+
+    // Real keyboard keycodes must NOT register as mouse buttons.
+    try std.testing.expect(!isMouseButton(0x00)); // 'a'
+    try std.testing.expect(!isMouseButton(0x35)); // escape
 }
 
 test "duplicate keycode mapping returns error" {

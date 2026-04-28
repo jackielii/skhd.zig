@@ -6,6 +6,67 @@ This implementation is **fully compatible with the original skhd configuration f
 
 📋 [View Changelog](CHANGELOG.md)
 
+## v0.1.0-alpha — QMK-style keyboard remapping
+
+skhd.zig now ships a system-level **grabber daemon** that enables remapping the user-session event tap can't reach. New directives:
+
+- **`.remap caps_lock [device <alias>] : escape`** — instant 1:1 swap, applied via `hidutil` (no daemon).
+- **`.remap key [device <alias>] { tap: …, hold: …, … }`** — tap vs. hold on the same key (e.g. `caps_lock` tapped = escape, held = control). Routed through `skhd-grabber` (root LaunchDaemon) which seizes the keyboard at the IOKit/HID level via Karabiner DriverKit. Required for caps-lock-class rules and modifier-as-hold rules that `hidutil` silently drops.
+- **Layer holds** — `hold` can target a skhd mode instead of a key, so holding the source key activates the layer for the duration of the hold (e.g. hold `space` to enter `fn_layer`, where `fn_layer < 1 | f1` rebinds the number row to F-keys).
+- **`.device <alias> { vendor: 0x…, product: 0x… }`** — scope rules to a specific keyboard, so one config does the right thing on each machine.
+
+**Install the alpha** (Homebrew formula stays on 0.0.24 until v0.1.0 stable; eager testers download from GitHub releases):
+
+```bash
+gh release download v0.1.0-alpha --repo jackielii/skhd.zig --pattern '*-arm64-macos.tar.gz'
+tar -xzf skhd-arm64-macos.tar.gz -C /tmp
+sudo mv /tmp/skhd.app /Applications/
+/Applications/skhd.app/Contents/MacOS/skhd --install-service
+```
+
+`--install-service` registers the agent, auto-installs the Karabiner DriverKit pkg if your config has tap-hold rules, prompts for the grabber install via sudo, and pops Accessibility + Input Monitoring dialogs in sequence — one click each.
+
+**Try it out** — drop this into `~/.config/skhd/skhdrc` (replace the vendor/product IDs with your own — find them via `skhd --grabber-status` once installed, or System Information → USB):
+
+```bash
+# 1. Declare the keyboard you want to remap.
+.device builtin { vendor: 0x05AC, product: 0x0342 }
+
+# 2. caps_lock acts like ctrl when held, escape when tapped.
+.remap caps_lock [device builtin] {
+    tap             : escape
+    hold            : lctrl
+    timeout         : 120ms
+    permissive_hold : on
+}
+
+# 3. Hold space to enter a "function layer", release to exit.
+:: fn_layer @
+.remap space [device builtin] {
+    tap             : space
+    hold            : fn_layer
+    timeout         : 200ms
+    retro_tap       : on
+}
+
+# 4. While the layer is held, number row → F-row.
+fn_layer < 1 | f1
+fn_layer < 2 | f2
+fn_layer < 3 | f3
+# … etc
+```
+
+Save, then `skhd --restart-service`. Tap `caps_lock` → escape. Hold `caps_lock` + `c` → ctrl-c. Hold `space` then press `1` → F1.
+
+**Verify** with `skhd --status` (single command shows the agent, grabber, dext, and TCC state) or `skhd --grabber-status` (drills into the grabber-side dependency chain). **Roll back** with `skhd --uninstall-service` (it prints follow-up `sudo skhd --uninstall-grabber` instructions if anything's still on disk).
+
+**Larger real-world example** — my own `builtin.skhdrc`, which makes a MacBook built-in keyboard behave like a [Keebio Convolution](https://keeb.io/products/convolution-65xt-keyboard) running custom QMK firmware (caps_lock as ctrl/escape, space as fn_layer, fn_layer < hjkl as arrows, number row → F-row under layer, etc.):
+
+- skhd config: <https://gist.github.com/jackielii/9d24095af57ec35df0d46d38bbbe0449>
+- QMK source-of-truth keymap it mirrors: <https://github.com/jackielii/qmk_firmware/blob/jackie/keyboards/keebio/convolution/keymaps/jackie/keymap.c>
+
+See [skhd-grabber](#skhd-grabber-caps_lock-class-tap-hold) below for the full architecture, [SYNTAX.md](SYNTAX.md) for the new directive grammar, and the [v0.1.0-alpha CHANGELOG entry](CHANGELOG.md#010-alpha---2026-04-28) for everything that changed.
+
 ## Installation
 
 ### Homebrew
@@ -529,19 +590,34 @@ DriverKit virtual HID device.
 ### Install
 
 ```bash
-# Single command — installs the per-user agent, then prompts to install
-# the system grabber if your config has caps_lock-class rules and the
-# target device is connected.
+# Single command — installs the per-user agent and, if your config has
+# caps_lock-class rules with a connected target device, prompts (Y/n)
+# to install the system grabber via sudo. The same prompt also auto-
+# downloads + installs the Karabiner DriverKit .pkg if it's missing
+# and writes the launchd plist for its userland daemon (the .pkg's
+# postinstall is a no-op `killall`, so we wire up launchd ourselves —
+# but we skip it cleanly when Karabiner-Elements is already managing
+# that label via SMAppService).
 skhd --install-service
 ```
 
-If you want to install the grabber separately (or the prompt didn't fire):
+After the grabber install succeeds the agent triggers the **Input
+Monitoring** approval dialog. Granting it to `skhd.app` covers the
+grabber too: both binaries are signed with the same bundle ID and
+the grabber runs from inside `skhd.app/Contents/MacOS/`, so TCC
+bundle-keys the grant — one click, both processes covered. No
+manual "add `/usr/local/libexec/skhd-grabber` to Input Monitoring"
+step.
+
+If the prompt didn't fire (e.g. you added `.remap` rules later) or
+you want to install the grabber separately:
 
 ```bash
 sudo skhd --install-grabber
 ```
 
-Diagnostic walk-through of every prerequisite:
+Diagnostic walk-through of every prerequisite (dext, VHIDD daemon,
+grabber plist + process, IPC socket):
 
 ```bash
 skhd --grabber-status
@@ -550,12 +626,38 @@ skhd --grabber-status
 ### Dependencies
 
 `skhd-grabber` requires the **Karabiner DriverKit VirtualHIDDevice**
-extension to inject HID events:
+extension to inject HID events. The agent's install flow auto-installs
+the pinned version (currently v6.14.0; sha-256 verified) the first time
+you run `--install-service`, so most users never touch this directly.
+If you'd rather install it ahead of time:
 
-  https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice
+```bash
+skhd --install-dext     # downloads + installs the pkg, writes the
+                        # VHIDD daemon launchd plist (or skips if
+                        # Karabiner-Elements is already handling it)
+```
 
-Install the dext, approve it in System Settings → Privacy & Security,
-then run `skhd --install-grabber`.
+Upstream releases: https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice
+
+After install, macOS will prompt you to approve the system extension
+in **System Settings → General → Login Items & Extensions → Driver
+Extensions**.
+
+### Uninstall
+
+```bash
+skhd --uninstall-service       # removes the LaunchAgent
+sudo skhd --uninstall-grabber  # removes skhd-grabber + the VHIDD
+                               # daemon launchd plist we wrote
+```
+
+`--uninstall-service` prints any follow-up commands (the grabber
+isn't auto-removed because it's a separate sudo step). For the
+Karabiner DriverKit pkg files and the kernel-loaded dext (pqrs's
+domain), run their uninstall scripts under
+`/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/scripts/uninstall/`,
+or toggle the dext off via System Settings → Login Items &
+Extensions → Driver Extensions.
 
 ### Mac Studio / external keyboard only
 
@@ -575,16 +677,62 @@ on a machine that doesn't need them.
   fires, injects a vhidd caps_lock toggle to flip it back. Works
   cleanly in practice (no LED flash); see `src/grabber/HidSeize.zig`
   for the rationale.
-- **Coexistence**: `skhd-grabber` and Karabiner-Elements both want
-  exclusive seize on the same keyboard. If you're running Karabiner-
-  Elements, disable its `karabiner_grabber` daemon
+- **Coexistence with Karabiner-Elements**: KE registers the **same**
+  VHIDD daemon launchd label (`org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon`)
+  via `SMAppService.daemon`, so we share that piece — `--install-dext`
+  detects KE's registration and skips writing our own plist. But the
+  *grabber* layer (`karabiner_grabber` for KE, `skhd-grabber` for us)
+  still wants exclusive seize on the same keyboard. If you're running
+  Karabiner-Elements, disable its grabber
   (`sudo launchctl bootout system/org.pqrs.service.daemon.karabiner_grabber`)
-  before starting `skhd-grabber`.
+  before starting `skhd-grabber`. `skhd --status` and
+  `--install-grabber` flag this conflict when detected.
 - **F-row behavior**: with macOS's "Use F1, F2..." setting **off**
   (default), the grabber translates F1..F12 keyboard events to the
   appropriate Consumer / Apple-Vendor media events (volume,
   brightness, mission control, …) so the F-row stays "media keys"
   under seize.
+
+## Built on Karabiner-Elements
+
+This whole feature exists because of **[Karabiner-Elements](https://karabiner-elements.pqrs.org/)** by [Takayama Fumihiko (pqrs.org)](https://pqrs.org/). The architecture, the idea, and the runtime dependency all come from there — skhd.zig is reusing pqrs's lower-level work to plug "QMK-style remapping" into a config format more skhd users already know.
+
+### What Karabiner-Elements does (and we don't)
+
+Karabiner-Elements is the comprehensive keyboard customizer for macOS: a polished GUI, complex modifications, simultaneous keys, parameterized rules, an event viewer, profiles, a giant community library of rule presets, and years of refinement. If you want a turnkey keyboard remapper with a UI, **install Karabiner-Elements** — it's the right tool. skhd.zig's grabber path is intentionally narrower:
+
+- **One config format** — your existing `.skhdrc` plus a few new directives. No JSON, no GUI, no separate rule-set system.
+- **Tap-hold + layer holds + 1:1 remaps + device scoping**. That's it. Anything outside that is still standard skhd hotkey territory (event-tap based, no grabber needed).
+- **No menu bar app, no preferences pane, no event viewer**. Diagnostics live in `skhd --status` and `skhd --grabber-status`.
+
+If you need anything more sophisticated than the four directives in this README, Karabiner-Elements is unequivocally the better choice.
+
+### What we borrow (with credit)
+
+**From Karabiner — architecture and runtime infrastructure:**
+
+- **[Karabiner-DriverKit-VirtualHIDDevice](https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice)** — the kernel-side system extension + userland helper daemon that lets us inject synthesized HID events on modern macOS. Apple removed kernel extension support; pqrs's DriverKit replacement is, as far as we know, the only practical route for HID injection on Big Sur and later. We auto-install the pinned version via `skhd --install-dext`, share the launchd registration if Karabiner-Elements is already there, and never modify their code. Apache-2.0 licensed; the .pkg ships under pqrs's signing identity.
+- **The architectural pattern** — userland agent talks to a root daemon, which seizes HID via IOHIDManager and injects through DriverKit. Karabiner-Elements pioneered this approach on macOS; skhd-grabber is a smaller config-driven implementation of the same shape.
+- **HID-standard key naming** — `caps_lock`, `non_us_backslash`, `lctrl`, etc. (layout-independent physical positions, distinct from the macOS virtual-keycode names skhd uses elsewhere) — Karabiner uses the same identifiers, so cross-referencing their docs for which name maps to which physical key is direct.
+
+**From QMK — tap-hold parameters and defaults:**
+
+We deliberately do *not* use Karabiner's [complex modifications](https://karabiner-elements.pqrs.org/docs/json/complex-modifications-manipulator-definition/) JSON dialect (verbose, camelCase, `to_if_alone` / `to_if_held_down` / etc.). skhd users come from a `.skhdrc` background and want a config that reads like the rest of skhd. We follow **[QMK firmware](https://github.com/qmk/qmk_firmware)**'s tap-hold model instead: snake_case keywords, the same parameter set you'd put in a QMK `config.h`, and the same defaults.
+
+- `timeout` ↔ QMK `TAPPING_TERM` (default 200ms).
+- `permissive_hold` ↔ QMK [`PERMISSIVE_HOLD`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md#permissive-hold).
+- `hold_on_other_key_press` ↔ QMK [`HOLD_ON_OTHER_KEY_PRESS`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md#hold-on-other-key-press).
+- `retro_tap` ↔ QMK [`RETRO_TAPPING`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md#retro-tapping).
+
+If you've configured a custom keyboard in QMK, you already know how every knob in `.taphold` behaves — they're direct ports. **QMK's [`docs/tap_hold.md`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md) is the canonical long-form reference** for why each parameter exists and what edge cases it solves; our parser implements the same semantics rule-for-rule.
+
+### Coexistence
+
+skhd-grabber and Karabiner-Elements both want exclusive HID seize on the same keyboard, so running both grabbers at once doesn't work. We coexist at the **DriverKit daemon** layer (we share the same `org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon` registration; if Karabiner-Elements is installed, our `--install-dext` detects its SMAppService registration and skips writing our own plist), but you have to pick **one grabber** at a time. See the Coexistence caveat above for the disable command.
+
+If you're switching from Karabiner-Elements to skhd.zig: keep the dext, keep the daemon, just disable `karabiner_grabber`. If you want to go back the other way: `sudo skhd --uninstall-grabber` and re-enable Karabiner-Elements.
+
+> Thanks again to pqrs and the Karabiner-Elements community. None of this is novel work on our side — we're just packaging a narrow slice in a different config format.
 
 ## Testing and Debugging
 

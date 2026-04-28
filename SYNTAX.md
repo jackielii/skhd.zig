@@ -159,10 +159,41 @@ directive = '.shell' <string> |
             '.load' <string> |
             '.path' <string> | '.path' '[' <string_list> ']' |
             '.define' <identifier> '[' <string_list> ']' |
-            '.define' <identifier> ':' <command_template>
+            '.define' <identifier> ':' <command_template> |
+            '.device' <identifier> '{' <device_attrs> '}' |
+            '.remap' <hid_key> <device_clause> ':' <hid_key> |
+            '.remap' <hid_key> <device_clause> '{' <taphold_attrs> '}'
+
+device_attrs    = 'vendor:' <hex>  ',' 'product:' <hex>
+device_clause   = '[' 'device' <identifier> ']'
+taphold_attrs   = ( <taphold_attr> )+
+taphold_attr    = 'tap'                ':' <hid_key>
+                | 'hold'               ':' <hid_key_or_layer>
+                | 'timeout'            ':' <duration>
+                | 'permissive_hold'    ':' ('on' | 'off')
+                | 'hold_on_other_key_press' ':' ('on' | 'off')
+                | 'retro_tap'          ':' ('on' | 'off')
+hid_key_or_layer = <hid_key> | <mode_identifier>   // mode = layer hold
+duration         = <integer> ('ms' | 's')
 
 string_list = <string> | <string> ',' <string_list>
 ```
+
+### HID key names vs macOS virtual keycodes
+
+`.remap` / `.taphold` / `.device` operate at the **HID layer**, before
+macOS translates keys through the active layout. They use HID-standard
+**layout-independent physical-position** names (`caps_lock`, `lctrl`,
+`non_us_backslash`, `a`–`z`, `0`–`9`, `f1`–`f20`, `minus`, `equal`,
+`lbracket`, `rbracket`, `backslash`, `semicolon`, `quote`, `grave`,
+`comma`, `period`, `slash`, `space`, `return`, `tab`, `escape`,
+`backspace`, etc.) — different from the macOS virtual-keycode names
+(`0x32`, `0x29`, etc.) that the regular `cmd - a` hotkey table uses.
+
+Run `skhd --grabber-status` once installed (or check
+`src/HidKeyMap.zig`) for the full list. These are the same identifiers
+Karabiner-Elements uses, so its [docs](https://karabiner-elements.pqrs.org/docs/help/symbols-and-keycodes/)
+work as a cross-reference.
 
 ### Shell Configuration
 ```bash
@@ -232,6 +263,111 @@ cmd - tab : @focus_recent
 cmd - h : @yabai_focus("west")
 cmd + shift - h : @window_action("swap", "west")
 ```
+
+### Device Aliases (`.device`)
+
+Declare a USB keyboard once by `vendor`/`product` ID, then reference it
+by alias from `.remap` / `.taphold` rules. The alias is a config-local
+name — pick anything (`builtin`, `corsair`, `keychron`, …). Find your
+keyboard's IDs via System Information → USB, or run any `.remap` rule
+with verbose mode to see currently-attached vendor/product pairs in
+the log.
+
+```bash
+.device builtin { vendor: 0x05AC, product: 0x0342 }
+.device keychron { vendor: 0x05AC, product: 0x024F }
+```
+
+A config shared between machines targeting different hardware is fine —
+rules whose `[device <alias>]` doesn't match a connected device are
+silently skipped on that machine. No grabber is installed on a
+machine without any matching device.
+
+### Key Remapping (`.remap` colon form)
+
+Instant 1:1 key swap, applied via `hidutil`'s `UserKeyMapping` table.
+**No daemon needed** for the colon form — works without installing
+skhd-grabber. Original mappings are saved on startup and restored on
+shutdown so the keyboard isn't left remapped when skhd exits.
+
+```bash
+# UK ISO MacBook: map § (top-left key, HID-named non_us_backslash) to
+# the ISO grave key so it types `.
+.remap non_us_backslash [device builtin] : grave
+
+# Swap caps_lock with escape on an external keyboard.
+.remap caps_lock [device keychron] : escape
+```
+
+**Limitations** (use the block form below instead for these cases):
+- Cannot map `caps_lock` to a modifier — macOS's kernel layer above
+  `hidutil` silently drops `caps_lock → ctrl/shift/alt/cmd`.
+- Cannot do tap-hold or layer-hold semantics.
+
+### Tap-Hold Rules (`.remap` block form)
+
+Distinguish tap vs. hold timing on the same physical key, plus layer
+holds. Routed through `skhd-grabber` (root LaunchDaemon) — see
+[skhd-grabber](README.md#skhd-grabber-caps_lock-class-tap-hold) in the
+README for install + permission setup.
+
+```bash
+.remap caps_lock [device builtin] {
+    tap             : escape
+    hold            : lctrl
+    timeout         : 120ms
+    permissive_hold : on
+    retro_tap       : off
+}
+```
+
+**Attributes** — names, semantics, and defaults all follow
+[QMK firmware's tap-hold model](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md)
+(snake_case keywords, same parameter set as a QMK `config.h`).
+We deliberately don't use Karabiner-Elements' complex-modifications
+JSON dialect — skhd users want a config that reads like the rest of
+`.skhdrc`, not a separate verbose camelCase format.
+
+| Attribute | Type | Default | QMK equivalent | Description |
+|---|---|---|---|---|
+| `tap` | hid_key | required | `LT(layer, kc)` tap behavior | Key emitted on a quick tap (press + release within `timeout`). |
+| `hold` | hid_key or mode | required | `LT(layer, kc)` hold behavior | Key emitted while held past `timeout`. A mode identifier here makes it a **layer hold** (see below). |
+| `timeout` | duration | `200ms` | [`TAPPING_TERM`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md#tapping-term) | How long the source key has to be held to commit the hold action. |
+| `permissive_hold` | `on`/`off` | `on` | [`PERMISSIVE_HOLD`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md#permissive-hold) | If `on`, a nested down+up of another key while the source is held also commits the hold modifier. Useful for typing Ctrl+A by holding caps for ~50ms then quickly tapping `a`. |
+| `hold_on_other_key_press` | `on`/`off` | `off` | [`HOLD_ON_OTHER_KEY_PRESS`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md#hold-on-other-key-press) | If `on`, any other key pressed (even without release) while the source is held immediately commits the hold action. Stricter than `permissive_hold`. |
+| `retro_tap` | `on`/`off` | `off` | [`RETRO_TAPPING`](https://github.com/qmk/qmk_firmware/blob/master/docs/tap_hold.md#retro-tapping) | If `on`, releasing the source key without committing a hold still emits the tap key. Useful for over-held keys (e.g. holding `space` then releasing without pressing anything else still types a space). |
+
+### Layer Holds
+
+When `hold` references a **mode identifier** instead of a key, the
+source key acts as a temporary layer activator: hold to enter the
+mode, release to exit. Layer hold rules push IPC messages from grabber
+→ agent so the mode change happens on the agent's run loop (where
+mode bindings are evaluated).
+
+```bash
+# Declare a capture-mode for unbound keys not to leak through.
+:: fn_layer @
+
+# Hold space → enter fn_layer; release → back to default.
+.remap space [device builtin] {
+    tap             : space
+    hold            : fn_layer
+    timeout         : 200ms
+    retro_tap       : on
+}
+
+# While the layer is held, number row maps to F-row.
+fn_layer < 1 | f1
+fn_layer < 2 | f2
+fn_layer < tab | alt - tab          # cmd-tab style app switcher
+fn_layer < 0x1B | f11               # virtual keycodes also work in layer
+```
+
+Layer-hold modes use the same `:: <name> @` declaration syntax as
+[regular modes](#mode-declaration) — capture (`@`) decides whether
+unbound keys in the layer leak through to the focused app or are
+absorbed.
 
 ## Syntax Examples
 

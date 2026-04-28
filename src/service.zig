@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c.zig");
 const sm = @import("sm_app_service.zig");
+const grabber_cli = @import("grabber_cli.zig");
 const log = std.log.scoped(.service);
 
 // Import C functions
@@ -514,6 +515,12 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
     };
     std.debug.print("  Input Monitoring:     {s}\n", .{im_label});
 
+    // HID daemon (Karabiner-DriverKit-VirtualHIDDevice). Required by
+    // skhd-grabber for .remap / .taphold rules. printHidDaemonStatus
+    // emits its own line (and a Karabiner-Elements conflict warning when
+    // detected) and returns the state so we can print remediation below.
+    const hid_state = grabber_cli.printHidDaemonStatus(allocator);
+
     std.debug.print("  Log file:             {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
 
     if (!installed) {
@@ -570,6 +577,15 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
             \\upgrades.
             \\
         , .{});
+    }
+
+    // HID daemon remediation runs after the agent-side chain so it
+    // doesn't bury an Accessibility / IM problem the user has to fix
+    // first. Only print it when the grabber is actually installed —
+    // for users who never set up `.remap` / `.taphold`, "Not installed"
+    // is an informational line, not an actionable problem.
+    if (hid_state != .running and grabber_cli.isGrabberInstalled()) {
+        grabber_cli.printHidDaemonRemediation(hid_state);
     }
 }
 

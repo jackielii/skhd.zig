@@ -62,32 +62,27 @@ fn resolveScript(allocator: std.mem.Allocator, rel: []const u8) ![]const u8 {
 
 pub fn installGrabber(allocator: std.mem.Allocator) !void {
     // Pre-check: the dext is what makes vhidd injection possible.
-    // Without it, the grabber starts but its first connect attempt
-    // to the vhidd_server fails — same diagnostics as
-    // `--grabber-status`, but flagged here too so the user finds out
-    // before launchd starts looping the daemon.
-    if (!(try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice"))) {
-        std.debug.print(
-            \\error: Karabiner-DriverKit-VirtualHIDDevice (dext) is not loaded.
-            \\
-            \\skhd-grabber injects HID events through this dext. Install it from
-            \\  https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice
-            \\then approve it in System Settings > Privacy & Security and re-run
-            \\this command.
-            \\
-        , .{});
-        return error.DextMissing;
+    // Without it, the grabber starts but its first connect attempt to the
+    // vhidd_server fails. Branch on the specific failure mode so the user
+    // gets actionable guidance (install pkg vs. reinstall pkg vs.
+    // kickstart) rather than a generic "something's missing".
+    const hid_state = try checkHidDaemonState(allocator);
+    if (hid_state != .running) {
+        printHidDaemonRemediation(hid_state);
+        return switch (hid_state) {
+            .not_installed => error.DextMissing,
+            .plist_unregistered, .stopped => error.VhiddDaemonMissing,
+            .running => unreachable,
+        };
     }
-    if (!(try processRunning(allocator, "Karabiner-VirtualHIDDevice-Daemon"))) {
+    if (isKarabinerElementsActive(allocator)) {
         std.debug.print(
-            \\error: Karabiner-VirtualHIDDevice-Daemon is not running.
-            \\
-            \\This userland helper bridges skhd-grabber's IPC to the dext. It
-            \\should auto-start with the dext install. To kickstart it manually:
-            \\  sudo launchctl kickstart -k system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon
+            \\warning: Karabiner-Elements is running and will conflict with
+            \\skhd-grabber for HID seize. Disable Karabiner-Elements (or
+            \\uninstall it) before relying on skhd-grabber's tap-hold/remap
+            \\rules; otherwise both will fight for keyboard control.
             \\
         , .{});
-        return error.VhiddDaemonMissing;
     }
 
     const script = resolveScript(allocator, install_script_rel) catch {
@@ -314,6 +309,175 @@ fn processRunning(allocator: std.mem.Allocator, needle: []const u8) !bool {
     try child.spawn();
     const term = try child.wait();
     return term == .Exited and term.Exited == 0;
+}
+
+/// Path to the daemon binary's Info.plist — single source of truth for the
+/// installed Karabiner DriverKit version (matches what's in the dext).
+const vhidd_info_plist = "/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/Info.plist";
+
+/// HID daemon dependency state, in priority order: missing dext → broken
+/// launchd registration → just-stopped → running. Each state has a distinct
+/// remediation so callers (--install-grabber, --status) can give specific
+/// guidance instead of a generic "something's wrong".
+pub const HidDaemonState = enum {
+    /// The DriverKit dext isn't loaded. User needs to install the
+    /// Karabiner-DriverKit-VirtualHIDDevice .pkg from pqrs releases.
+    not_installed,
+    /// Dext is loaded but the daemon binary's launchd plist isn't
+    /// registered. Happens after a partial uninstall or when only the
+    /// dext was installed without its companion plist. `kickstart` will
+    /// fail with "could not find service"; need to re-run the .pkg
+    /// installer.
+    plist_unregistered,
+    /// Dext loaded, daemon plist registered, daemon just isn't running.
+    /// Recoverable via `launchctl kickstart`.
+    stopped,
+    /// All good.
+    running,
+};
+
+const vhidd_launchd_label = "org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon";
+
+/// Probe the HID daemon dependency chain and return the first failure
+/// found, or `running` if every layer is up. The caller is expected to
+/// branch on the result for state-specific messaging.
+pub fn checkHidDaemonState(allocator: std.mem.Allocator) !HidDaemonState {
+    const dext_loaded = try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice");
+    if (!dext_loaded) return .not_installed;
+
+    const daemon_running = try processRunning(allocator, "Karabiner-VirtualHIDDevice-Daemon");
+    if (daemon_running) return .running;
+
+    // Daemon process not running. Distinguish "launchd doesn't know about
+    // it at all" (plist_unregistered, kickstart will fail) from "launchd
+    // knows about it, just not running right now" (stopped, kickstart
+    // works). `launchctl print system/<label>` returns non-zero with
+    // "Could not find service" for the former.
+    const registered = try launchdServiceRegistered(allocator);
+    return if (registered) .stopped else .plist_unregistered;
+}
+
+fn launchdServiceRegistered(allocator: std.mem.Allocator) !bool {
+    const target = "system/" ++ vhidd_launchd_label;
+    var child = std.process.Child.init(&.{ "/bin/launchctl", "print", target }, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    const term = try child.wait();
+    return term == .Exited and term.Exited == 0;
+}
+
+/// Read CFBundleShortVersionString from the daemon's Info.plist (which
+/// matches the dext's version — they ship together). Returns null if the
+/// file is absent or PlistBuddy fails. Caller frees.
+pub fn readHidDaemonVersion(allocator: std.mem.Allocator) ?[]const u8 {
+    var child = std.process.Child.init(
+        &.{ "/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", vhidd_info_plist },
+        allocator,
+    );
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return null;
+
+    var buf: [128]u8 = undefined;
+    var n: usize = 0;
+    if (child.stdout) |stdout| {
+        n = stdout.reader().read(&buf) catch 0;
+    }
+    const term = child.wait() catch return null;
+    if (term != .Exited or term.Exited != 0) return null;
+
+    const trimmed = std.mem.trim(u8, buf[0..n], " \r\n\t");
+    if (trimmed.len == 0) return null;
+    return allocator.dupe(u8, trimmed) catch null;
+}
+
+/// True iff Karabiner-Elements' userland grabber is currently running.
+/// Coexists badly with skhd-grabber (both seize keyboards via the same
+/// dext), so we surface this as a warning in --install-grabber and --status.
+pub fn isKarabinerElementsActive(allocator: std.mem.Allocator) bool {
+    return processRunning(allocator, "karabiner_grabber") catch false;
+}
+
+/// Print the one-line `--status` summary for the HID daemon. Returns the
+/// detected state so the caller can decide whether to print the
+/// remediation block below the existing remediation chain. Errors during
+/// the probe are reported inline and treated as `.running` so we don't
+/// spam an irrelevant remediation in unusual environments.
+pub fn printHidDaemonStatus(allocator: std.mem.Allocator) HidDaemonState {
+    const state = checkHidDaemonState(allocator) catch |err| {
+        std.debug.print("  HID daemon:           Unknown ({s})\n", .{@errorName(err)});
+        return .running;
+    };
+
+    const version = readHidDaemonVersion(allocator);
+    defer if (version) |v| allocator.free(v);
+
+    switch (state) {
+        .running => {
+            if (version) |v| {
+                std.debug.print("  HID daemon:           Running (Karabiner DriverKit v{s})\n", .{v});
+            } else {
+                std.debug.print("  HID daemon:           Running\n", .{});
+            }
+        },
+        .not_installed => std.debug.print("  HID daemon:           Not installed (required for .remap / .taphold rules)\n", .{}),
+        .plist_unregistered => {
+            const v_str = version orelse "?";
+            std.debug.print("  HID daemon:           DEXT v{s} loaded but launchd entry missing\n", .{v_str});
+        },
+        .stopped => {
+            const v_str = version orelse "?";
+            std.debug.print("  HID daemon:           Stopped (Karabiner DriverKit v{s} installed)\n", .{v_str});
+        },
+    }
+
+    if (isKarabinerElementsActive(allocator)) {
+        std.debug.print("  Karabiner-Elements:   Active — conflicts with skhd-grabber for HID seize\n", .{});
+    }
+
+    return state;
+}
+
+/// Print state-specific remediation for a non-running HID daemon. Called
+/// from the bottom of --status and from --install-grabber's preflight.
+/// `--install-service` is the user-facing entry point; `--install-grabber`
+/// is the privileged subcommand it invokes once prereqs are in place.
+pub fn printHidDaemonRemediation(state: HidDaemonState) void {
+    switch (state) {
+        .running => {},
+        .not_installed => std.debug.print(
+            \\
+            \\HID daemon (Karabiner-DriverKit-VirtualHIDDevice) is not installed.
+            \\skhd-grabber injects HID events through this dext. Install it from:
+            \\  https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice/releases
+            \\Approve the system extension in System Settings → Privacy &
+            \\Security, then re-run:
+            \\  skhd --install-service
+            \\
+        , .{}),
+        .plist_unregistered => std.debug.print(
+            \\
+            \\HID daemon's launchd entry is missing — the dext loaded but the
+            \\companion userland helper (Karabiner-VirtualHIDDevice-Daemon)
+            \\never got registered with launchd. `launchctl kickstart` will
+            \\fail with "could not find service" in this state.
+            \\
+            \\Reinstall Karabiner-DriverKit-VirtualHIDDevice (idempotent — the
+            \\.pkg redoes the launchd registration cleanly):
+            \\  https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice/releases
+            \\
+        , .{}),
+        .stopped => std.debug.print(
+            \\
+            \\HID daemon is stopped. Restart it with:
+            \\  sudo launchctl kickstart -k system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon
+            \\(skhd-grabber will reconnect automatically once it's back up.)
+            \\
+        , .{}),
+    }
 }
 
 /// Send a hard-coded sample rule to the grabber so we can validate the

@@ -40,6 +40,19 @@ pub const ServeResult = union(enum) {
     rules_applied: AppliedRules,
 };
 
+/// Single typed envelope for everything the agent can send. All
+/// payload fields are optional so the same parse handles hello /
+/// apply_rules / bye in one pass — `type` selects which fields the
+/// handler consults. Slices borrow from the parse arena and must be
+/// deep-copied if they need to outlive the parse.
+const Inbound = struct {
+    @"type": []const u8,
+    uid: ?u32 = null,
+    version: ?u32 = null,
+    rules: ?[]const protocol.Rule = null,
+    remaps: ?[]const protocol.Remap = null,
+};
+
 pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult {
     // Per-session state: the protocol expects hello first; record the
     // client uid for subsequent messages and reject anything else
@@ -57,39 +70,25 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
             else => return err,
         };
 
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, buf[0..n], .{}) catch |err| {
+        var parsed = std.json.parseFromSlice(Inbound, allocator, buf[0..n], .{
+            .ignore_unknown_fields = true,
+        }) catch |err| {
             try sendError(allocator, stream, "bad_json", @errorName(err));
             return err;
         };
         defer parsed.deinit();
 
-        if (parsed.value != .object) {
-            try sendError(allocator, stream, "bad_message", "expected JSON object");
-            return error.BadMessage;
-        }
-
-        const obj = parsed.value.object;
-        const type_val = obj.get("type") orelse {
-            try sendError(allocator, stream, "bad_message", "missing 'type' field");
-            return error.BadMessage;
-        };
-        if (type_val != .string) {
-            try sendError(allocator, stream, "bad_message", "'type' must be string");
-            return error.BadMessage;
-        }
-
-        const kind = type_val.string;
+        const msg = parsed.value;
+        const kind = msg.@"type";
 
         if (std.mem.eql(u8, kind, "hello")) {
-            client_uid = handleHello(allocator, stream, obj) catch |err| {
-                return err;
-            };
+            client_uid = try handleHello(allocator, stream, msg);
         } else if (std.mem.eql(u8, kind, "apply_rules")) {
             if (client_uid == null) {
                 try sendError(allocator, stream, "no_hello", "send hello before apply_rules");
                 return error.ProtocolViolation;
             }
-            const applied = try handleApplyRules(allocator, stream, obj, client_uid.?);
+            const applied = try handleApplyRules(allocator, stream, msg, client_uid.?);
             if (applied) |a| {
                 // Hand the parsed rules back to the daemon along with
                 // ownership of the connection. The daemon turns this
@@ -109,84 +108,42 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
     }
 }
 
-fn handleHello(allocator: std.mem.Allocator, stream: std.net.Stream, obj: std.json.ObjectMap) !u32 {
-    const uid_val = obj.get("uid") orelse {
+fn handleHello(allocator: std.mem.Allocator, stream: std.net.Stream, msg: Inbound) !u32 {
+    const uid = msg.uid orelse {
         try sendError(allocator, stream, "bad_hello", "missing 'uid'");
         return error.BadHello;
     };
-    if (uid_val != .integer) {
-        try sendError(allocator, stream, "bad_hello", "'uid' must be integer");
-        return error.BadHello;
-    }
-    const version_val = obj.get("version") orelse {
+    const version = msg.version orelse {
         try sendError(allocator, stream, "bad_hello", "missing 'version'");
         return error.BadHello;
     };
-    if (version_val != .integer) {
-        try sendError(allocator, stream, "bad_hello", "'version' must be integer");
-        return error.BadHello;
-    }
-    if (version_val.integer != protocol.protocol_version) {
+    if (version != protocol.protocol_version) {
         try sendError(allocator, stream, "version_mismatch", "agent and grabber differ on protocol version");
         return error.VersionMismatch;
     }
-
-    const uid: u32 = @intCast(uid_val.integer);
-    log.info("hello from uid={d} version={d}", .{ uid, version_val.integer });
+    log.info("hello from uid={d} version={d}", .{ uid, version });
     try sendOk(allocator, stream);
     return uid;
 }
 
-/// Parse the apply_rules payload, deep-copy the rules+remaps so they
-/// outlive the JSON arena, and return them as an `AppliedRules`. On
+/// Validate the apply_rules payload, deep-copy rules+remaps so they
+/// outlive the parse arena, and return them as an `AppliedRules`. On
 /// an empty payload (no rules, no remaps) returns null — the caller
 /// keeps the connection open and waits for the next message.
 fn handleApplyRules(
     allocator: std.mem.Allocator,
     stream: std.net.Stream,
-    obj: std.json.ObjectMap,
+    msg: Inbound,
     uid: u32,
 ) !?AppliedRules {
-    const rules_val = obj.get("rules") orelse {
+    const rules = msg.rules orelse {
         try sendError(allocator, stream, "bad_apply", "missing 'rules'");
         return error.BadApply;
     };
-    if (rules_val != .array) {
-        try sendError(allocator, stream, "bad_apply", "'rules' must be array");
-        return error.BadApply;
-    }
+    const remaps = msg.remaps orelse &[_]protocol.Remap{};
 
-    const rules_json = try std.json.stringifyAlloc(allocator, rules_val, .{});
-    defer allocator.free(rules_json);
-    var rules_parsed = std.json.parseFromSlice([]const protocol.Rule, allocator, rules_json, .{
-        .ignore_unknown_fields = true,
-    }) catch |err| {
-        try sendError(allocator, stream, "bad_apply", @errorName(err));
-        return err;
-    };
-    defer rules_parsed.deinit();
-
-    var remaps_view: []const protocol.Remap = &.{};
-    var remaps_parsed: ?std.json.Parsed([]const protocol.Remap) = null;
-    defer if (remaps_parsed) |*p| p.deinit();
-    if (obj.get("remaps")) |remaps_val| {
-        if (remaps_val != .array) {
-            try sendError(allocator, stream, "bad_apply", "'remaps' must be array");
-            return error.BadApply;
-        }
-        const remaps_json = try std.json.stringifyAlloc(allocator, remaps_val, .{});
-        defer allocator.free(remaps_json);
-        remaps_parsed = std.json.parseFromSlice([]const protocol.Remap, allocator, remaps_json, .{
-            .ignore_unknown_fields = true,
-        }) catch |err| {
-            try sendError(allocator, stream, "bad_apply", @errorName(err));
-            return err;
-        };
-        remaps_view = remaps_parsed.?.value;
-    }
-
-    log.info("apply_rules uid={d} rules={d} remaps={d}", .{ uid, rules_parsed.value.len, remaps_view.len });
-    for (rules_parsed.value, 0..) |r, i| {
+    log.info("apply_rules uid={d} rules={d} remaps={d}", .{ uid, rules.len, remaps.len });
+    for (rules, 0..) |r, i| {
         log.info(
             "  rule[{d}]: src=0x{X:0>2} tap=0x{X:0>2} hold=0x{X:0>2} timeout={d}ms perm={} hokp={} retro={}",
             .{ i, r.src_usage, r.tap_usage, r.hold_usage, r.timeout_ms, r.permissive_hold, r.hold_on_other_key_press, r.retro_tap },
@@ -195,7 +152,7 @@ fn handleApplyRules(
             log.info("    device: vendor=0x{X:0>4} product=0x{X:0>4}", .{ d.vendor, d.product });
         }
     }
-    for (remaps_view, 0..) |r, i| {
+    for (remaps, 0..) |r, i| {
         log.info(
             "  remap[{d}]: src=0x{X:0>2} → dst=0x{X:0>2} on vendor=0x{X:0>4} product=0x{X:0>4}",
             .{ i, r.src_usage, r.dst_usage, r.device.vendor, r.device.product },
@@ -204,26 +161,26 @@ fn handleApplyRules(
 
     try sendOk(allocator, stream);
 
-    if (rules_parsed.value.len == 0 and remaps_view.len == 0) return null;
+    if (rules.len == 0 and remaps.len == 0) return null;
 
     // Deep-copy out of the JSON arena so the result outlives this
     // function. Caller frees via AppliedRules.free.
-    const owned_rules = try allocator.alloc(protocol.Rule, rules_parsed.value.len);
+    const owned_rules = try allocator.alloc(protocol.Rule, rules.len);
     errdefer allocator.free(owned_rules);
     var i: usize = 0;
     errdefer while (i > 0) : (i -= 1) {
         if (owned_rules[i - 1].hold_layer) |l| allocator.free(l);
     };
-    for (rules_parsed.value) |r| {
+    for (rules) |r| {
         var copy = r;
         if (r.hold_layer) |l| copy.hold_layer = try allocator.dupe(u8, l);
         owned_rules[i] = copy;
         i += 1;
     }
 
-    const owned_remaps = try allocator.alloc(protocol.Remap, remaps_view.len);
+    const owned_remaps = try allocator.alloc(protocol.Remap, remaps.len);
     errdefer allocator.free(owned_remaps);
-    @memcpy(owned_remaps, remaps_view);
+    @memcpy(owned_remaps, remaps);
 
     return .{
         .uid = uid,

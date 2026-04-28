@@ -733,6 +733,127 @@ test "key released during pending: pass-through if its down was already at OS" {
     try std.testing.expectEqual(@as(u32, 0x2C), sink.out.items[1].usage);
 }
 
+// ─── benchmarks ──────────────────────────────────────────────────
+//
+// These tests time tight loops through `feed()` to track per-event
+// FSM cost. They print results via `std.debug.print` so the numbers
+// land in `zig build test` output without needing extra tooling.
+// `feed()` is allocation-free (BoundedArray storage is inline), so a
+// counter-only sink is enough to isolate FSM time.
+
+const CountSink = struct {
+    count: usize = 0,
+    fn cb(ctx: ?*anyopaque, _: Event) void {
+        const self: *CountSink = @ptrCast(@alignCast(ctx.?));
+        self.count += 1;
+    }
+};
+
+fn benchReport(name: []const u8, total_ns: u64, events: usize) void {
+    const ns_per_ev = if (events == 0) 0 else total_ns / events;
+    std.debug.print(
+        "[bench] {s:<48} events={d:>9} total={d:>8}us ns/event={d:>5}\n",
+        .{ name, events, total_ns / std.time.ns_per_us, ns_per_ev },
+    );
+}
+
+test "bench: pure-tap loop (modifier rule, no buffering)" {
+    // Source down → source up → repeat. The hot path for a user
+    // typing through caps_lock-as-ctrl when caps is briefly tapped
+    // (no other key in flight). Exercises the .idle ⇄ .pending
+    // transitions and the tap-emit path.
+    var sink: CountSink = .{};
+    var eng = init(
+        .{ .src_usage = 0x39, .tap_usage = 0x29, .hold = .{ .hid_usage = 0xE0 } },
+        CountSink.cb,
+        &sink,
+    );
+
+    const iterations = 200_000;
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = eng.feed(kbev(0x39, true));
+        _ = eng.feed(kbev(0x39, false));
+    }
+    const total_ns = timer.read();
+    const events = iterations * 2;
+    benchReport("pure-tap", total_ns, events);
+    // Each iteration produces 2 emitted events (tap_down + tap_up).
+    try std.testing.expectEqual(iterations * 2, sink.count);
+}
+
+test "bench: layer rule, fast typing burst (5 keys per hold)" {
+    // Realistic fast-typing scenario for layer-hold: source down,
+    // a few nested key down/up pairs (buffered), then source up
+    // before timeout → commits as tap, replays the buffer. This is
+    // the path a fast typist hits when rolling over a layer key
+    // without actually intending to enter the layer.
+    var sink: CountSink = .{};
+    var eng = init(
+        .{
+            .src_usage = 0x2C,
+            .tap_usage = 0x2C,
+            .hold = .{ .layer = "fn_layer" },
+            .permissive_hold = false,
+        },
+        CountSink.cb,
+        &sink,
+    );
+
+    const iterations = 50_000;
+    const inner_keys = 5;
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = eng.feed(kbev(0x2C, true));
+        var k: u16 = 0;
+        while (k < inner_keys) : (k += 1) {
+            _ = eng.feed(kbev(0x04 + k, true));
+            _ = eng.feed(kbev(0x04 + k, false));
+        }
+        _ = eng.feed(kbev(0x2C, false));
+    }
+    const total_ns = timer.read();
+    const events = iterations * (2 + inner_keys * 2);
+    benchReport("layer-roll-5keys", total_ns, events);
+}
+
+test "bench: hold-on-other-key-press eager commit" {
+    // Source down → first other key down → eager hold commit; rest
+    // of the burst flows through the .decided_hold pass-through
+    // path. Source up emits hold_up. This is the cheapest realistic
+    // hold path (no buffering, no timer fire from inside the test).
+    var sink: CountSink = .{};
+    var eng = init(
+        .{
+            .src_usage = 0x39,
+            .tap_usage = 0x29,
+            .hold = .{ .hid_usage = 0xE0 },
+            .hold_on_other_key_press = true,
+        },
+        CountSink.cb,
+        &sink,
+    );
+
+    const iterations = 50_000;
+    const inner_keys = 5;
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = eng.feed(kbev(0x39, true));
+        var k: u16 = 0;
+        while (k < inner_keys) : (k += 1) {
+            _ = eng.feed(kbev(0x04 + k, true));
+            _ = eng.feed(kbev(0x04 + k, false));
+        }
+        _ = eng.feed(kbev(0x39, false));
+    }
+    const total_ns = timer.read();
+    const events = iterations * (2 + inner_keys * 2);
+    benchReport("hold-on-other-key-press", total_ns, events);
+}
+
 test "key pressed AND released during pending: both buffered, replayed in order" {
     // The well-behaved case (and the one we mustn't break with the
     // pass-through fix above): a nested key fully tapped inside the

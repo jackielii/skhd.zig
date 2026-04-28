@@ -27,6 +27,12 @@ const Vhidd = @import("Vhidd.zig");
 
 const log = std.log.scoped(.grabber);
 
+/// `-P/--profile` instrumentation is compiled in for Debug and
+/// ReleaseSafe only — matching `Tracer.zig` in the user-agent. In
+/// ReleaseFast/ReleaseSmall every profile branch folds away at
+/// comptime so the seize hot path pays nothing for it.
+const profile_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
         .Debug => .debug,
@@ -72,6 +78,10 @@ pub fn main() !void {
     // Single inline tap-hold rule for live testing. D5 will replace
     // this with rules pulled from the grabber's IPC RuleSet.
     var seize_test_rule: ?TapHold.Rule = null;
+    // -P/--profile: emit one stderr line per HID-in / timer-sched /
+    // timer-fire / vhidd-post boundary so cold-start lag and steady-
+    // state cost can be measured. No effect on the no-profile path.
+    var profile = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -127,6 +137,12 @@ pub fn main() !void {
             if (seize_test_rule) |*r| r.permissive_hold = true;
         } else if (std.mem.eql(u8, a, "--hold-on-other-key-press")) {
             if (seize_test_rule) |*r| r.hold_on_other_key_press = true;
+        } else if (std.mem.eql(u8, a, "-P") or std.mem.eql(u8, a, "--profile")) {
+            if (comptime profile_supported) {
+                profile = true;
+            } else {
+                log.warn("--profile ignored: this binary was built in {s} mode (compiled out for zero overhead)", .{@tagName(builtin.mode)});
+            }
         } else if (std.mem.eql(u8, a, "--seize-test-duration")) {
             i += 1;
             if (i >= args.len) {
@@ -146,7 +162,7 @@ pub fn main() !void {
     if (seize_test_vendor) |vendor| {
         const product = seize_test_product.?;
         const mode: HidSeize.Mode = if (seize_test_observe) .observe else .seize;
-        seizeTest(gpa, .{ .vendor = vendor, .product = product }, seize_test_duration_ms, mode, seize_test_rule) catch |err| {
+        seizeTest(gpa, .{ .vendor = vendor, .product = product }, seize_test_duration_ms, mode, seize_test_rule, profile) catch |err| {
             log.err("seize-test failed: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -155,7 +171,7 @@ pub fn main() !void {
 
     log.info("skhd-grabber starting (socket={s}, pid={d})", .{ socket_path, std.c.getpid() });
 
-    var daemon = Daemon.init(gpa, socket_path) catch |err| {
+    var daemon = Daemon.init(gpa, socket_path, profile) catch |err| {
         log.err("daemon init failed: {s}", .{@errorName(err)});
         return err;
     };
@@ -232,7 +248,7 @@ const Daemon = struct {
     /// subscription should be active.
     console_user_timer: c.CFRunLoopTimerRef = null,
 
-    pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) !Daemon {
+    pub fn init(allocator: std.mem.Allocator, socket_path: []const u8, profile: bool) !Daemon {
         try ensureSocketParentDir(socket_path);
         // Stale socket from a crashed previous run: bind() would EADDRINUSE.
         posix.unlink(socket_path) catch |err| switch (err) {
@@ -275,6 +291,11 @@ const Daemon = struct {
                 // vhidd pointer set on lazy connect.
                 .vhidd = undefined,
                 .hidsystem = hidsystem,
+                .profile = profile,
+                .profile_timer = if (comptime profile_supported)
+                    (if (profile) try std.time.Timer.start() else undefined)
+                else
+                    undefined,
             },
             .layer_ctx = .{ .stream = null, .allocator = allocator },
             .active_uid = initial_uid,
@@ -904,6 +925,11 @@ const EngineSlot = struct {
     seize_ctx: *SeizeCtx,
     engine: TapHold,
     timer: c.CFRunLoopTimerRef = null,
+    /// Profile-only: ns-since-Timer-start when this slot's hold timer
+    /// is supposed to fire. Set in applyTapHoldTimer when scheduling
+    /// `start_in_ms`; read in tapHoldTimerCallback to compute drift
+    /// (actual fire − requested fire). Unread when profile is off.
+    profile_pending_fire_ns: u64 = 0,
 };
 
 /// State carried into the HidSeize input value callback. We can't
@@ -945,7 +971,20 @@ const SeizeCtx = struct {
     /// rebuild. We don't device-key this in v1 — typical user has
     /// one seized device and remaps target it by alias anyway.
     remap_table: [0x100]u16 = @splat(0),
+    /// -P/--profile: emit timeline traces. Off-path is unaffected.
+    profile: bool = false,
+    /// Monotonic clock anchor used by profile traces. Only valid when
+    /// `profile` is true; left undefined otherwise so the no-profile
+    /// path doesn't pay for the syscall.
+    profile_timer: std.time.Timer = undefined,
 };
+
+/// Profile-trace helper: ns-since-`profile_timer.start()` cast to
+/// microseconds for compact stderr output. Caller is responsible for
+/// gating with `cx.profile` so the cost is paid only when enabled.
+inline fn profUs(cx: *SeizeCtx) u64 {
+    return cx.profile_timer.read() / std.time.ns_per_us;
+}
 
 /// State for the layer-hold sink: a borrowed agent IPC stream + the
 /// allocator we use to build outbound JSON payloads.
@@ -989,10 +1028,19 @@ fn emitToVhidd(ctx_ptr: ?*anyopaque, ev: TapHold.Event) void {
     log.info("emit: usage=0x{X:0>2} pressed={}", .{ usage16, ev.pressed });
 
     const held = cx.state.compactedKeys();
+    const t_pre: u64 = if (comptime profile_supported) (if (cx.profile) cx.profile_timer.read() else 0) else 0;
     cx.vhidd.postKeyboardReport(cx.state.modifiers, held) catch |err| {
         log.warn("vhidd post failed: {s}", .{@errorName(err)});
         return;
     };
+    if (comptime profile_supported) {
+        if (cx.profile) {
+            const t_post = cx.profile_timer.read();
+            std.debug.print("[prof] vhidd-post t={d}us cost={d}us usage=0x{X:0>2} pressed={}\n", .{
+                t_post / std.time.ns_per_us, (t_post - t_pre) / std.time.ns_per_us, usage16, ev.pressed,
+            });
+        }
+    }
     cx.forwarded += 1;
 }
 
@@ -1002,6 +1050,15 @@ fn applyTapHoldTimer(slot: *EngineSlot, action: TapHold.TimerAction) void {
         .cancel => cancelTapHoldTimer(slot),
         .start_in_ms => |ms| {
             cancelTapHoldTimer(slot);
+            if (comptime profile_supported) {
+                if (slot.seize_ctx.profile) {
+                    const now_ns = slot.seize_ctx.profile_timer.read();
+                    slot.profile_pending_fire_ns = now_ns + @as(u64, ms) * std.time.ns_per_ms;
+                    std.debug.print("[prof] timer-sched t={d}us src=0x{X:0>2} fire-after={d}ms\n", .{
+                        now_ns / std.time.ns_per_us, slot.engine.rule.src_usage, ms,
+                    });
+                }
+            }
             slot.timer = makeTapHoldTimer(ms, slot);
             c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), slot.timer, c.kCFRunLoopDefaultMode);
         },
@@ -1024,6 +1081,20 @@ fn cancelTapHoldTimer(slot: *EngineSlot) void {
 
 fn tapHoldTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
     const slot: *EngineSlot = @ptrCast(@alignCast(info orelse return));
+    if (comptime profile_supported) {
+        if (slot.seize_ctx.profile) {
+            const now_ns = slot.seize_ctx.profile_timer.read();
+            // Drift = actual fire − requested fire, in microseconds.
+            // Positive means the runloop fired late; large positive on
+            // the first hold after startup would be the cold-start
+            // signal we're hunting.
+            const now_us: i128 = @intCast(now_ns / std.time.ns_per_us);
+            const want_us: i128 = @intCast(slot.profile_pending_fire_ns / std.time.ns_per_us);
+            std.debug.print("[prof] timer-fire t={d}us src=0x{X:0>2} drift={d}us\n", .{
+                now_ns / std.time.ns_per_us, slot.engine.rule.src_usage, now_us - want_us,
+            });
+        }
+    }
     const action = slot.engine.timerFired();
     // The timer that just fired is now expired — drop our handle
     // before applying any new timer action so we don't try to
@@ -1110,6 +1181,14 @@ fn translateFRow(cx: *SeizeCtx, raw_usage16: u16, pressed: bool) void {
 
 fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     const cx: *SeizeCtx = @ptrCast(@alignCast(ctx orelse return));
+
+    if (comptime profile_supported) {
+        if (cx.profile) {
+            std.debug.print("[prof] hid-in t={d}us page=0x{X:0>2} usage=0x{X:0>4} pressed={}\n", .{
+                profUs(cx), ev.usage_page, ev.usage, ev.pressed,
+            });
+        }
+    }
 
     log.debug("hid event: page=0x{X:0>2} usage=0x{X:0>4} pressed={}", .{
         ev.usage_page,
@@ -1263,6 +1342,7 @@ fn seizeTest(
     duration_ms: u32,
     mode: HidSeize.Mode,
     rule: ?TapHold.Rule,
+    profile: bool,
 ) !void {
     log.info("seize-test: device 0x{X:0>4}:0x{X:0>4} for {d}ms (mode={s})", .{
         match.vendor,
@@ -1302,6 +1382,11 @@ fn seizeTest(
             log.warn("IOHIDSystem connect failed ({s}); caps_lock force-off skipped", .{@errorName(err)});
             break :blk null;
         },
+        .profile = profile,
+        .profile_timer = if (comptime profile_supported)
+            (if (profile) try std.time.Timer.start() else undefined)
+        else
+            undefined,
     };
     defer if (ctx.hidsystem) |*h| h.deinit();
 
@@ -1465,6 +1550,13 @@ fn printHelp() void {
         \\  --hold-on-other-key-press
         \\                         Tweak --rule's tap-hold semantics (QMK
         \\                         hold_on_other_key_press).
+        \\  -P, --profile          Emit one stderr line per HID-in /
+        \\                         timer-sched / timer-fire / vhidd-post
+        \\                         boundary, with monotonic timestamps in
+        \\                         microseconds and timer drift. Use it
+        \\                         to investigate cold-start lag.
+        \\                         Debug + ReleaseSafe builds only;
+        \\                         compiled out of ReleaseFast / Small.
         \\
         \\This daemon is normally started by launchd via
         \\  /Library/LaunchDaemons/com.jackielii.skhd.grabber.plist

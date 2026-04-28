@@ -23,6 +23,28 @@ pub fn hasAccessibilityPermissions() bool {
     return c.AXIsProcessTrusted() != 0;
 }
 
+/// Three-valued result of `IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)`.
+/// `unknown` means the user has never been prompted (first run); `denied`
+/// can mean either explicitly denied OR — the case worth surfacing — that
+/// TCC's stored csreq is anchored on a stale cdHash (every brew upgrade
+/// or rebuild produces a new cdHash, silently invalidating the grant
+/// without losing the System Settings check mark).
+pub const InputMonitoringAccess = enum { granted, denied, unknown };
+
+/// Query whether the running process has Input Monitoring
+/// (kTCCServiceListenEvent) granted. CGEvent taps that listen for keyDown
+/// require this in addition to Accessibility — without it, the tap is
+/// created (Accessibility-only check) but key-down events are silently
+/// dropped before reaching the callback. This catches the cdHash-mismatch
+/// case that the existing Accessibility / log-tail signals miss entirely.
+pub fn checkInputMonitoringAccess() InputMonitoringAccess {
+    return switch (c.IOHIDCheckAccess(c.kIOHIDRequestTypeListenEvent)) {
+        c.kIOHIDAccessTypeGranted => .granted,
+        c.kIOHIDAccessTypeDenied => .denied,
+        else => .unknown,
+    };
+}
+
 /// Like hasAccessibilityPermissions() but uses the prompting variant. The
 /// first time an unknown bundle calls this, macOS pops the "X would like to
 /// control this computer" dialog and opens System Settings → Accessibility.
@@ -478,6 +500,20 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
         .unknown => "Unknown (no recent event-tap activity in log)",
     };
     std.debug.print("  Hotkeys functional:   {s}\n", .{tap_label});
+
+    // Input Monitoring is the smoking gun for the silent cdHash-mismatch
+    // case: tap_health says working, daemon log shows no errors, but no
+    // events flow because the kTCCServiceListenEvent grant's csreq is
+    // anchored on a stale cdHash. IOHIDCheckAccess returns Denied for that
+    // case. Surface it as a separate status line.
+    const im_access = checkInputMonitoringAccess();
+    const im_label = switch (im_access) {
+        .granted => "Granted",
+        .denied => "Denied (events suppressed — see remediation below)",
+        .unknown => "Unknown (will prompt on first key event)",
+    };
+    std.debug.print("  Input Monitoring:     {s}\n", .{im_label});
+
     std.debug.print("  Log file:             {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
 
     if (!installed) {
@@ -510,6 +546,28 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
             \\  skhd --restart-service     # then re-grant via System Settings
             \\
             \\For more troubleshooting, see docs/CODE_SIGNING.md.
+            \\
+        , .{});
+    } else if (im_access == .denied) {
+        // Reached when Accessibility is fine and the daemon looks healthy
+        // — but the IM grant's csreq is still stale (the most common
+        // post-`brew upgrade` failure mode, and the one tap_health can't
+        // see because the tap creates successfully).
+        std.debug.print(
+            \\
+            \\Input Monitoring is denied for com.jackielii.skhd, so key-down
+            \\events are silently dropped before reaching skhd's event tap.
+            \\This usually means TCC's stored grant is anchored on a stale
+            \\cdHash from a previous build (every brew upgrade / rebuild
+            \\changes the cdHash). System Settings still shows it granted.
+            \\
+            \\Reset and re-grant:
+            \\  tccutil reset ListenEvent com.jackielii.skhd
+            \\  skhd --restart-service
+            \\  # press any hotkey — macOS prompts for Input Monitoring; approve
+            \\
+            \\The fresh grant anchors on the cert root and survives future
+            \\upgrades.
             \\
         , .{});
     }

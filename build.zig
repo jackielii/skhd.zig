@@ -125,6 +125,8 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption(bool, track_alloc_option, false);
     options.addOption([]const u8, "karabiner_dext_version", karabiner_dext_version);
+    options.addOption([]const u8, "karabiner_dext_url", karabiner_dext_url);
+    options.addOption([]const u8, "karabiner_dext_sha256", karabiner_dext_sha256);
 
     linkFrameworks(b, exe);
     addVersionImport(b, exe);
@@ -320,18 +322,15 @@ pub fn build(b: *std.Build) void {
     install_local_step.dependOn(&install_local_cmd.step);
 
     // `zig build install-dext` — download + install the pinned Karabiner
-    // DriverKit .pkg. Required prerequisite for skhd-grabber's HID seize.
-    // Cached under $ZIG_GLOBAL_CACHE_DIR/karabiner-dext so re-runs skip
-    // the download. Idempotent at the installer level too — pqrs's pkg
-    // is a no-op when the same version is already installed.
-    const install_dext_cmd = b.addSystemCommand(&[_][]const u8{
-        "bash",
-        "scripts/install-dext.sh",
-        karabiner_dext_version,
-        karabiner_dext_url,
-        karabiner_dext_sha256,
-    });
+    // DriverKit .pkg by invoking the just-built skhd binary's
+    // `--install-dext` subcommand. Same code path brew users hit, so dev
+    // and prod stay in lockstep. Cached under ~/.cache/skhd so re-runs
+    // skip the download; pqrs's installer is a no-op when the same
+    // version is already installed.
+    const install_dext_cmd = b.addSystemCommand(&[_][]const u8{installed_exe});
+    install_dext_cmd.addArg("--install-dext");
     install_dext_cmd.has_side_effects = true;
+    install_dext_cmd.step.dependOn(b.getInstallStep());
 
     const install_dext_step = b.step("install-dext", "Download and install pinned Karabiner-DriverKit-VirtualHIDDevice (required by skhd-grabber)");
     install_dext_step.dependOn(&install_dext_cmd.step);
@@ -376,6 +375,8 @@ pub fn build(b: *std.Build) void {
     const alloc_options = b.addOptions();
     alloc_options.addOption(bool, track_alloc_option, true);
     alloc_options.addOption([]const u8, "karabiner_dext_version", karabiner_dext_version);
+    alloc_options.addOption([]const u8, "karabiner_dext_url", karabiner_dext_url);
+    alloc_options.addOption([]const u8, "karabiner_dext_sha256", karabiner_dext_sha256);
     alloc_exe.root_module.addOptions("build_options", alloc_options);
     alloc_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
     b.installArtifact(alloc_exe);

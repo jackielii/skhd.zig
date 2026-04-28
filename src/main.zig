@@ -138,6 +138,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--install-grabber")) {
             grabber_cli.installGrabber(gpa) catch std.process.exit(1);
             return;
+        } else if (std.mem.eql(u8, args[i], "--install-dext")) {
+            grabber_cli.installDext(gpa) catch std.process.exit(1);
+            return;
         } else if (std.mem.eql(u8, args[i], "--uninstall-grabber")) {
             grabber_cli.uninstallGrabber(gpa) catch std.process.exit(1);
             return;

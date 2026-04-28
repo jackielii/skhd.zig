@@ -111,7 +111,16 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     // vhidd_server fails. Branch on the specific failure mode so the user
     // gets actionable guidance (install pkg vs. reinstall pkg vs.
     // kickstart) rather than a generic "something's missing".
-    const hid_state = try checkHidDaemonState(allocator);
+    var hid_state = try checkHidDaemonState(allocator);
+    if (hid_state == .not_installed) {
+        // Auto-install the pinned DriverKit. We're already root here
+        // (--install-grabber is gated behind sudo), so installDext won't
+        // need to re-elevate. After install, macOS may need a beat for
+        // launchd to bootstrap the userland daemon — re-probe state.
+        std.debug.print("\nKarabiner-DriverKit-VirtualHIDDevice not installed. Installing pinned v{s}...\n", .{pinned_dext_version});
+        try installDext(allocator);
+        hid_state = try checkHidDaemonState(allocator);
+    }
     if (hid_state != .running) {
         printHidDaemonRemediation(hid_state);
         return switch (hid_state) {
@@ -456,6 +465,133 @@ pub fn readHidDaemonVersion(allocator: std.mem.Allocator) ?[]const u8 {
 /// dext), so we surface this as a warning in --install-grabber and --status.
 pub fn isKarabinerElementsActive(allocator: std.mem.Allocator) bool {
     return processRunning(allocator, "karabiner_grabber") catch false;
+}
+
+/// URL + SHA-256 for the pinned .pkg, exposed via build_options so the
+/// same values flow to here and to `zig build install-dext`. Bumping
+/// happens in build.zig — single source of truth, see the comment block
+/// there.
+const karabiner_dext_url = build_options.karabiner_dext_url;
+const karabiner_dext_sha256 = build_options.karabiner_dext_sha256;
+
+/// Resolve the cache path for the pinned .pkg. Per-version filename so
+/// multiple versions don't collide; transient location (/tmp under root,
+/// $XDG_CACHE_HOME or $HOME/.cache otherwise) since the .pkg is purely a
+/// download cache, not configuration.
+fn dextCachePath(allocator: std.mem.Allocator) ![]u8 {
+    const filename = try std.fmt.allocPrint(allocator, "skhd-Karabiner-DriverKit-VirtualHIDDevice-{s}.pkg", .{pinned_dext_version});
+    defer allocator.free(filename);
+
+    if (c.geteuid() == 0) {
+        // Running as root (typical when reached via `sudo skhd
+        // --install-grabber`): /tmp is the safest writable location
+        // that doesn't depend on a particular user's home.
+        return std.fmt.allocPrint(allocator, "/tmp/{s}", .{filename});
+    }
+
+    const home = std.posix.getenv("HOME") orelse return error.NoHome;
+    const dir = try std.fmt.allocPrint(allocator, "{s}/.cache/skhd", .{home});
+    defer allocator.free(dir);
+    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, filename });
+}
+
+fn fileSha256(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try file.read(&buf);
+        if (n == 0) break;
+        hasher.update(buf[0..n]);
+    }
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+
+    var hex_buf: [digest.len * 2]u8 = undefined;
+    return allocator.dupe(u8, std.fmt.bufPrint(&hex_buf, "{}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable);
+}
+
+/// Download + verify + install the pinned Karabiner-DriverKit-VirtualHIDDevice
+/// .pkg. Idempotent: re-runs reuse the cached .pkg, and pqrs's installer is
+/// a no-op when the same version is already installed. Re-execs via sudo
+/// when not already root.
+pub fn installDext(allocator: std.mem.Allocator) !void {
+    const pkg_path = try dextCachePath(allocator);
+    defer allocator.free(pkg_path);
+
+    // 1. Download to cache if missing.
+    if (std.fs.accessAbsolute(pkg_path, .{})) |_| {
+        std.debug.print("Using cached pkg at {s}\n", .{pkg_path});
+    } else |_| {
+        std.debug.print("Downloading Karabiner-DriverKit-VirtualHIDDevice {s}...\n", .{pinned_dext_version});
+        std.debug.print("  {s}\n", .{karabiner_dext_url});
+        var dl = std.process.Child.init(&.{ "/usr/bin/curl", "-fsSL", "-o", pkg_path, karabiner_dext_url }, allocator);
+        dl.stdin_behavior = .Inherit;
+        dl.stdout_behavior = .Inherit;
+        dl.stderr_behavior = .Inherit;
+        const term = try dl.spawnAndWait();
+        if (term != .Exited or term.Exited != 0) {
+            std.debug.print("error: curl failed downloading {s}\n", .{karabiner_dext_url});
+            return error.DownloadFailed;
+        }
+    }
+
+    // 2. Verify sha256 against the pinned hash. On mismatch, drop the
+    // cached file so the next attempt re-downloads — this protects
+    // against a partial/corrupt download but won't auto-retry on what
+    // could be a legitimate upstream re-tag (the user has to bump
+    // build.zig in that case).
+    const actual_hex = try fileSha256(allocator, pkg_path);
+    defer allocator.free(actual_hex);
+    if (!std.mem.eql(u8, actual_hex, karabiner_dext_sha256)) {
+        std.debug.print(
+            \\error: sha256 mismatch for {s}
+            \\  expected: {s}
+            \\  got:      {s}
+            \\
+        , .{ pkg_path, karabiner_dext_sha256, actual_hex });
+        std.fs.deleteFileAbsolute(pkg_path) catch {};
+        return error.Sha256Mismatch;
+    }
+
+    // 3. Install. /usr/sbin/installer needs root. If we're not, re-exec
+    // ourselves under sudo with --install-dext (the cached .pkg gets
+    // re-validated by the elevated invocation, so the only change vs.
+    // running `installer` directly is that the user sees one sudo
+    // password prompt instead of being told to run a separate command).
+    if (c.geteuid() != 0) {
+        const self_path = try std.fs.selfExePathAlloc(allocator);
+        defer allocator.free(self_path);
+        std.debug.print("Installing Karabiner-DriverKit-VirtualHIDDevice {s} (sudo will prompt for your password)...\n", .{pinned_dext_version});
+        var elev = std.process.Child.init(&.{ "/usr/bin/sudo", self_path, "--install-dext" }, allocator);
+        elev.stdin_behavior = .Inherit;
+        elev.stdout_behavior = .Inherit;
+        elev.stderr_behavior = .Inherit;
+        const term = try elev.spawnAndWait();
+        if (term != .Exited or term.Exited != 0) return error.SudoFailed;
+        return;
+    }
+
+    var inst = std.process.Child.init(&.{ "/usr/sbin/installer", "-pkg", pkg_path, "-target", "/" }, allocator);
+    inst.stdin_behavior = .Inherit;
+    inst.stdout_behavior = .Inherit;
+    inst.stderr_behavior = .Inherit;
+    const term = try inst.spawnAndWait();
+    if (term != .Exited or term.Exited != 0) return error.InstallerFailed;
+
+    std.debug.print(
+        \\
+        \\Karabiner-DriverKit-VirtualHIDDevice {s} installed. macOS may
+        \\prompt to approve the system extension in System Settings →
+        \\Privacy & Security; approve it before running skhd-grabber.
+        \\
+    , .{pinned_dext_version});
 }
 
 /// Print the one-line `--status` summary for the HID daemon. Returns the

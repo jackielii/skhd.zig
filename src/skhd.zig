@@ -1254,7 +1254,7 @@ fn handleSigint(_: c_int) callconv(.C) void {
 
 /// Reload configuration from file
 pub fn reloadConfig(self: *Skhd) !void {
-    log.info("Reloading configuration from: {s}", .{self.config_file});
+    log.warn("Reloading configuration from: {s}", .{self.config_file});
 
     // Parse new configuration
     var new_mappings = try Mappings.init(self.allocator);
@@ -1318,28 +1318,34 @@ pub fn reloadConfig(self: *Skhd) !void {
     // can dial fresh with the updated rules. Do this even when the
     // new config has no caps-class rules — closing the old socket
     // is how the grabber learns we don't want our previous rules
-    // applied any more (D5 will make this a hard "drop on close",
-    // for now this matches what grabber does when no apply_rules
-    // arrive).
+    // applied any more.
+    //
+    // No `bye` here: once apply_rules has succeeded, the grabber moves
+    // this socket out of `Ipc.serve` and into its subscriptionCallback,
+    // which only PEEKs for EOS and discards any frame the agent writes
+    // as "stray bytes". A bye on a subscription connection therefore
+    // never gets a reply — and worse, an `expectOk` read after it can
+    // pick up a queued `mode_change` push (logged as "unexpected type:
+    // mode_change") or block indefinitely. EOS-on-close is the only
+    // teardown signal the subscription path actually honors.
     if (self.layer_listener) |ll| {
         ll.deinit();
         self.layer_listener = null;
     }
     if (self.grabber_client) |gc| {
-        gc.bye() catch {};
         gc.close();
         self.allocator.destroy(gc);
         self.grabber_client = null;
     }
     self.forwardTapholdsToGrabber() catch |err| {
-        log.warn("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
+        log.err("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
     };
 
     // Note: We don't re-enable hot reload here because this function
     // might be called from within the hotload callback. Instead, we'll
     // update the watched files list when hot reload is already enabled.
 
-    log.info("Configuration reloaded successfully", .{});
+    log.warn("Configuration reloaded successfully", .{});
 }
 
 pub fn enableHotReload(self: *Skhd) !void {

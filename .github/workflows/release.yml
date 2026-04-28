@@ -164,17 +164,20 @@ jobs:
 
     - name: Code Sign Bundle
       if: env.SHOULD_SIGN == 'true'
+      env:
+        # Codesign skhd.app via the same script `zig build install-local`
+        # uses locally — keeps the inner-Mach-O signing order (helpers
+        # first, principal last) and the bundle ID identifier consistent
+        # between dev iteration and release builds.
+        SKHD_CERT: skhd-cert
+        SKHD_BUNDLE_ID: com.jackielii.skhd
+        # CI imports the cert from the MACOS_CERTIFICATE secret; if it's
+        # not in the keychain, that's a deployment misconfiguration —
+        # don't paper over it by generating a throwaway local cert.
+        SKHD_NO_AUTO_GENERATE_CERT: "1"
       run: |
-        # Sign every Mach-O in Contents/MacOS/ first, then the bundle layer.
-        # As of v0.1.0-alpha the bundle ships both `skhd` (CFBundleExecutable)
-        # and the `skhd-grabber` helper. The bundle-layer codesign call walks
-        # subcomponents and fails ("code object is not signed at all") if any
-        # inner Mach-O is unsigned, so both have to be signed first with the
-        # bundle's identifier.
-        codesign -f -s "skhd-cert" -i com.jackielii.skhd skhd.app/Contents/MacOS/skhd
-        codesign -f -s "skhd-cert" -i com.jackielii.skhd skhd.app/Contents/MacOS/skhd-grabber
-        codesign -f -s "skhd-cert" -i com.jackielii.skhd skhd.app
-        codesign -dv --verbose=2 skhd.app
+        bash scripts/codesign.sh skhd.app
+        codesign --verify --verbose=2 skhd.app
 
     - name: Create tarball
       run: |

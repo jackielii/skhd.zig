@@ -35,8 +35,19 @@ else
     exit 1
 fi
 
-# Check if certificate exists
-if ! security find-certificate -c "$CERT_NAME" ~/Library/Keychains/login.keychain-db >/dev/null 2>&1; then
+# Check if certificate exists in the default keychain search list (covers
+# both local dev — login.keychain — and CI's temporary keychain set via
+# `security list-keychain -d user -s ...`). The `security find-identity
+# -p codesigning` form filters by codeSigning EKU so an unrelated cert
+# with the same CN doesn't satisfy this check.
+if ! security find-identity -p codesigning -v 2>/dev/null | grep -F "\"$CERT_NAME\"" >/dev/null; then
+    if [ -n "$SKHD_NO_AUTO_GENERATE_CERT" ]; then
+        echo -e "${RED}Certificate '$CERT_NAME' not found in any keychain.${NC}"
+        echo "SKHD_NO_AUTO_GENERATE_CERT is set — refusing to generate a"
+        echo "fresh local cert (would diverge from the trust chain the"
+        echo "caller expects). Import the cert before running this script."
+        exit 1
+    fi
     echo -e "${YELLOW}Certificate '$CERT_NAME' not found.${NC}"
     echo "Creating self-signed code signing certificate..."
     echo ""

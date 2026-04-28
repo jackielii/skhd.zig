@@ -36,6 +36,7 @@ pub const TokenType = enum {
     Token_String,
     Token_Option,
     Token_Reference,
+    Token_Alias,
 
     Token_BeginList,
     Token_EndList,
@@ -123,6 +124,15 @@ pub fn get_token(self: *Tokenizer) ?Token {
             } else {
                 // It's just @ (used for capture in mode declarations)
                 token.type = .Token_Capture;
+            }
+        },
+        '$' => {
+            const next = self.peekRune();
+            if (next != null and ascii.isAlphabetic(next.?[0])) {
+                token.type = .Token_Alias;
+                token.text = self.acceptIdentifier();
+            } else {
+                token.type = .Token_Unknown;
             }
         },
         '~' => token.type = .Token_Unbound,

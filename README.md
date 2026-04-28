@@ -140,6 +140,12 @@ skhd captures keyboard events via macOS Core Graphics, which requires Accessibil
 
 You only need to do this once. The bundle's stable identifier (`com.jackielii.skhd`) means TCC entries persist across rebuilds and `brew upgrade`.
 
+If your config uses `.remap` or `.taphold` rules, macOS will additionally
+prompt you for **Input Monitoring** the first time the grabber starts.
+The grabber binary lives inside the same `skhd.app` bundle, so the same
+bundle identifier covers it — one click in **System Settings → Privacy
+& Security → Input Monitoring** approves both processes.
+
 ## Running as Service
 
 After installation, run skhd as a service for automatic startup:
@@ -179,6 +185,7 @@ The service will:
 - **Modal system**: Multi-level modal hotkey system with capture modes
 - **Configuration file**: Compatible with original skhd configuration format
 - **Hot reloading**: Automatic config reload on file changes
+- **Device-aware HID remapping** (v0.1.0-alpha): per-keyboard 1:1 remaps via `hidutil` and tap-vs-hold rules via the optional `skhd-grabber` daemon. See [Device-aware remapping](#device-aware-remapping-device--remap).
 
 ### Additional Features (New in skhd.zig!)
 
@@ -186,6 +193,8 @@ The service will:
 - **Command definitions**: Define reusable commands with placeholders to reduce repetition
 - **Key Forwarding**: Forward / remap key binding to another key binding
 - **Mode activation with command**: Execute a command when switching modes (e.g., `cmd - w ; window : echo "Window mode"`)
+- **`.device` + `.remap` (v0.1.0-alpha)**: per-device HID-layer remapping, both colon (1:1) and block (tap/hold) forms.
+- **Layer holds (v0.1.0-alpha)**: a `.remap` `hold:` target can be a skhd mode, so holding a key activates a layer for the duration of the hold.
 
 ### Command-Line Interface
 
@@ -202,14 +211,22 @@ The service will:
 
 ### Service Management
 
-- `--install-service` - Install launchd service
+- `--install-service` - Install launchd service (also auto-installs the DriverKit dext + grabber if your config uses `.remap`/`.taphold`)
 - `--uninstall-service` - Remove launchd service
 - `--start-service` - Start as service
 - `--restart-service` - Restart service
 - `--stop-service` - Stop service
-- `--status` - Daemon health (PID + event-tap status)
+- `--status` - Combined health: agent PID, event tap, grabber, dext, TCC
 - PID file management (`/tmp/skhd_$USER.pid`)
 - Service logging (`~/Library/Logs/skhd.log`)
+
+### System Grabber (caps_lock-class tap-hold, opt-in)
+
+- `--install-grabber` - Install `skhd-grabber` LaunchDaemon (sudo)
+- `--uninstall-grabber` - Remove `skhd-grabber` LaunchDaemon (sudo)
+- `--install-dext` - Install the pinned Karabiner DriverKit VirtualHIDDevice (and its launchd plist)
+- `--grabber-status` - Drill into the grabber dependency chain (socket, dext version, IOKit match)
+- Grabber logging (`/var/log/skhd-grabber.log`)
 
 ### Advanced Features
 
@@ -220,6 +237,9 @@ The service will:
 - **Passthrough mode**: Execute command but still send keypress to application
 - **Config includes**: Load additional config files with `.load` directive
 - **Comprehensive error reporting**: Detailed error messages with line numbers
+- **Per-device HID remapping**: colon-form `.remap` for instant 1:1 swaps, block-form for tap-vs-hold semantics
+- **Layer holds**: `hold:` can target a skhd mode instead of a key, so holding the source key activates a layer
+- **DriverKit injection**: caps_lock-class keys (and modifier-as-hold rules) routed through `skhd-grabber` + Karabiner DriverKit, sidestepping limits of the user-session event tap
 
 ### Build Commands
 
@@ -279,6 +299,19 @@ The configuration syntax is fully compatible with the original skhd. See [SYNTAX
 .define toggle_app : open -a "{{1}}" || osascript -e 'tell app "{{1}}" to quit'
 .define resize_window : yabai -m window --resize {{1}}:{{2}}:{{3}}
 .define toggle_scratchpad : yabai -m window --toggle {{1}} || open -a "{{2}}"
+
+# Declare a keyboard by VendorID/ProductID (v0.1.0-alpha)
+# See "Device-aware remapping" below for full details.
+.device builtin { vendor: 0x05AC, product: 0x0342 }
+
+# Per-device HID remap — colon form (1:1 swap, applied via hidutil)
+.remap caps_lock [device builtin] : escape
+
+# Per-device tap-hold (routed through skhd-grabber)
+.remap caps_lock [device builtin] {
+    tap  : escape
+    hold : lctrl
+}
 ```
 
 ### Basic Hotkey Syntax
@@ -736,61 +769,111 @@ If you're switching from Karabiner-Elements to skhd.zig: keep the dext, keep the
 
 ## Testing and Debugging
 
-### Debug vs Release Builds
+### Quick health check
 
-**Important**: The logging and profiling behavior differs between build modes:
-
-- **ReleaseFast builds** (installed via Homebrew or built with `-Doptimize=ReleaseFast`): 
-  - Only show errors and warnings, even with `-V`/`--verbose` flag
-  - Profiling (`-P`/`--profile`) is disabled - all tracing code is compiled out for maximum performance
-- **ReleaseSafe builds** (built with `-Doptimize=ReleaseSafe`):
-  - Show errors, warnings, and info messages with `-V`/`--verbose` flag
-  - Profiling (`-P`/`--profile`) is available for production debugging
-- **Debug builds** (default `zig build`): 
-  - Show all log levels including debug messages with `-V`/`--verbose` flag
-  - Profiling (`-P`/`--profile`) is available with full trace details
-
-However, command output will be shown if verbose flag is specified in release builds.
-
-This is a trade-off between convenience and performance:
-
-- **Performance mode** (default): Command output is discarded for faster execution
-- **Verbose mode** (`-V`): Command output is preserved, which may add slight overhead but helps with trouble shooting
-
-To debug hotkey events and see detailed logging:
+When something isn't working, start with these:
 
 ```bash
-# Verbose logging for troubleshooting config issues
-# Note: In release builds, verbose mode only shows errors and warnings.
-# To see debug/info logs, use a debug build:
-zig build run -- -V
+skhd --status            # one-line summary: agent, grabber, dext, TCC
+skhd --grabber-status    # drills into the grabber dependency chain
+                         # (socket, dext version, IOKit match, …)
 ```
 
-**Performance:** The event loop is allocation-free in release builds, ensuring consistent low-latency hotkey processing.
+`--status` is the fastest way to spot a missing piece (e.g. agent running
+but grabber not installed, or dext loaded but not enabled).
+`--grabber-status` is what to run when a `.remap`/`.taphold` rule isn't
+firing.
 
-### Testing Commands
+### Logs
+
+Two processes, two log files:
 
 ```bash
-# Test key combinations and hex code (observe mode)
-skhd -o
+# Agent (user-session skhd) — config parsing, event tap, hotkey dispatch.
+tail -f ~/Library/Logs/skhd.log
 
-# Profile event handling (show after CTRL+C)
-# Note: Profiling works in Debug and ReleaseSafe builds only
-zig build && ./zig-out/bin/skhd -P
-# or for production debugging:
-zig build -Doptimize=ReleaseSafe && ./zig-out/bin/skhd -P
+# skhd-grabber (root LaunchDaemon) — only present if you installed the
+# grabber. Captures HID seize, tap-hold timing, layer pushes, IPC traffic.
+sudo tail -f /var/log/skhd-grabber.log
+```
 
-# Test specific keypress
-skhd -k "cmd + shift - t"
+For unified-logging captures across both processes:
 
-# Test text synthesis
-skhd -t "hello world"
+```bash
+log show --last 5m --predicate 'process == "skhd" OR process == "skhd-grabber"'
+```
 
-# Reload config of running instance
-skhd -r
+### Build modes (logging + profiling are mode-gated)
 
-# Debug memory allocations with real-time tracking
+| Build                            | `-V` shows               | `-P` profiling                  |
+|----------------------------------|--------------------------|---------------------------------|
+| ReleaseFast (Homebrew default)   | errors + warnings only   | disabled (compiled out)         |
+| ReleaseSafe                      | + info                   | available                       |
+| Debug (`zig build`)              | + debug                  | available with full traces      |
+
+Homebrew installs are ReleaseFast, so `-V` against the installed binary is
+intentionally quiet. To dig into a hotkey misbehaviour, run a Debug or
+ReleaseSafe build directly:
+
+```bash
+zig build run -- -V                              # debug logs
+zig build -Doptimize=ReleaseSafe && \
+    ./zig-out/bin/skhd -V                        # info logs, prod-shaped binary
+```
+
+Verbose mode also preserves child-command stdout/stderr (useful for
+diagnosing why a `: command` is silent), at a small per-event cost.
+
+### Observe and synthesize
+
+```bash
+skhd -o                       # echo every keycode + modifier the tap sees
+skhd -k "cmd + shift - t"     # synthesize a keypress
+skhd -t "hello world"         # synthesize text
+skhd -r                       # reload running instance's config
+```
+
+`skhd -o` prints macOS *virtual* keycodes (e.g. `0x35` for escape).
+`.remap`/`.taphold` rules use HID-standard names (e.g. `escape`) — see
+[Device-aware remapping](#device-aware-remapping-device--remap).
+
+### Profiling
+
+```bash
+zig build && ./zig-out/bin/skhd -P                # Debug
+zig build -Doptimize=ReleaseSafe && \
+    ./zig-out/bin/skhd -P                         # ReleaseSafe — closer to prod
+```
+
+Ctrl-C prints the trace summary.
+
+### Allocation tracking
+
+```bash
 zig build alloc -- -V
+```
+
+The event loop is allocation-free in release builds, so any allocation in
+the hot path during interactive use is a regression.
+
+### Common problem → first thing to check
+
+| Symptom | Start here |
+|---------|-----------|
+| Hotkey isn't firing | `skhd --status` — agent running? Accessibility granted? |
+| TCC granted but keys silently swallowed | `tccutil reset ListenEvent com.jackielii.skhd && tccutil reset Accessibility com.jackielii.skhd`, then `skhd --restart-service` and re-grant |
+| `.remap` / `.taphold` does nothing | `skhd --grabber-status` — dext enabled? grabber running? device matched? |
+| Caps lock LED toggles weirdly | `/var/log/skhd-grabber.log`; search for `HIDKeyboardCapsLockDelayOverride` |
+| Karabiner-Elements also installed | `sudo launchctl bootout system/org.pqrs.service.daemon.karabiner_grabber` |
+
+### Clean slate
+
+```bash
+skhd --uninstall-service          # removes the LaunchAgent
+sudo skhd --uninstall-grabber     # removes skhd-grabber
+                                  # (Karabiner DriverKit dext stays — see Uninstall above)
+
+systemextensionsctl list          # inspect dext activation/enabled state
 ```
 
 ## Contributing

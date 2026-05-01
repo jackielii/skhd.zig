@@ -1293,24 +1293,26 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         try mappings.loaded_files.append(self.allocator, duped_path);
 
         // Create a new parser for the included file. We hand it the
-        // parent's `.define` and process-group maps by value-move so
-        // included files can use commands declared in the parent
-        // (e.g. `@anybar_color` defined in the top-level skhdrc and
-        // referenced from a `.load`'d file). After parsing, move the
-        // maps back so the parent owns any new entries the included
-        // file added.
+        // parent's parser-scoped definitions by value-move so included
+        // files can use aliases, commands, and process groups declared
+        // in the parent. After parsing, move the maps back so the
+        // parent owns any new entries the included file added.
         var included_parser = try Parser.init(self.allocator);
         included_parser.command_defs = self.command_defs;
         included_parser.process_groups = self.process_groups;
+        included_parser.aliases = self.aliases;
         self.command_defs = .empty;
         self.process_groups = .empty;
+        self.aliases = .empty;
         defer {
             // Move maps back to the parent before the included
             // parser's deinit so we don't double-free their entries.
             self.command_defs = included_parser.command_defs;
             self.process_groups = included_parser.process_groups;
+            self.aliases = included_parser.aliases;
             included_parser.command_defs = .empty;
             included_parser.process_groups = .empty;
+            included_parser.aliases = .empty;
             included_parser.deinit();
         }
 
@@ -1912,6 +1914,59 @@ test "load directive with relative paths" {
 
     // Check that all hotkeys were loaded (main + loader + sub)
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() >= 3);
+}
+
+test "load directive shares aliases with included files" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    const test_id = std.crypto.random.int(u32);
+    const include_path = try std.fmt.allocPrint(alloc, "/tmp/skhd_alias_include_{d}.skhdrc", .{test_id});
+    defer alloc.free(include_path);
+    defer std.fs.deleteFileAbsolute(include_path) catch {};
+
+    {
+        const file = try std.fs.createFileAbsolute(include_path, .{});
+        defer file.close();
+        try file.writeAll("$hyper - h : echo included");
+    }
+
+    const main_content = try std.fmt.allocPrint(alloc,
+        \\.alias $hyper cmd + alt + ctrl + shift
+        \\.load "{s}"
+    , .{include_path});
+    defer alloc.free(main_content);
+
+    try parser.parse(&mappings, main_content);
+    try parser.processLoadDirectives(&mappings);
+
+    const default = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), default.hotkey_map.count());
+    var it = default.hotkey_map.iterator();
+    const hk = it.next().?.key_ptr.*;
+    const expected = ModifierFlag{ .cmd = true, .alt = true, .control = true, .shift = true };
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+}
+
+test "config duplicate detection allows disjoint side-specific modifiers" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(alloc);
+    defer mappings.deinit();
+
+    try parser.parse(&mappings,
+        \\lcmd - a : echo left
+        \\rcmd - a : echo right
+    );
+
+    const default = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 2), default.hotkey_map.count());
 }
 
 test "shell directive" {

@@ -1150,15 +1150,50 @@ test "Duplicate hotkey detection - left/right modifiers are different" {
     const config =
         \\lcmd - a : echo "left cmd"
         \\rcmd - a : echo "right cmd"
+    ;
+
+    try parser.parse(&mappings, config);
+
+    const default_mode = mappings.mode_map.get("default").?;
+    try testing.expectEqual(@as(usize, 2), default_mode.hotkey_map.count());
+}
+
+test "Duplicate hotkey detection - general modifier conflicts with specific modifiers" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\cmd - a : echo "general cmd"
+        \\lcmd - a : echo "left cmd"
+    ;
+
+    const result = parser.parse(&mappings, config);
+    try testing.expectError(error.ParseErrorOccurred, result);
+    try testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Duplicate hotkey"));
+}
+
+test "Duplicate hotkey detection - specific modifier conflicts with later general modifier" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.init(allocator);
+    defer parser.deinit();
+
+    var mappings = try Mappings.init(allocator);
+    defer mappings.deinit();
+
+    const config =
+        \\lcmd - a : echo "left cmd"
         \\cmd - a : echo "general cmd"
     ;
 
-    // This should parse successfully - they are different hotkeys
-    try parser.parse(&mappings, config);
-
-    // All three should exist
-    const default_mode = mappings.mode_map.get("default").?;
-    try testing.expectEqual(@as(usize, 3), default_mode.hotkey_map.count());
+    const result = parser.parse(&mappings, config);
+    try testing.expectError(error.ParseErrorOccurred, result);
+    try testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Duplicate hotkey"));
 }
 
 test "Duplicate hotkey detection - multi mode assignment" {

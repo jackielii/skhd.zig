@@ -75,6 +75,11 @@ pub fn eql(a: *Hotkey, b: *Hotkey) bool {
         a.key == b.key;
 }
 
+pub fn triggersOverlap(a: *Hotkey, b: *Hotkey) bool {
+    if (a.key != b.key) return false;
+    return hotkeyFlagsMatch(a.flags, b.flags) or hotkeyFlagsMatch(b.flags, a.flags);
+}
+
 fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd, control, shift }) bool {
     const general_field = switch (mod) {
         .alt => "alt",

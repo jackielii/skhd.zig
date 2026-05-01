@@ -63,13 +63,17 @@ pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOpti
 }
 
 pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
-    // First check if this hotkey already exists using the lookup context
-    const ctx = Hotkey.KeyboardLookupContext{};
-    const keypress = Hotkey.KeyPress{ .flags = hotkey.flags, .key = hotkey.key };
-
-    if (self.hotkey_map.getKeyAdapted(keypress, ctx) != null) {
-        return error.DuplicateHotkeyInMode;
+    // Config-time duplicates are about overlapping triggers in the same
+    // mode. Commands/process mappings are payload, not part of the lookup
+    // key; users express process-specific variants inside one hotkey's
+    // process list.
+    var it = self.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        if (Hotkey.triggersOverlap(entry.key_ptr.*, hotkey)) {
+            return error.DuplicateHotkeyInMode;
+        }
     }
+
     try self.hotkey_map.put(self.allocator, hotkey, {});
 }
 

@@ -26,6 +26,9 @@ const Skhd = @This();
 
 // Global reference for signal handler
 var global_skhd: ?*Skhd = null;
+var reload_requested: std.atomic.Value(bool) = .init(false);
+var stop_requested: std.atomic.Value(bool) = .init(false);
+var hotload_refresh_pending: std.atomic.Value(bool) = .init(false);
 
 // Result of processing a hotkey
 const HotkeyResult = enum {
@@ -481,6 +484,21 @@ fn grabberReconnectCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
 
 fn watchdogCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const self = @as(*Skhd, @ptrCast(@alignCast(info)));
+
+    if (stop_requested.swap(false, .acq_rel)) {
+        log.info("Received stop request, stopping run loop", .{});
+        c.CFRunLoopStop(c.CFRunLoopGetCurrent());
+        return;
+    }
+
+    if (reload_requested.swap(false, .acq_rel)) {
+        log.info("Received SIGUSR1, reloading configuration", .{});
+        self.reloadConfig() catch |err| {
+            log.err("Failed to reload config: {}", .{err});
+        };
+    }
+    self.processPendingHotReloadRefresh();
+
     const trusted = service.hasAccessibilityPermissions();
     const have_tap = self.event_tap.handle != null;
 
@@ -1274,18 +1292,12 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 
 /// Signal handler for SIGUSR1 - reload configuration
 fn handleSigusr1(_: c_int) callconv(.C) void {
-    if (global_skhd) |skhd| {
-        log.info("Received SIGUSR1, reloading configuration", .{});
-        skhd.reloadConfig() catch |err| {
-            log.err("Failed to reload config: {}", .{err});
-        };
-    }
+    reload_requested.store(true, .release);
 }
 
 /// Signal handler for SIGINT - stop the run loop to allow graceful shutdown
 fn handleSigint(_: c_int) callconv(.C) void {
-    // Stop the run loop to allow graceful shutdown with defer statements
-    c.CFRunLoopStop(c.CFRunLoopGetCurrent());
+    stop_requested.store(true, .release);
 }
 
 /// Reload configuration from file
@@ -1377,9 +1389,7 @@ pub fn reloadConfig(self: *Skhd) !void {
         log.warn("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
     };
 
-    // Note: We don't re-enable hot reload here because this function
-    // might be called from within the hotload callback. Instead, we'll
-    // update the watched files list when hot reload is already enabled.
+    self.requestHotReloadRefresh();
 
     log.info("Configuration reloaded successfully", .{});
 }
@@ -1430,6 +1440,28 @@ pub fn disableHotReload(self: *Skhd) void {
     self.hotload_enabled = false;
 
     log.info("Hot reload disabled", .{});
+}
+
+fn refreshHotReload(self: *Skhd) !void {
+    if (!self.hotload_enabled) return;
+    if (self.hotloader) |hotloader| {
+        hotloader.destroy();
+    }
+    self.hotloader = null;
+    self.hotload_enabled = false;
+    try self.enableHotReload();
+}
+
+fn requestHotReloadRefresh(self: *Skhd) void {
+    if (!self.hotload_enabled) return;
+    hotload_refresh_pending.store(true, .release);
+}
+
+fn processPendingHotReloadRefresh(self: *Skhd) void {
+    if (!hotload_refresh_pending.swap(false, .acq_rel)) return;
+    self.refreshHotReload() catch |err| {
+        log.warn("hot reload: failed to refresh watched files after reload: {s}", .{@errorName(err)});
+    };
 }
 
 fn hotloadCallback(path: []const u8) void {
@@ -1488,6 +1520,57 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
         .tracer = Tracer.init(false),
         .carbon_event = carbon_event,
     };
+}
+
+test "hot reload refresh is deferred until maintenance turn" {
+    const allocator = std.testing.allocator;
+    hotload_refresh_pending.store(false, .release);
+    defer hotload_refresh_pending.store(false, .release);
+
+    const test_id = std.crypto.random.int(u32);
+    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_{d}.skhdrc", .{test_id});
+    defer allocator.free(config_path);
+    const include_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_include_{d}.skhdrc", .{test_id});
+    defer allocator.free(include_path);
+
+    {
+        const file = try std.fs.createFileAbsolute(config_path, .{});
+        defer file.close();
+        try file.writeAll("cmd - a : echo initial");
+    }
+    {
+        const file = try std.fs.createFileAbsolute(include_path, .{});
+        defer file.close();
+        try file.writeAll("cmd - b : echo included");
+    }
+    defer std.fs.deleteFileAbsolute(config_path) catch {};
+    defer std.fs.deleteFileAbsolute(include_path) catch {};
+
+    var skhd = try Skhd.init(allocator, config_path, false, false);
+    defer skhd.deinit();
+
+    try skhd.enableHotReload();
+    try std.testing.expect(skhd.hotloader != null);
+    try std.testing.expectEqual(@as(usize, 1), skhd.hotloader.?.watch_list.items.len);
+
+    {
+        const updated = try std.fmt.allocPrint(allocator,
+            \\.load "{s}"
+            \\cmd - a : echo reloaded
+        , .{include_path});
+        defer allocator.free(updated);
+        const file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(updated);
+    }
+
+    try skhd.reloadConfig();
+    try std.testing.expect(skhd.hotloader != null);
+    try std.testing.expectEqual(@as(usize, 1), skhd.hotloader.?.watch_list.items.len);
+
+    skhd.processPendingHotReloadRefresh();
+    try std.testing.expect(skhd.hotloader != null);
+    try std.testing.expectEqual(@as(usize, 2), skhd.hotloader.?.watch_list.items.len);
 }
 
 test "processHotkey respects passthrough in capture mode" {

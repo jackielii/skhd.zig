@@ -52,7 +52,7 @@ pub const ServeResult = union(enum) {
 /// handler consults. Slices borrow from the parse arena and must be
 /// deep-copied if they need to outlive the parse.
 const Inbound = struct {
-    @"type": []const u8,
+    type: []const u8,
     uid: ?u32 = null,
     version: ?u32 = null,
     rules: ?[]const protocol.Rule = null,
@@ -68,10 +68,9 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
     // before hello.
     var client_uid: ?u32 = null;
 
-    // Reasonable session-scoped buffer; rule lists in the wild won't
-    // come close to this. Larger frames are rejected by readFrame's
-    // BufferTooSmall guard.
-    var buf: [64 * 1024]u8 = undefined;
+    // Match protocol.max_frame_bytes so the server accepts every frame
+    // the shared protocol declares valid.
+    var buf: [protocol.max_frame_bytes]u8 = undefined;
 
     while (true) {
         const n = protocol.readFrame(stream, &buf) catch |err| switch (err) {
@@ -88,7 +87,7 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
         defer parsed.deinit();
 
         const msg = parsed.value;
-        const kind = msg.@"type";
+        const kind = msg.type;
 
         if (std.mem.eql(u8, kind, "hello")) {
             client_uid = try handleHello(allocator, stream, msg);
@@ -202,13 +201,13 @@ fn handleApplyRules(
 }
 
 fn sendOk(allocator: std.mem.Allocator, stream: std.net.Stream) !void {
-    try protocol.writeMessage(stream, allocator, .{ .@"type" = "ok" });
+    try protocol.writeMessage(stream, allocator, .{ .type = "ok" });
 }
 
 fn sendError(allocator: std.mem.Allocator, stream: std.net.Stream, code: []const u8, message: []const u8) !void {
     log.warn("error: code={s} message={s}", .{ code, message });
     try protocol.writeMessage(stream, allocator, .{
-        .@"type" = "error",
+        .type = "error",
         .code = code,
         .message = message,
     });

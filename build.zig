@@ -354,11 +354,12 @@ pub fn build(b: *std.Build) void {
 
     // `zig build install-local` — stage the local build into the slot a
     // brew install would occupy: replace the binary inside
-    // /Applications/skhd.app, re-sign with skhd-cert + prod bundle id, and
-    // restart the SMAppService daemon. Lets you exercise the packaged path
-    // (real bundle id, real launchd registration, real TCC slot) without
-    // cutting a release. Pass -Doptimize=ReleaseFast to match the brew
-    // binary's perf profile.
+    // /Applications/skhd.app and re-sign with skhd-cert + prod bundle id.
+    // Stops the SMAppService daemon during the swap but does not restart
+    // it — run `skhd --start-service` when ready. Lets you exercise the
+    // packaged path (real bundle id, real launchd registration, real TCC
+    // slot) without cutting a release. Pass -Doptimize=ReleaseFast to
+    // match the brew binary's perf profile.
     const install_local_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
         "scripts/install-local.sh",
@@ -366,7 +367,7 @@ pub fn build(b: *std.Build) void {
     install_local_cmd.addArg(installed_exe);
     install_local_cmd.step.dependOn(b.getInstallStep());
 
-    const install_local_step = b.step("install-local", "Install the local build into /Applications/skhd.app and restart the service (test the packaged path without releasing)");
+    const install_local_step = b.step("install-local", "Install the local build into /Applications/skhd.app (test the packaged path without releasing; does not start the service)");
     install_local_step.dependOn(&install_local_cmd.step);
 
     // `zig build install-dext` — download + install the pinned Karabiner

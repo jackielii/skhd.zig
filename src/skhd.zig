@@ -529,11 +529,17 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // here so:
     //  (1) the layer listener can use `self` as its callback context,
     //  (2) the listener registers on the same CFRunLoop the event
-    //      tap is about to attach to,
-    //  (3) errors here can be downgraded to warnings without poisoning
-    //      Skhd construction.
+    //      tap is about to attach to.
+    //
+    // Propagate the error: forwardTapholdsToGrabber returns early when
+    // the config has no caps-class rules (or none whose target devices
+    // are connected), so an error here means the config genuinely needs
+    // the grabber and we couldn't reach it. Better to exit and let
+    // launchd respawn us — by then the grabber daemon should be up —
+    // than silently run with the caps-class rules disabled.
     self.forwardTapholdsToGrabber() catch |err| {
-        log.warn("could not forward .remap rules to skhd-grabber: {s}", .{@errorName(err)});
+        log.err("config requires skhd-grabber but forward failed: {s} — exiting so launchd can retry", .{@errorName(err)});
+        return err;
     };
 
     // Check if config file is a regular file

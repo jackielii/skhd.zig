@@ -1,8 +1,12 @@
 #!/bin/bash
 # Install the local skhd build into /Applications/skhd.app (the slot a brew
-# install would occupy) and restart the SMAppService daemon. Lets you test
-# the packaged path — real bundle ID, real launchd registration, real TCC
-# slot — without cutting a release.
+# install would occupy). Lets you test the packaged path — real bundle ID,
+# real launchd registration, real TCC slot — without cutting a release.
+#
+# Stops the SMAppService daemon during the swap so KeepAlive doesn't respawn
+# the old binary mid-write, but does NOT restart it — run
+# `skhd --start-service` (or let SMAppService restart on next login) when
+# you're ready.
 #
 # First install on a fresh box requires a one-time accessibility re-grant
 # because the local skhd-cert keypair differs from CI's; subsequent installs
@@ -48,9 +52,7 @@ echo "Prod app:    $APP_PATH"
 echo "Replacing:   $INNER_DST"
 
 # KeepAlive would respawn the old binary mid-write, so unload first.
-was_loaded=0
 if launchctl print "$DOMAIN/$PROD_LABEL" >/dev/null 2>&1; then
-    was_loaded=1
     echo "Stopping prod service..."
     launchctl bootout "$DOMAIN/$PROD_LABEL" 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -77,17 +79,9 @@ echo "Signing with skhd-cert (prod bundle id)..."
 SKHD_CERT="skhd-cert" SKHD_BUNDLE_ID="$PROD_LABEL" \
     bash "$REPO_ROOT/scripts/codesign.sh" "$APP_PATH" >/dev/null
 
-echo "Starting prod service..."
-if launchctl bootstrap "$DOMAIN" "$PROD_PLIST" 2>/dev/null; then
-    :
-elif [ "$was_loaded" = "1" ] && launchctl kickstart -k "$DOMAIN/$PROD_LABEL" 2>/dev/null; then
-    :
-else
-    echo "Warning: launchctl bootstrap failed — run 'skhd --start-service' to recover." >&2
-fi
-
 echo
 echo "Deployed locally-built skhd → $APP_PATH"
+echo "Service was not restarted — run 'skhd --start-service' when ready."
 echo "If hotkeys stop working, the local skhd-cert is fresh and differs from"
 echo "the cert TCC has on file. Open System Settings → Privacy & Security →"
 echo "Accessibility and toggle skhd off and back on (one-time re-grant)."

@@ -189,9 +189,10 @@ pub fn main() !void {
     // (SMAppService wires stderr to /dev/null). Skipped for `-V` so verbose
     // runs always print to the invoking terminal/pipe, even if launchd
     // somehow set XPC_SERVICE_NAME.
-    redirectDaemonStderr(gpa, verbose);
+    if (!verbose) {
+        redirectDaemonStderr(gpa);
+    }
     logSessionStart();
-
     inheritUserPath(gpa);
 
     // Initialize and run skhd
@@ -251,8 +252,7 @@ pub fn isLaunchdManaged() bool {
 /// processes started through `zig build`'s subprocess pipe — so it's a
 /// stricter "am I really a daemon" test than isatty(2), which gets fooled
 /// by the build system's stderr pipe.
-fn redirectDaemonStderr(allocator: std.mem.Allocator, verbose: bool) void {
-    if (verbose) return;
+fn redirectDaemonStderr(allocator: std.mem.Allocator) void {
     if (!isLaunchdManaged()) return;
 
     const home = std.posix.getenv("HOME") orelse return;
@@ -389,7 +389,7 @@ fn inheritUserPath(allocator: std.mem.Allocator) void {
         log.warn("PATH inheritance: setenv failed", .{});
         return;
     }
-    log.warn("PATH inherited from {s}: {s}", .{ shell, captured });
+    log.info("PATH inherited from {s}: {s}", .{ shell, captured });
 }
 
 /// Prepend `.path` directive entries to PATH. Called after inheritUserPath so

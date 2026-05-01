@@ -75,8 +75,9 @@ pub fn main() !void {
     var seize_test_product: ?u32 = null;
     var seize_test_duration_ms: u32 = 30_000;
     var seize_test_observe: bool = false;
-    // Single inline tap-hold rule for live testing. D5 will replace
-    // this with rules pulled from the grabber's IPC RuleSet.
+    // Single inline tap-hold rule for the --seize-test debug harness.
+    // The daemon path takes rules from the IPC RuleSet instead; this
+    // slot only feeds seizeTest() for standalone HID-pipeline bring-up.
     var seize_test_rule: ?TapHold.Rule = null;
     // -P/--profile: emit one stderr line per HID-in / timer-sched /
     // timer-fire / vhidd-post boundary so cold-start lag and steady-

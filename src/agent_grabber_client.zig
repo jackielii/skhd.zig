@@ -55,16 +55,20 @@ pub const Client = struct {
 
     /// Send the full set of caps-class rules and colon-form remaps in
     /// one apply_rules call. Replaces whatever the grabber held for
-    /// this uid.
+    /// this uid. `fkeys_as_standard` mirrors NSGlobalDomain
+    /// `com.apple.keyboard.fnState` so the grabber can flip its F-row
+    /// translation policy without doing a privileged prefs read.
     pub fn applyRules(
         self: *Client,
         rules: []const protocol.Rule,
         remaps: []const protocol.Remap,
+        fkeys_as_standard: bool,
     ) !void {
         try protocol.writeMessage(self.stream, self.allocator, .{
             .@"type" = "apply_rules",
             .rules = rules,
             .remaps = remaps,
+            .fkeys_as_standard = fkeys_as_standard,
         });
         try expectOk(self);
     }

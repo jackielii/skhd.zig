@@ -18,6 +18,12 @@ pub const AppliedRules = struct {
     uid: u32,
     rules: []protocol.Rule,
     remaps: []protocol.Remap,
+    /// Mirror of macOS's "Use F1, F2 … as standard function keys" pref
+    /// (NSGlobalDomain `com.apple.keyboard.fnState`), read by the
+    /// per-user agent and forwarded so the grabber can flip its F-row
+    /// translation policy without doing a privileged prefs read itself.
+    /// false = bare F-row → media keys (the OS default).
+    fkeys_as_standard: bool = false,
 
     pub fn free(self: AppliedRules, allocator: std.mem.Allocator) void {
         for (self.rules) |r| {
@@ -51,6 +57,9 @@ const Inbound = struct {
     version: ?u32 = null,
     rules: ?[]const protocol.Rule = null,
     remaps: ?[]const protocol.Remap = null,
+    /// See AppliedRules.fkeys_as_standard. Optional so older agents
+    /// (without the field) still parse — they get the OS default.
+    fkeys_as_standard: ?bool = null,
 };
 
 pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult {
@@ -142,7 +151,9 @@ fn handleApplyRules(
     };
     const remaps = msg.remaps orelse &[_]protocol.Remap{};
 
-    log.info("apply_rules uid={d} rules={d} remaps={d}", .{ uid, rules.len, remaps.len });
+    const fkeys_as_standard = msg.fkeys_as_standard orelse false;
+
+    log.info("apply_rules uid={d} rules={d} remaps={d} fkeys_as_standard={}", .{ uid, rules.len, remaps.len, fkeys_as_standard });
     for (rules, 0..) |r, i| {
         log.info(
             "  rule[{d}]: src=0x{X:0>2} tap=0x{X:0>2} hold=0x{X:0>2} timeout={d}ms perm={} hokp={} retro={}",
@@ -186,6 +197,7 @@ fn handleApplyRules(
         .uid = uid,
         .rules = owned_rules,
         .remaps = owned_remaps,
+        .fkeys_as_standard = fkeys_as_standard,
     };
 }
 

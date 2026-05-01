@@ -203,6 +203,10 @@ const Subscription = struct {
     stream: std.net.Stream,
     rules: []protocol.Rule,
     remaps: []protocol.Remap,
+    /// Mirror of NSGlobalDomain `com.apple.keyboard.fnState` as read by
+    /// the agent. Drives whether bare F-row should translate to media
+    /// (false, OS default) or stay literal (true).
+    fkeys_as_standard: bool,
     cf_fd: c.CFFileDescriptorRef,
     cf_source: c.CFRunLoopSourceRef,
 };
@@ -437,6 +441,7 @@ const Daemon = struct {
             .stream = stream,
             .rules = applied.rules,
             .remaps = applied.remaps,
+            .fkeys_as_standard = applied.fkeys_as_standard,
             .cf_fd = undefined,
             .cf_source = undefined,
         };
@@ -643,6 +648,7 @@ const Daemon = struct {
             }
         }
         self.seize_ctx.caps_remap_active = caps_active;
+        self.seize_ctx.fkeys_as_standard = sub.fkeys_as_standard;
 
         // Rebuild the colon-form remap table. Reset to all-zero first
         // so a previously-installed rule that's no longer present is
@@ -964,6 +970,13 @@ const SeizeCtx = struct {
     /// skip the per-event caps_lock force-off so we don't interfere
     /// with users who haven't remapped caps_lock.
     caps_remap_active: bool = false,
+    /// Mirror of NSGlobalDomain `com.apple.keyboard.fnState` from the
+    /// active subscription. Decides whether bare F-row should run
+    /// `translateFRow` (false → media keys) or pass through as a
+    /// literal F<i> keyboard-page event (true → F-keys are the OS
+    /// default, fn-modifier flips back to media). Read on each
+    /// `applyLatestRules`.
+    fkeys_as_standard: bool = false,
     /// Colon-form `.remap` table. Indexed by HID usage (page 0x07
     /// only). Zero means "no remap"; any nonzero value rewrites the
     /// source usage on its way in. Sized to 0x100 — covers every
@@ -1237,27 +1250,38 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     const raw_usage16 = std.math.cast(u16, ev.usage) orelse return;
     if (raw_usage16 < 0x04) return;
 
-    // F1..F12 on Apple's built-in keyboard need translation. With
-    // the "Use F1, F2…" setting OFF (default), the user expects
-    // F-row → media actions. The keyboard's apple-vendor service
-    // does emit corresponding media events, but seizing the
-    // keyboard service silences the OS's media-key path for that
-    // device — we have to do the translation ourselves and post
-    // through vhidd's consumer / apple-vendor / generic-desktop
-    // reports. Mirrors Karabiner's `fn_function_keys_manipulator`
-    // default mapping for built-in MacBook keyboards.
+    // F1..F12 on Apple's built-in keyboard need translation. Seizing
+    // the keyboard service silences the OS's apple-vendor media-key
+    // path for that device, so we have to do the F-row → media
+    // translation ourselves and post through vhidd's consumer /
+    // apple-vendor / generic-desktop reports. Mirrors Karabiner's
+    // `fn_function_keys_manipulator` default mapping.
     //
-    // Exception: when fn is held, Apple's default is to flip the
-    // F-row interpretation back to plain F1..F12. So if the OS-
-    // level fn flag is set, fall through to the normal emit path
-    // (which sends the keyboard usage straight to vhidd).
+    // Policy follows NSGlobalDomain `com.apple.keyboard.fnState`
+    // ("Use F1, F2 … as standard function keys"), forwarded to us by
+    // the agent so we don't have to do a per-uid prefs read from a
+    // root daemon:
+    //   pref OFF (default): bare F<i> → media, fn+F<i> → literal F<i>
+    //   pref ON:            bare F<i> → literal F<i>, fn+F<i> → media
+    //
+    // We read fn-state from our own `apple_top_case_state` rather than
+    // `CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)`
+    // because the latter is polluted by our own vhidd forwards: every
+    // fn we round-trip through vhidd is reflected back into the OS HID
+    // flags, so the query stops being a clean "is the user holding
+    // fn?" signal. The internal page-state, by contrast, only tracks
+    // events from the seized device — same source the rest of seize
+    // uses, so the F-row decision stays self-consistent.
     if (raw_usage16 >= 0x3A and raw_usage16 <= 0x45) {
-        const flags = c.CGEventSourceFlagsState(c.kCGEventSourceStateHIDSystemState);
-        if ((flags & c.kCGEventFlagMaskSecondaryFn) == 0) {
+        const fn_held = blk: for (cx.apple_top_case_state.keys) |k| {
+            if (k == 0x03) break :blk true;
+        } else false;
+        const want_media = if (cx.fkeys_as_standard) fn_held else !fn_held;
+        if (want_media) {
             translateFRow(cx, raw_usage16, ev.pressed);
             return;
         }
-        // fn held → fall through to keyboard-page emit below.
+        // else fall through to keyboard-page emit (literal F-key).
     }
 
     // Apply colon-form `.remap` rewrites BEFORE the slots see the

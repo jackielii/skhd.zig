@@ -202,6 +202,34 @@ pub fn deinit(self: *Skhd) void {
 /// "Cannot reach grabber" is downgraded to a warning by the caller —
 /// users without `skhd --install-grabber` still get the rest of
 /// their config running.
+/// Read NSGlobalDomain `com.apple.keyboard.fnState` (the "Use F1, F2 …
+/// as standard function keys" toggle in System Settings → Keyboard).
+/// false = bare F-row keys send media actions (Apple's default), true
+/// = bare F-row keys send literal F<i>. Forwarded to the grabber so
+/// its F-row translation policy matches the user's setting.
+///
+/// Read from the agent because the agent runs as the logged-in user;
+/// the root grabber would otherwise need to attach to a per-uid
+/// preference domain. Defaults to false (the OS default) on any
+/// failure — a missing/unreadable pref is exactly what an unset toggle
+/// looks like.
+fn readFkeysAsStandardPref() bool {
+    const key = c.CFStringCreateWithCString(
+        c.kCFAllocatorDefault,
+        "com.apple.keyboard.fnState",
+        c.kCFStringEncodingUTF8,
+    );
+    if (key == null) return false;
+    defer c.CFRelease(key);
+
+    const value = c.CFPreferencesCopyAppValue(key, c.kCFPreferencesAnyApplication);
+    if (value == null) return false;
+    defer c.CFRelease(value);
+
+    if (c.CFGetTypeID(value) != c.CFBooleanGetTypeID()) return false;
+    return c.CFBooleanGetValue(@ptrCast(value)) != 0;
+}
+
 fn forwardTapholdsToGrabber(self: *Skhd) !void {
     if (self.mappings.tapholds.items.len == 0 and self.mappings.remaps.items.len == 0) return;
 
@@ -280,9 +308,11 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
     }
     if (rules.items.len == 0 and remaps.items.len == 0) return;
 
+    const fkeys_as_standard = readFkeysAsStandardPref();
+
     log.info(
-        "forwarding {d} tap-hold rule(s) and {d} remap(s) to skhd-grabber at {s} (layer_listen={})",
-        .{ rules.items.len, remaps.items.len, grabber_protocol.default_socket_path, has_layer_rule },
+        "forwarding {d} tap-hold rule(s) and {d} remap(s) to skhd-grabber at {s} (layer_listen={} fkeys_as_standard={})",
+        .{ rules.items.len, remaps.items.len, grabber_protocol.default_socket_path, has_layer_rule, fkeys_as_standard },
     );
 
     const client = try self.allocator.create(agent_grabber_client.Client);
@@ -291,7 +321,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
     errdefer client.close();
 
     try client.hello();
-    try client.applyRules(rules.items, remaps.items);
+    try client.applyRules(rules.items, remaps.items, fkeys_as_standard);
 
     // Always keep the connection open + watch it for EOS, regardless
     // of whether this config has layer rules. The grabber's per-
@@ -1254,7 +1284,7 @@ fn handleSigint(_: c_int) callconv(.C) void {
 
 /// Reload configuration from file
 pub fn reloadConfig(self: *Skhd) !void {
-    log.warn("Reloading configuration from: {s}", .{self.config_file});
+    log.info("Reloading configuration from: {s}", .{self.config_file});
 
     // Parse new configuration
     var new_mappings = try Mappings.init(self.allocator);
@@ -1338,14 +1368,14 @@ pub fn reloadConfig(self: *Skhd) !void {
         self.grabber_client = null;
     }
     self.forwardTapholdsToGrabber() catch |err| {
-        log.err("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
+        log.warn("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
     };
 
     // Note: We don't re-enable hot reload here because this function
     // might be called from within the hotload callback. Instead, we'll
     // update the watched files list when hot reload is already enabled.
 
-    log.warn("Configuration reloaded successfully", .{});
+    log.info("Configuration reloaded successfully", .{});
 }
 
 pub fn enableHotReload(self: *Skhd) !void {

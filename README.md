@@ -98,16 +98,27 @@ Then grant accessibility (see [Granting Accessibility](#granting-accessibility) 
 
 ### Development Builds from GitHub Actions
 
-If you need builds with different optimization levels (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall), you can download them directly from GitHub Actions:
+If you want a main-branch build at a specific optimization level (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall), you can download one directly from GitHub Actions. These are signed `skhd.app` bundles with `skhd-grabber` included — same layout as the release tarballs, just built from `main` instead of a tag. Apple Silicon only.
 
 1. Go to the [CI workflow](https://github.com/jackielii/skhd.zig/actions/workflows/ci.yml?query=branch%3Amain) in Actions tab. Filter by branch `main`.
 2. Click on the latest successful run
 3. Scroll down to the "Artifacts" section
-4. Download the build artifact for your desired optimization level:
+4. Download the artifact for your desired optimization level:
    - `skhd-Debug` - Debug build with full debugging symbols
-   - `skhd-ReleaseSafe` - Release build with safety checks and runtime safety
+   - `skhd-ReleaseSafe` - Release build with runtime safety checks
    - `skhd-ReleaseFast` - Optimized for performance (recommended for daily use)
    - `skhd-ReleaseSmall` - Optimized for binary size
+
+GitHub wraps each artifact in a `.zip`. Inside is `skhd-arm64-macos.tar.gz`; extract and install the same way as a release tarball:
+
+```bash
+unzip skhd-ReleaseFast.zip
+tar -xzf skhd-arm64-macos.tar.gz
+mv skhd.app /Applications/
+sudo ln -sfn /Applications/skhd.app/Contents/MacOS/skhd /usr/local/bin/skhd
+```
+
+Then grant accessibility (see [Granting Accessibility](#granting-accessibility) below).
 
 ### Build from Source
 

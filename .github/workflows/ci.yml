@@ -11,33 +11,17 @@ jobs:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
         version: 0.14.0
-    
+
     - name: Run tests
       run: zig build test
 
     - name: Build Debug
       run: zig build
-
-    - name: Check version
-      run: ./zig-out/bin/skhd --version
-
-    - name: Build .app bundle
-      run: zig build app
-
-    - name: Verify bundle layout
-      # The release pipeline ships skhd.app, so any regression in
-      # scripts/make-app.sh or assets/Info.plist.template must fail at
-      # PR time, not at tag time.
-      run: |
-        test -f zig-out/skhd.app/Contents/MacOS/skhd
-        test -f zig-out/skhd.app/Contents/Info.plist
-        grep -q "<string>com.jackielii.skhd</string>" zig-out/skhd.app/Contents/Info.plist
-        plutil -lint zig-out/skhd.app/Contents/Info.plist
 
     - name: Lint shell scripts
       run: bash -n scripts/make-app.sh && bash -n scripts/codesign.sh && bash -n scripts/release.sh
@@ -50,17 +34,74 @@ jobs:
         optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
         version: 0.14.0
-    
-    - name: Build ${{ matrix.optimize }}
-      run: zig build -Doptimize=${{ matrix.optimize }}
-    
+
+    - name: Setup Code Signing Certificate
+      # Mirrors release.yml: imports skhd-cert from MACOS_CERTIFICATE so the
+      # uploaded skhd.app is signed with the same identity as tagged
+      # releases. Without this the bundle would be adhoc-signed and lose
+      # TCC accessibility grants on every install/upgrade.
+      env:
+        CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE }}
+        CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      run: |
+        if [ -z "$CERTIFICATE_P12" ]; then
+          echo "::error::MACOS_CERTIFICATE secret is not configured."
+          echo "::error::build-all uploads user-runnable artifacts and requires skhd-cert."
+          exit 1
+        fi
+
+        CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+        echo -n "$CERTIFICATE_P12" | base64 --decode -o $CERTIFICATE_PATH
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+        security import $CERTIFICATE_PATH -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security list-keychain -d user -s $KEYCHAIN_PATH
+
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+    - name: Build skhd.app (${{ matrix.optimize }})
+      run: |
+        zig build app -Doptimize=${{ matrix.optimize }}
+        mv zig-out/skhd.app skhd.app
+
+    - name: Code sign skhd.app
+      env:
+        SKHD_CERT: skhd-cert
+        SKHD_BUNDLE_ID: com.jackielii.skhd
+        SKHD_NO_AUTO_GENERATE_CERT: "1"
+      run: |
+        bash scripts/codesign.sh skhd.app
+        codesign --verify --verbose=2 skhd.app
+
+    - name: Verify bundle layout
+      run: |
+        test -f skhd.app/Contents/MacOS/skhd
+        test -f skhd.app/Contents/MacOS/skhd-grabber
+        test -f skhd.app/Contents/Info.plist
+        grep -q "<string>com.jackielii.skhd</string>" skhd.app/Contents/Info.plist
+        plutil -lint skhd.app/Contents/Info.plist
+
+    - name: Create tarball
+      run: tar -czf skhd-arm64-macos.tar.gz skhd.app
+
+    - name: Cleanup Keychain
+      if: always()
+      run: |
+        security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: skhd-${{ matrix.optimize }}
-        path: zig-out/bin/skhd
+        path: skhd-arm64-macos.tar.gz

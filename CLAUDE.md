@@ -12,14 +12,9 @@ This is a Zig port of skhd (Simple Hotkey Daemon for macOS). The project reimple
 # Build the project (creates executable in zig-out/bin/)
 zig build
 
-# Build in release mode with optimizations
-zig build -Doptimize=ReleaseFast
-zig build -Doptimize=ReleaseSmall
-zig build -Doptimize=ReleaseSafe
-
 # Run skhd locally (signed dev .app — bare binary can't be granted
 # Accessibility / Input Monitoring on Tahoe)
-zig build run -- [args]
+zig build run -- -V 2>&1 | tee /tmp/skhd.log
 
 # Run tests (use this — single-file `zig test` no longer works since
 # module tests now need build_options / grabber_protocol / plist imports)
@@ -33,7 +28,7 @@ zig build bench
 # `skhd --install-grabber` was run, stop the installed LaunchDaemon
 # first or it will hold the IPC socket:
 #     sudo launchctl bootout system/com.jackielii.skhd.grabber
-zig build run-grabber -- [args]
+zig build run-grabber 2>&1 | tee /tmp/skhd-grabber.log
 ```
 
 ## Architecture

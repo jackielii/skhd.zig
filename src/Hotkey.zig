@@ -231,21 +231,20 @@ pub const ProcessCommand = union(enum) {
     }
 };
 
-pub fn format(self: *const Hotkey, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    _ = fmt;
-    try writer.print("Hotkey{{", .{});
-    try writer.print("\n  mode_list: {{", .{});
+pub fn format(self: Hotkey, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.writeAll("Hotkey{");
+    try writer.writeAll("\n  mode_list: {");
     {
         var it = self.mode_list.iterator();
         while (it.next()) |kv| {
             try writer.print("{s},", .{kv.key_ptr.*.name});
         }
     }
-    try writer.print("}}", .{});
-    try writer.print("\n  flags: {}", .{self.flags});
+    try writer.writeAll("}");
+    try writer.print("\n  flags: {f}", .{self.flags});
     try writer.print("\n  key: {}", .{self.key});
     try writer.print("\n  process_mappings: {} entries", .{self.mappings.count()});
-    try writer.print("\n}}", .{});
+    try writer.writeAll("\n}");
 }
 
 pub fn add_process_command(self: *Hotkey, process_name: []const u8, command: []const u8) ProcessCommandError!void {

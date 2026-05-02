@@ -62,7 +62,7 @@ const Inbound = struct {
     fkeys_as_standard: ?bool = null,
 };
 
-pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult {
+pub fn serve(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream) !ServeResult {
     // Per-session state: the protocol expects hello first; record the
     // client uid for subsequent messages and reject anything else
     // before hello.
@@ -72,8 +72,13 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
     // the shared protocol declares valid.
     var buf: [protocol.max_frame_bytes]u8 = undefined;
 
+    var rbuf: [4096]u8 = undefined;
+    var sr = stream.reader(io, &rbuf);
+    var wbuf: [4096]u8 = undefined;
+    var sw = stream.writer(io, &wbuf);
+
     while (true) {
-        const n = protocol.readFrame(stream, &buf) catch |err| switch (err) {
+        const n = protocol.readFrame(&sr.interface, &buf) catch |err| switch (err) {
             error.EndOfStream => return .closed, // peer closed; end of session
             else => return err,
         };
@@ -81,7 +86,7 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
         var parsed = std.json.parseFromSlice(Inbound, allocator, buf[0..n], .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            try sendError(allocator, stream, "bad_json", @errorName(err));
+            try sendError(allocator, &sw, "bad_json", @errorName(err));
             return err;
         };
         defer parsed.deinit();
@@ -90,13 +95,13 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
         const kind = msg.type;
 
         if (std.mem.eql(u8, kind, "hello")) {
-            client_uid = try handleHello(allocator, stream, msg);
+            client_uid = try handleHello(allocator, &sw, msg);
         } else if (std.mem.eql(u8, kind, "apply_rules")) {
             if (client_uid == null) {
-                try sendError(allocator, stream, "no_hello", "send hello before apply_rules");
+                try sendError(allocator, &sw, "no_hello", "send hello before apply_rules");
                 return error.ProtocolViolation;
             }
-            const applied = try handleApplyRules(allocator, stream, msg, client_uid.?);
+            const applied = try handleApplyRules(allocator, &sw, msg, client_uid.?);
             if (applied) |a| {
                 // Hand the parsed rules back to the daemon along with
                 // ownership of the connection. The daemon turns this
@@ -107,30 +112,30 @@ pub fn serve(allocator: std.mem.Allocator, stream: std.net.Stream) !ServeResult 
             // Empty apply_rules clears the rule set. Continue
             // handling further messages on the same connection.
         } else if (std.mem.eql(u8, kind, "bye")) {
-            try sendOk(allocator, stream);
+            try sendOk(allocator, &sw);
             return .closed;
         } else {
-            try sendError(allocator, stream, "unknown_type", kind);
+            try sendError(allocator, &sw, "unknown_type", kind);
             return error.UnknownMessageType;
         }
     }
 }
 
-fn handleHello(allocator: std.mem.Allocator, stream: std.net.Stream, msg: Inbound) !u32 {
+fn handleHello(allocator: std.mem.Allocator, sw: *std.Io.net.Stream.Writer, msg: Inbound) !u32 {
     const uid = msg.uid orelse {
-        try sendError(allocator, stream, "bad_hello", "missing 'uid'");
+        try sendError(allocator, sw, "bad_hello", "missing 'uid'");
         return error.BadHello;
     };
     const version = msg.version orelse {
-        try sendError(allocator, stream, "bad_hello", "missing 'version'");
+        try sendError(allocator, sw, "bad_hello", "missing 'version'");
         return error.BadHello;
     };
     if (version != protocol.protocol_version) {
-        try sendError(allocator, stream, "version_mismatch", "agent and grabber differ on protocol version");
+        try sendError(allocator, sw, "version_mismatch", "agent and grabber differ on protocol version");
         return error.VersionMismatch;
     }
     log.info("hello from uid={d} version={d}", .{ uid, version });
-    try sendOk(allocator, stream);
+    try sendOk(allocator, sw);
     return uid;
 }
 
@@ -140,12 +145,12 @@ fn handleHello(allocator: std.mem.Allocator, stream: std.net.Stream, msg: Inboun
 /// keeps the connection open and waits for the next message.
 fn handleApplyRules(
     allocator: std.mem.Allocator,
-    stream: std.net.Stream,
+    sw: *std.Io.net.Stream.Writer,
     msg: Inbound,
     uid: u32,
 ) !?AppliedRules {
     const rules = msg.rules orelse {
-        try sendError(allocator, stream, "bad_apply", "missing 'rules'");
+        try sendError(allocator, sw, "bad_apply", "missing 'rules'");
         return error.BadApply;
     };
     const remaps = msg.remaps orelse &[_]protocol.Remap{};
@@ -169,7 +174,7 @@ fn handleApplyRules(
         );
     }
 
-    try sendOk(allocator, stream);
+    try sendOk(allocator, sw);
 
     if (rules.len == 0 and remaps.len == 0) return null;
 
@@ -200,15 +205,17 @@ fn handleApplyRules(
     };
 }
 
-fn sendOk(allocator: std.mem.Allocator, stream: std.net.Stream) !void {
-    try protocol.writeMessage(stream, allocator, .{ .type = "ok" });
+fn sendOk(allocator: std.mem.Allocator, sw: *std.Io.net.Stream.Writer) !void {
+    try protocol.writeMessage(&sw.interface, allocator, .{ .type = "ok" });
+    try sw.interface.flush();
 }
 
-fn sendError(allocator: std.mem.Allocator, stream: std.net.Stream, code: []const u8, message: []const u8) !void {
+fn sendError(allocator: std.mem.Allocator, sw: *std.Io.net.Stream.Writer, code: []const u8, message: []const u8) !void {
     log.warn("error: code={s} message={s}", .{ code, message });
-    try protocol.writeMessage(stream, allocator, .{
+    try protocol.writeMessage(&sw.interface, allocator, .{
         .type = "error",
         .code = code,
         .message = message,
     });
+    try sw.interface.flush();
 }

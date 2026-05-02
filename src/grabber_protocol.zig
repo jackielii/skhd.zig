@@ -72,61 +72,60 @@ pub const Rule = struct {
 /// Read one length-prefixed frame into `buf`. Returns the body length on
 /// success. Errors if peer closed cleanly (EndOfStream) or sent a frame
 /// larger than the caller-supplied buffer / `max_frame_bytes`.
-pub fn readFrame(stream: anytype, buf: []u8) !usize {
+pub fn readFrame(reader: *std.Io.Reader, buf: []u8) !usize {
     var len_bytes: [4]u8 = undefined;
-    try stream.reader().readNoEof(&len_bytes);
+    try reader.readSliceAll(&len_bytes);
     const len = std.mem.readInt(u32, &len_bytes, .big);
     if (len > max_frame_bytes) return error.FrameTooLarge;
     if (len > buf.len) return error.BufferTooSmall;
-    try stream.reader().readNoEof(buf[0..len]);
+    try reader.readSliceAll(buf[0..len]);
     return @intCast(len);
 }
 
 /// Write one length-prefixed frame.
-pub fn writeFrame(stream: anytype, body: []const u8) !void {
+pub fn writeFrame(writer: *std.Io.Writer, body: []const u8) !void {
     if (body.len > max_frame_bytes) return error.FrameTooLarge;
     var len_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_bytes, @intCast(body.len), .big);
-    try stream.writer().writeAll(&len_bytes);
-    try stream.writer().writeAll(body);
+    try writer.writeAll(&len_bytes);
+    try writer.writeAll(body);
 }
 
 /// Serialize an arbitrary value to JSON and send it as one framed
 /// message. Caller passes an anonymous struct literal that includes a
 /// `type` field — the value is serialized verbatim so callers control
 /// the wire shape.
-pub fn writeMessage(stream: anytype, allocator: std.mem.Allocator, value: anytype) !void {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try std.json.stringify(value, .{}, buf.writer());
-    try writeFrame(stream, buf.items);
+pub fn writeMessage(writer: *std.Io.Writer, allocator: std.mem.Allocator, value: anytype) !void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try std.json.Stringify.value(value, .{}, &aw.writer);
+    try writeFrame(writer, aw.written());
 }
 
 test "frame round-trip" {
     var pipe_buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&pipe_buf);
+    var w = std.Io.Writer.fixed(&pipe_buf);
+    try writeFrame(&w, "hello world");
 
-    try writeFrame(&fbs, "hello world");
-
-    fbs.reset();
+    var r = std.Io.Reader.fixed(w.buffered());
     var read_buf: [256]u8 = undefined;
-    const n = try readFrame(&fbs, &read_buf);
+    const n = try readFrame(&r, &read_buf);
     try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
 }
 
 test "writeMessage produces parseable JSON" {
     var pipe_buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&pipe_buf);
+    var w = std.Io.Writer.fixed(&pipe_buf);
 
-    try writeMessage(&fbs, std.testing.allocator, .{
+    try writeMessage(&w, std.testing.allocator, .{
         .@"type" = "hello",
         .uid = @as(u32, 501),
         .version = protocol_version,
     });
 
-    fbs.reset();
+    var r = std.Io.Reader.fixed(w.buffered());
     var read_buf: [256]u8 = undefined;
-    const n = try readFrame(&fbs, &read_buf);
+    const n = try readFrame(&r, &read_buf);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, read_buf[0..n], .{});
     defer parsed.deinit();

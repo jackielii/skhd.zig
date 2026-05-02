@@ -5,18 +5,20 @@ const CarbonEvent = @This();
 const log = std.log.scoped(.carbon_event);
 
 allocator: std.mem.Allocator,
+io: std.Io,
 handler_ref: c.EventHandlerRef,
 event_type: c.EventTypeSpec,
 process_buffer: [512]u8 = undefined,
 buffer_len: usize = 0,
-mutex: std.Thread.Mutex = .{},
+mutex: std.Io.Mutex = .init,
 
-pub fn init(allocator: std.mem.Allocator) !*CarbonEvent {
+pub fn init(allocator: std.mem.Allocator, io: std.Io) !*CarbonEvent {
     const self = try allocator.create(CarbonEvent);
     errdefer allocator.destroy(self);
 
     self.* = CarbonEvent{
         .allocator = allocator,
+        .io = io,
         .handler_ref = undefined,
         .event_type = .{
             .eventClass = c.kEventClassApplication,
@@ -31,7 +33,7 @@ pub fn init(allocator: std.mem.Allocator) !*CarbonEvent {
     const status = c.InstallApplicationEventHandler(
         carbonEventHandler,
         1,
-        &self.event_type,
+        @ptrCast(&self.event_type),
         self,
         &self.handler_ref,
     );
@@ -53,8 +55,8 @@ pub fn deinit(self: *CarbonEvent) void {
 
 /// Get the cached process name (thread-safe)
 pub fn getProcessName(self: *CarbonEvent) []const u8 {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
     // Return "unknown" if we don't have a process name
     if (self.buffer_len == 0) {
@@ -67,8 +69,8 @@ pub fn getProcessName(self: *CarbonEvent) []const u8 {
 fn updateProcessName(self: *CarbonEvent) !void {
     var psn: c.ProcessSerialNumber = undefined;
 
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
     const status = c.GetFrontProcess(&psn);
     if (status != c.noErr) {

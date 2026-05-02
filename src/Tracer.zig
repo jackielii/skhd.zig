@@ -8,228 +8,195 @@ const Tracer = @This();
 
 pub const TracerStats = struct {
     // Event handling
-    total_key_events: u64 = 0,
-    key_down_events: u64 = 0,
-    system_key_events: u64 = 0,
+    total_key_events: std.atomic.Value(u64) = .init(0),
+    key_down_events: std.atomic.Value(u64) = .init(0),
+    system_key_events: std.atomic.Value(u64) = .init(0),
 
     // Process name lookups
-    process_name_lookups: u64 = 0,
-    process_name_cache_hits: u64 = 0,
+    process_name_lookups: std.atomic.Value(u64) = .init(0),
+    process_name_cache_hits: std.atomic.Value(u64) = .init(0),
 
     // Hotkey lookups
-    hotkey_lookups: u64 = 0,
-    hotkey_found: u64 = 0,
-    hotkey_not_found: u64 = 0,
-    hotkey_comparisons: u64 = 0,
+    hotkey_lookups: std.atomic.Value(u64) = .init(0),
+    hotkey_found: std.atomic.Value(u64) = .init(0),
+    hotkey_not_found: std.atomic.Value(u64) = .init(0),
+    hotkey_comparisons: std.atomic.Value(u64) = .init(0),
 
     // Actions taken
-    keys_forwarded: u64 = 0,
-    commands_executed: u64 = 0,
+    keys_forwarded: std.atomic.Value(u64) = .init(0),
+    commands_executed: std.atomic.Value(u64) = .init(0),
 
     // Early exits
-    no_mode_exits: u64 = 0,
-    blacklisted_exits: u64 = 0,
-    self_generated_exits: u64 = 0,
+    no_mode_exits: std.atomic.Value(u64) = .init(0),
+    blacklisted_exits: std.atomic.Value(u64) = .init(0),
+    self_generated_exits: std.atomic.Value(u64) = .init(0),
 
     // Linear search details
-    linear_search_iterations: u64 = 0,
-    max_linear_search_depth: u64 = 0,
+    linear_search_iterations: std.atomic.Value(u64) = .init(0),
+    max_linear_search_depth: std.atomic.Value(u64) = .init(0),
 };
 
 enabled: bool,
-stats: TracerStats,
-mutex: std.Thread.Mutex,
+stats: TracerStats = .{},
 
 pub fn init(enabled: bool) Tracer {
-    return .{
-        .enabled = enabled,
-        .stats = .{},
-        .mutex = .{},
-    };
+    return .{ .enabled = enabled };
+}
+
+inline fn add(self: *Tracer, comptime field: []const u8, n: u64) void {
+    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
+    if (!self.enabled) return;
+    _ = @field(self.stats, field).fetchAdd(n, .monotonic);
 }
 
 // Event tracking
 pub fn traceKeyEvent(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.total_key_events += 1;
+    self.add("total_key_events", 1);
 }
 
 pub fn traceKeyDown(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.key_down_events += 1;
+    self.add("key_down_events", 1);
 }
 
 pub fn traceSystemKey(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.system_key_events += 1;
+    self.add("system_key_events", 1);
 }
 
 // Process name tracking
 pub fn traceProcessNameLookup(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.process_name_lookups += 1;
+    self.add("process_name_lookups", 1);
 }
 
 // Hotkey lookup tracking
 pub fn traceHotkeyLookup(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.hotkey_lookups += 1;
+    self.add("hotkey_lookups", 1);
 }
 
 pub fn traceHotkeyFound(self: *Tracer, found: bool) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    if (found) {
-        self.stats.hotkey_found += 1;
-    } else {
-        self.stats.hotkey_not_found += 1;
-    }
+    if (found) self.add("hotkey_found", 1) else self.add("hotkey_not_found", 1);
 }
 
 pub fn traceHotkeyComparison(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.hotkey_comparisons += 1;
+    self.add("hotkey_comparisons", 1);
 }
 
 // Linear search tracking
 pub fn traceLinearSearchIterations(self: *Tracer, iterations: u64) void {
     if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.linear_search_iterations += iterations;
-    if (iterations > self.stats.max_linear_search_depth) {
-        self.stats.max_linear_search_depth = iterations;
+    _ = self.stats.linear_search_iterations.fetchAdd(iterations, .monotonic);
+    // Bump max_linear_search_depth using a CAS loop. Two tracer threads
+    // racing on the max would otherwise let a smaller value win.
+    var current = self.stats.max_linear_search_depth.load(.monotonic);
+    while (iterations > current) {
+        current = self.stats.max_linear_search_depth.cmpxchgWeak(
+            current,
+            iterations,
+            .monotonic,
+            .monotonic,
+        ) orelse break;
     }
 }
 
 // Action tracking
 pub fn traceKeyForwarded(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.keys_forwarded += 1;
+    self.add("keys_forwarded", 1);
 }
 
 pub fn traceCommandExecuted(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.commands_executed += 1;
+    self.add("commands_executed", 1);
 }
 
 // Early exit tracking
 pub fn traceNoModeExit(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.no_mode_exits += 1;
+    self.add("no_mode_exits", 1);
 }
 
 pub fn traceBlacklistedExit(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.blacklisted_exits += 1;
+    self.add("blacklisted_exits", 1);
 }
 
 pub fn traceSelfGeneratedExit(self: *Tracer) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
-    if (!self.enabled) return;
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.stats.self_generated_exits += 1;
+    self.add("self_generated_exits", 1);
 }
 
 // Print summary statistics
-pub fn printSummary(self: *Tracer, writer: anytype) !void {
+pub fn printSummary(self: *Tracer, w: *std.Io.Writer) std.Io.Writer.Error!void {
     if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
     if (!self.enabled) return;
 
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
     const s = &self.stats;
+    const total_key_events = s.total_key_events.load(.monotonic);
+    const key_down_events = s.key_down_events.load(.monotonic);
+    const system_key_events = s.system_key_events.load(.monotonic);
+    const process_name_lookups = s.process_name_lookups.load(.monotonic);
+    const hotkey_lookups = s.hotkey_lookups.load(.monotonic);
+    const hotkey_found = s.hotkey_found.load(.monotonic);
+    const hotkey_not_found = s.hotkey_not_found.load(.monotonic);
+    const hotkey_comparisons = s.hotkey_comparisons.load(.monotonic);
+    const linear_search_iterations = s.linear_search_iterations.load(.monotonic);
+    const max_linear_search_depth = s.max_linear_search_depth.load(.monotonic);
+    const keys_forwarded = s.keys_forwarded.load(.monotonic);
+    const commands_executed = s.commands_executed.load(.monotonic);
+    const no_mode_exits = s.no_mode_exits.load(.monotonic);
+    const blacklisted_exits = s.blacklisted_exits.load(.monotonic);
+    const self_generated_exits = s.self_generated_exits.load(.monotonic);
 
-    try writer.print("\n=== SKHD Execution Trace Summary ===\n", .{});
-    try writer.print("\nEvent Statistics:\n", .{});
-    try writer.print("  Total key events:     {d}\n", .{s.total_key_events});
-    try writer.print("  Key down events:      {d}\n", .{s.key_down_events});
-    try writer.print("  System key events:    {d}\n", .{s.system_key_events});
+    try w.print("\n=== SKHD Execution Trace Summary ===\n", .{});
+    try w.print("\nEvent Statistics:\n", .{});
+    try w.print("  Total key events:     {d}\n", .{total_key_events});
+    try w.print("  Key down events:      {d}\n", .{key_down_events});
+    try w.print("  System key events:    {d}\n", .{system_key_events});
 
-    try writer.print("\nEarly Exits:\n", .{});
-    try writer.print("  No mode exits:       {d}\n", .{s.no_mode_exits});
-    try writer.print("  Blacklisted exits:   {d}\n", .{s.blacklisted_exits});
-    try writer.print("  Self-generated exits: {d}\n", .{s.self_generated_exits});
+    try w.print("\nEarly Exits:\n", .{});
+    try w.print("  No mode exits:       {d}\n", .{no_mode_exits});
+    try w.print("  Blacklisted exits:   {d}\n", .{blacklisted_exits});
+    try w.print("  Self-generated exits: {d}\n", .{self_generated_exits});
 
-    try writer.print("\nProcess Name Lookups:\n", .{});
-    try writer.print("  Total lookups:        {d}\n", .{s.process_name_lookups});
-    const lookups_per_event = if (s.total_key_events > 0)
-        @as(f64, @floatFromInt(s.process_name_lookups)) / @as(f64, @floatFromInt(s.total_key_events))
+    try w.print("\nProcess Name Lookups:\n", .{});
+    try w.print("  Total lookups:        {d}\n", .{process_name_lookups});
+    const lookups_per_event = if (total_key_events > 0)
+        @as(f64, @floatFromInt(process_name_lookups)) / @as(f64, @floatFromInt(total_key_events))
     else
         0.0;
-    try writer.print("  Lookups per event:    {d:.2}\n", .{lookups_per_event});
+    try w.print("  Lookups per event:    {d:.2}\n", .{lookups_per_event});
 
-    try writer.print("\nHotkey Lookups:\n", .{});
-    try writer.print("  Total lookups:        {d}\n", .{s.hotkey_lookups});
-    try writer.print("  Hotkeys found:        {d}\n", .{s.hotkey_found});
-    try writer.print("  Hotkeys not found:    {d}\n", .{s.hotkey_not_found});
-    try writer.print("  Total comparisons:    {d}\n", .{s.hotkey_comparisons});
+    try w.print("\nHotkey Lookups:\n", .{});
+    try w.print("  Total lookups:        {d}\n", .{hotkey_lookups});
+    try w.print("  Hotkeys found:        {d}\n", .{hotkey_found});
+    try w.print("  Hotkeys not found:    {d}\n", .{hotkey_not_found});
+    try w.print("  Total comparisons:    {d}\n", .{hotkey_comparisons});
 
-    const avg_comparisons = if (s.hotkey_lookups > 0)
-        @as(f64, @floatFromInt(s.hotkey_comparisons)) / @as(f64, @floatFromInt(s.hotkey_lookups))
+    const avg_comparisons = if (hotkey_lookups > 0)
+        @as(f64, @floatFromInt(hotkey_comparisons)) / @as(f64, @floatFromInt(hotkey_lookups))
     else
         0.0;
-    try writer.print("  Avg comparisons/lookup: {d:.2}\n", .{avg_comparisons});
+    try w.print("  Avg comparisons/lookup: {d:.2}\n", .{avg_comparisons});
 
-    const avg_iterations = if (s.hotkey_lookups > 0)
-        @as(f64, @floatFromInt(s.linear_search_iterations)) / @as(f64, @floatFromInt(s.hotkey_lookups))
+    const avg_iterations = if (hotkey_lookups > 0)
+        @as(f64, @floatFromInt(linear_search_iterations)) / @as(f64, @floatFromInt(hotkey_lookups))
     else
         0.0;
-    try writer.print("  Avg linear iterations: {d:.2}\n", .{avg_iterations});
-    try writer.print("  Max linear depth:     {d}\n", .{s.max_linear_search_depth});
+    try w.print("  Avg linear iterations: {d:.2}\n", .{avg_iterations});
+    try w.print("  Max linear depth:     {d}\n", .{max_linear_search_depth});
 
-    try writer.print("\nActions:\n", .{});
-    try writer.print("  Keys forwarded:       {d}\n", .{s.keys_forwarded});
-    try writer.print("  Commands executed:    {d}\n", .{s.commands_executed});
+    try w.print("\nActions:\n", .{});
+    try w.print("  Keys forwarded:       {d}\n", .{keys_forwarded});
+    try w.print("  Commands executed:    {d}\n", .{commands_executed});
 
     // Performance insights
-    try writer.print("\n=== Performance Insights ===\n", .{});
+    try w.print("\n=== Performance Insights ===\n", .{});
 
-    const hit_rate = if (s.hotkey_lookups > 0)
-        (@as(f64, @floatFromInt(s.hotkey_found)) / @as(f64, @floatFromInt(s.hotkey_lookups))) * 100.0
+    const hit_rate = if (hotkey_lookups > 0)
+        (@as(f64, @floatFromInt(hotkey_found)) / @as(f64, @floatFromInt(hotkey_lookups))) * 100.0
     else
         0.0;
-    try writer.print("Hotkey hit rate: {d:.1}%\n", .{hit_rate});
+    try w.print("Hotkey hit rate: {d:.1}%\n", .{hit_rate});
 
-    const wasted_lookups = s.process_name_lookups - (s.total_key_events - s.no_mode_exits - s.self_generated_exits);
+    const wasted_lookups = process_name_lookups -| (total_key_events - no_mode_exits - self_generated_exits);
     if (wasted_lookups > 0) {
-        try writer.print("Potentially wasted process lookups: {d}\n", .{wasted_lookups});
+        try w.print("Potentially wasted process lookups: {d}\n", .{wasted_lookups});
     }
 
-    try writer.print("\n", .{});
+    try w.print("\n", .{});
 }

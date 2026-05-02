@@ -9,7 +9,7 @@ pub const ParseError = struct {
     file_path: ?[]const u8,
     token_text: ?[]const u8,
 
-    pub fn format(self: ParseError, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: ParseError, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.file_path) |path| {
             try writer.print("{s}:", .{path});
         }

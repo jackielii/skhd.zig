@@ -15,7 +15,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.14.0
+        version: 0.16.0
 
     - name: Run tests
       run: zig build test
@@ -38,7 +38,7 @@ jobs:
     - name: Setup Zig
       uses: mlugg/setup-zig@v2
       with:
-        version: 0.14.0
+        version: 0.16.0
 
     - name: Setup Code Signing Certificate
       # Mirrors release.yml: imports skhd-cert from MACOS_CERTIFICATE so the

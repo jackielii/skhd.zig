@@ -71,17 +71,15 @@ pub const ModifierFlag = packed struct(u32) {
         const m: u32 = @bitCast(copy);
         return m == 0;
     }
-    pub fn format(self: *const ModifierFlag, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-
+    pub fn format(self: ModifierFlag, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         var i: u32 = 0;
         inline for (@typeInfo(@This()).@"struct".fields) |field| {
             const name = field.name;
             if (field.type != bool) continue;
             const value = @field(self, name);
             if (value) {
-                if (i != 0) try writer.print(", ", .{});
-                try writer.print("{s}", .{name});
+                if (i != 0) try writer.writeAll(", ");
+                try writer.writeAll(name);
                 i += 1;
             }
         }
@@ -91,7 +89,7 @@ pub const ModifierFlag = packed struct(u32) {
 test "format ModifierFlag" {
     const flag = ModifierFlag{ .alt = true, .shift = true };
     // Verify formatting works without printing
-    const formatted = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{flag});
+    const formatted = try std.fmt.allocPrint(std.testing.allocator, "{f}", .{flag});
     defer std.testing.allocator.free(formatted);
     try std.testing.expectEqualStrings("alt, shift", formatted);
 }
@@ -282,7 +280,7 @@ fn copy_cfstring(alloc: std.mem.Allocator, cfstring: c.CFStringRef) ![]u8 {
 
     // Pass the actual buffer size (buffer.len), not num_bytes
     // CFStringGetCString needs the full buffer size to work correctly
-    if (c.CFStringGetCString(cfstring, &buffer, buffer.len, c.kCFStringEncodingUTF8) == c.false) {
+    if (c.CFStringGetCString(cfstring, &buffer, buffer.len, c.kCFStringEncodingUTF8) == 0) {
         return error.@"Failed to copy CFString";
     }
 
@@ -386,9 +384,9 @@ test "copy_cfstring with Unicode characters" {
 /// Format modifier flags and key into a human-readable string using a stack buffer
 /// Returns a slice pointing into the provided buffer
 pub fn formatKeyPressBuffer(buf: []u8, flags: ModifierFlag, keyCode: u32) ![]const u8 {
-    var stream = std.io.fixedBufferStream(buf);
-    const writer = stream.writer();
-    
+    var stream = std.Io.Writer.fixed(buf);
+    const writer = &stream;
+
     var has_modifiers = false;
     
     // Add modifiers in a consistent order
@@ -447,7 +445,7 @@ pub fn formatKeyPressBuffer(buf: []u8, flags: ModifierFlag, keyCode: u32) ![]con
         try writer.print("{s}", .{key});
     }
     
-    return stream.getWritten();
+    return stream.buffered();
 }
 
 /// Get a human-readable string representation of a keycode

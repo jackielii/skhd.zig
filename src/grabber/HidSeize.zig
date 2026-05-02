@@ -277,7 +277,7 @@ fn valueCallback(
     result: c.IOReturn,
     sender: ?*anyopaque,
     value: c.IOHIDValueRef,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = sender;
     if (result != c.kIOReturnSuccess) return;
     const self: *Self = @ptrCast(@alignCast(ctx orelse return));

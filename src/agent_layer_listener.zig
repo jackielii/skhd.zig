@@ -28,6 +28,7 @@ pub const DisconnectCallback = *const fn (ctx: ?*anyopaque) void;
 
 pub const Listener = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     fd: c_int,
     cb: ModeCallback,
     cb_ctx: ?*anyopaque,
@@ -42,6 +43,7 @@ pub const Listener = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         socket_fd: c_int,
         cb: ModeCallback,
         cb_ctx: ?*anyopaque,
@@ -74,6 +76,7 @@ pub const Listener = struct {
 
         self.* = .{
             .allocator = allocator,
+            .io = io,
             .fd = socket_fd,
             .cb = cb,
             .cb_ctx = cb_ctx,
@@ -101,15 +104,20 @@ fn cfFdCallback(
     cf_fd: c.CFFileDescriptorRef,
     callback_types: c.CFOptionFlags,
     info: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = callback_types;
     const self: *Listener = @ptrCast(@alignCast(info orelse return));
 
     // Read one framed JSON message. Length prefix is 4 bytes; body
     // typically tens of bytes for mode_change.
     var buf: [4096]u8 = undefined;
-    const stream = std.net.Stream{ .handle = self.fd };
-    const n = protocol.readFrame(stream, &buf) catch |err| switch (err) {
+    const stream: std.Io.net.Stream = .{ .socket = .{
+        .handle = self.fd,
+        .address = .{ .ip4 = .loopback(0) },
+    } };
+    var rbuf: [256]u8 = undefined;
+    var sr = stream.reader(self.io, &rbuf);
+    const n = protocol.readFrame(&sr.interface, &buf) catch |err| switch (err) {
         error.EndOfStream => {
             if (!self.disconnected) {
                 self.disconnected = true;

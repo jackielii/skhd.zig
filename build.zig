@@ -1,32 +1,69 @@
 const std = @import("std");
 
-fn linkFrameworks(b: *std.Build, exe: *std.Build.Step.Compile) void {
-    // Explicit os_version_min flips Zig out of "native" mode, so it stops
-    // auto-adding the macOS SDK to the framework search path. Re-add it
-    // from the SDK path stashed by build().
-    if (sdk_path) |sdk| {
-        exe.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
-        exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
-        exe.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
-    }
-    exe.linkFramework("Cocoa");
-    exe.linkFramework("Carbon");
-    exe.linkFramework("CoreServices");
-    // ServiceManagement: SMAppService.agent / register / unregister, used
-    // by --register-service to register the bundled LaunchAgent with BTM.
-    exe.linkFramework("ServiceManagement");
-    // IOKit: IOHIDManager enumeration in DeviceCheck.zig (decides
-    // whether to dial the grabber based on connected devices).
-    exe.linkFramework("IOKit");
-}
-
 // macOS SDK path resolved once via xcrun and reused for every artifact's
 // framework / include / library search paths.
 var sdk_path: ?[]const u8 = null;
 
-fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
-    // Get build mode string
-    const mode_str = switch (exe.root_module.optimize.?) {
+fn addSdkPaths(b: *std.Build, mod: *std.Build.Module) void {
+    // Explicit os_version_min flips Zig out of "native" mode, so it stops
+    // auto-adding the macOS SDK to the framework search path. Re-add it
+    // from the SDK path stashed by build().
+    //
+    // Zig 0.16 dropped the Apple subframework auto-discovery that translate-c
+    // used to rely on, so umbrella headers like `<Carbon/Carbon.h>` no longer
+    // expand. `c.zig` is pinned to specific subframework headers, but those
+    // subframeworks (HIToolbox, HIServices, FSEvents, ATS, …) are nested
+    // under their parent framework's `Frameworks/` directory and need
+    // additional `-iframework`/`-F` paths to resolve.
+    if (sdk_path) |sdk| {
+        const fw = b.fmt("{s}/System/Library/Frameworks", .{sdk});
+        mod.addSystemFrameworkPath(.{ .cwd_relative = fw });
+        mod.addFrameworkPath(.{ .cwd_relative = fw });
+        mod.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
+        mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+
+        const sub_framework_dirs = [_][]const u8{
+            "System/Library/Frameworks/CoreServices.framework/Frameworks",
+            "System/Library/Frameworks/ApplicationServices.framework/Frameworks",
+            "System/Library/Frameworks/Carbon.framework/Frameworks",
+        };
+        for (sub_framework_dirs) |rel| {
+            const path = b.fmt("{s}/{s}", .{ sdk, rel });
+            mod.addSystemFrameworkPath(.{ .cwd_relative = path });
+            mod.addFrameworkPath(.{ .cwd_relative = path });
+        }
+    }
+}
+
+fn linkAgentFrameworks(b: *std.Build, mod: *std.Build.Module) void {
+    addSdkPaths(b, mod);
+    mod.linkFramework("Cocoa", .{});
+    mod.linkFramework("Carbon", .{});
+    mod.linkFramework("CoreServices", .{});
+    // ServiceManagement: SMAppService.agent / register / unregister, used
+    // by --register-service to register the bundled LaunchAgent with BTM.
+    mod.linkFramework("ServiceManagement", .{});
+    // IOKit: IOHIDManager enumeration in DeviceCheck.zig (decides
+    // whether to dial the grabber based on connected devices).
+    mod.linkFramework("IOKit", .{});
+}
+
+fn linkGrabberFrameworks(b: *std.Build, mod: *std.Build.Module) void {
+    addSdkPaths(b, mod);
+    mod.linkFramework("IOKit", .{});
+    mod.linkFramework("CoreFoundation", .{});
+    // CoreGraphics for CGEventSourceFlagsState — used to detect when
+    // Apple firmware has toggled caps_lock against our intent so we
+    // can flip it back via a vhidd-injected caps_lock toggle.
+    mod.linkFramework("CoreGraphics", .{});
+    // SystemConfiguration for SCDynamicStoreCopyConsoleUser — D5
+    // tracks the active console user and only applies rules from
+    // their agent. Multi-user / fast-user-switching support.
+    mod.linkFramework("SystemConfiguration", .{});
+}
+
+fn addVersionImport(b: *std.Build, mod: *std.Build.Module) void {
+    const mode_str = switch (mod.optimize.?) {
         .Debug => "debug",
         .ReleaseSafe => "safe",
         .ReleaseFast => "fast",
@@ -56,8 +93,8 @@ fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
     });
     version_step.has_side_effects = true;
 
-    const version_file = version_step.captureStdOut();
-    exe.root_module.addAnonymousImport("VERSION", .{
+    const version_file = version_step.captureStdOut(.{});
+    mod.addAnonymousImport("VERSION", .{
         .root_source_file = version_file,
     });
 }
@@ -67,11 +104,11 @@ fn addVersionImport(b: *std.Build, exe: *std.Build.Step.Compile) void {
 /// the right shape (Zig restricts `@embedFile` to within the module's
 /// package). Call this on every binary that links grabber_cli (currently
 /// skhd, skhd-alloc, and unit-test executables).
-fn addGrabberPlistImports(b: *std.Build, exe: *std.Build.Step.Compile) void {
-    exe.root_module.addAnonymousImport("grabber_plist", .{
+fn addGrabberPlistImports(b: *std.Build, mod: *std.Build.Module) void {
+    mod.addAnonymousImport("grabber_plist", .{
         .root_source_file = b.path("scripts/com.jackielii.skhd.grabber.plist"),
     });
-    exe.root_module.addAnonymousImport("vhidd_plist", .{
+    mod.addAnonymousImport("vhidd_plist", .{
         .root_source_file = b.path("assets/karabiner-virtualhiddevice-daemon.plist"),
     });
 }
@@ -89,6 +126,15 @@ const track_alloc_option = "track_alloc";
 const karabiner_dext_version = "6.14.0";
 const karabiner_dext_url = "https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice/releases/download/v" ++ karabiner_dext_version ++ "/Karabiner-DriverKit-VirtualHIDDevice-" ++ karabiner_dext_version ++ ".pkg";
 const karabiner_dext_sha256 = "ebfb6a643ea98bb7c2e08a4f99353b2a3129e397f4302340443bbd936f12eb1c";
+
+fn addBuildOptions(b: *std.Build, track_alloc: bool) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption(bool, track_alloc_option, track_alloc);
+    options.addOption([]const u8, "karabiner_dext_version", karabiner_dext_version);
+    options.addOption([]const u8, "karabiner_dext_url", karabiner_dext_url);
+    options.addOption([]const u8, "karabiner_dext_sha256", karabiner_dext_sha256);
+    return options;
+}
 
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
@@ -111,8 +157,9 @@ pub fn build(b: *std.Build) void {
     // Setting os_version_min above makes Zig treat the target as non-native
     // and stop auto-resolving the macOS SDK, so framework links fail. Probe
     // xcrun for the SDK and add its paths to every artifact via
-    // linkFrameworks. Setting b.sysroot would double-prefix paths added with
-    // cwd_relative, so we stash the SDK path in a module-level var instead.
+    // linkAgentFrameworks/linkGrabberFrameworks. Setting b.sysroot would
+    // double-prefix paths added with cwd_relative, so we stash the SDK path
+    // in a module-level var instead.
     if (target.result.os.tag == .macos) {
         const out = b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" });
         sdk_path = std.mem.trim(u8, out, " \n\r\t");
@@ -127,55 +174,41 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-
     // Main executable
-    const exe = b.addExecutable(.{
-        .name = "skhd",
+    const exe_options = addBuildOptions(b, false);
+    const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    linkAgentFrameworks(b, exe_mod);
+    addVersionImport(b, exe_mod);
+    addGrabberPlistImports(b, exe_mod);
+    exe_mod.addOptions("build_options", exe_options);
+    exe_mod.addImport("grabber_protocol", grabber_protocol_mod);
 
-    const options = b.addOptions();
-    options.addOption(bool, track_alloc_option, false);
-    options.addOption([]const u8, "karabiner_dext_version", karabiner_dext_version);
-    options.addOption([]const u8, "karabiner_dext_url", karabiner_dext_url);
-    options.addOption([]const u8, "karabiner_dext_sha256", karabiner_dext_sha256);
-
-    linkFrameworks(b, exe);
-    addVersionImport(b, exe);
-    addGrabberPlistImports(b, exe);
-    exe.root_module.addOptions("build_options", options);
-    exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
-
+    const exe = b.addExecutable(.{
+        .name = "skhd",
+        .root_module = exe_mod,
+    });
     b.installArtifact(exe);
 
     // skhd-grabber: system daemon (root) for caps_lock-class tap-hold.
     // Plain Mach-O — installed by `skhd --install-grabber` to
     // /usr/local/libexec/skhd-grabber and started by launchd. Needs
     // IOKit (D3 seize + run loop) and CoreFoundation (matching dicts).
-    const grabber_exe = b.addExecutable(.{
-        .name = "skhd-grabber",
+    const grabber_mod = b.createModule(.{
         .root_source_file = b.path("src/grabber/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    if (sdk_path) |sdk| {
-        grabber_exe.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
-        grabber_exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
-        grabber_exe.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
-    }
-    grabber_exe.linkFramework("IOKit");
-    grabber_exe.linkFramework("CoreFoundation");
-    // CoreGraphics for CGEventSourceFlagsState — used to detect when
-    // Apple firmware has toggled caps_lock against our intent so we
-    // can flip it back via a vhidd-injected caps_lock toggle.
-    grabber_exe.linkFramework("CoreGraphics");
-    // SystemConfiguration for SCDynamicStoreCopyConsoleUser — D5
-    // tracks the active console user and only applies rules from
-    // their agent. Multi-user / fast-user-switching support.
-    grabber_exe.linkFramework("SystemConfiguration");
-    grabber_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
+    linkGrabberFrameworks(b, grabber_mod);
+    grabber_mod.addImport("grabber_protocol", grabber_protocol_mod);
+
+    const grabber_exe = b.addExecutable(.{
+        .name = "skhd-grabber",
+        .root_module = grabber_mod,
+    });
     b.installArtifact(grabber_exe);
 
     // `zig build grabber-app` — build the grabber binary, wrap it in
@@ -321,12 +354,11 @@ pub fn build(b: *std.Build) void {
 
     // `zig build install-local` — stage the local build into the slot a
     // brew install would occupy: replace the binary inside
-    // /Applications/skhd.app and re-sign with skhd-cert + prod bundle id.
-    // Stops the SMAppService daemon during the swap but does not restart
-    // it — run `skhd --start-service` when ready. Lets you exercise the
-    // packaged path (real bundle id, real launchd registration, real TCC
-    // slot) without cutting a release. Pass -Doptimize=ReleaseFast to
-    // match the brew binary's perf profile.
+    // /Applications/skhd.app, re-sign with skhd-cert + prod bundle id, and
+    // restart the SMAppService daemon. Lets you exercise the packaged path
+    // (real bundle id, real launchd registration, real TCC slot) without
+    // cutting a release. Pass -Doptimize=ReleaseFast to match the brew
+    // binary's perf profile.
     const install_local_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
         "scripts/install-local.sh",
@@ -334,7 +366,7 @@ pub fn build(b: *std.Build) void {
     install_local_cmd.addArg(installed_exe);
     install_local_cmd.step.dependOn(b.getInstallStep());
 
-    const install_local_step = b.step("install-local", "Install the local build into /Applications/skhd.app (test the packaged path without releasing; does not start the service)");
+    const install_local_step = b.step("install-local", "Install the local build into /Applications/skhd.app and restart the service (test the packaged path without releasing)");
     install_local_step.dependOn(&install_local_cmd.step);
 
     // `zig build install-dext` — download + install the pinned Karabiner
@@ -354,20 +386,24 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
 
     // Benchmark executable
-    const bench_exe = b.addExecutable(.{
-        .name = "benchmark",
+    const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/benchmark.zig"),
         .target = target,
         .optimize = .ReleaseFast,
     });
-    linkFrameworks(b, bench_exe);
-    addVersionImport(b, bench_exe);
+    linkAgentFrameworks(b, bench_mod);
+    addVersionImport(b, bench_mod);
 
     const zbench = b.dependency("zbench", .{
         .target = target,
         .optimize = .ReleaseFast,
     });
-    bench_exe.root_module.addImport("zbench", zbench.module("zbench"));
+    bench_mod.addImport("zbench", zbench.module("zbench"));
+
+    const bench_exe = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = bench_mod,
+    });
 
     const bench_cmd = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run benchmarks");
@@ -379,23 +415,22 @@ pub fn build(b: *std.Build) void {
     // there's only one TCC slot to manage; the .app's inner binary swaps
     // between the regular dev build and the alloc-tracking build depending
     // on which step you run last.
-    const alloc_exe = b.addExecutable(.{
-        .name = "skhd-alloc",
+    const alloc_options = addBuildOptions(b, true);
+    const alloc_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    linkFrameworks(b, alloc_exe);
-    addVersionImport(b, alloc_exe);
-    addGrabberPlistImports(b, alloc_exe);
+    linkAgentFrameworks(b, alloc_mod);
+    addVersionImport(b, alloc_mod);
+    addGrabberPlistImports(b, alloc_mod);
+    alloc_mod.addOptions("build_options", alloc_options);
+    alloc_mod.addImport("grabber_protocol", grabber_protocol_mod);
 
-    const alloc_options = b.addOptions();
-    alloc_options.addOption(bool, track_alloc_option, true);
-    alloc_options.addOption([]const u8, "karabiner_dext_version", karabiner_dext_version);
-    alloc_options.addOption([]const u8, "karabiner_dext_url", karabiner_dext_url);
-    alloc_options.addOption([]const u8, "karabiner_dext_sha256", karabiner_dext_sha256);
-    alloc_exe.root_module.addOptions("build_options", alloc_options);
-    alloc_exe.root_module.addImport("grabber_protocol", grabber_protocol_mod);
+    const alloc_exe = b.addExecutable(.{
+        .name = "skhd-alloc",
+        .root_module = alloc_mod,
+    });
     b.installArtifact(alloc_exe);
     const installed_alloc_exe = b.getInstallPath(.bin, alloc_exe.name);
 
@@ -425,32 +460,39 @@ pub fn build(b: *std.Build) void {
     const alloc_step = b.step("alloc", "Run skhd with allocation logging (signed dev .app)");
     alloc_step.dependOn(&alloc_cmd.step);
 
-    // Tests for main.zig
-    const exe_unit_tests = b.addTest(.{
+    // Unit tests for main.zig
+    const exe_test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    linkFrameworks(b, exe_unit_tests);
-    addVersionImport(b, exe_unit_tests);
-    addGrabberPlistImports(b, exe_unit_tests);
+    linkAgentFrameworks(b, exe_test_mod);
+    addVersionImport(b, exe_test_mod);
+    addGrabberPlistImports(b, exe_test_mod);
+    exe_test_mod.addOptions("build_options", exe_options);
+    exe_test_mod.addImport("grabber_protocol", grabber_protocol_mod);
 
-    exe_unit_tests.root_module.addOptions("build_options", options);
-    exe_unit_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
+    const exe_unit_tests = b.addTest(.{
+        .root_module = exe_test_mod,
+    });
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     test_step.dependOn(&run_exe_unit_tests.step);
 
-    // Tests for tests.zig
-    const tests_unit_tests = b.addTest(.{
+    // Integration tests in src/tests.zig
+    const tests_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    linkFrameworks(b, tests_unit_tests);
-    addVersionImport(b, exe_unit_tests);
-    addGrabberPlistImports(b, tests_unit_tests);
-    tests_unit_tests.root_module.addOptions("build_options", options);
-    tests_unit_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
+    linkAgentFrameworks(b, tests_mod);
+    addVersionImport(b, tests_mod);
+    addGrabberPlistImports(b, tests_mod);
+    tests_mod.addOptions("build_options", exe_options);
+    tests_mod.addImport("grabber_protocol", grabber_protocol_mod);
+
+    const tests_unit_tests = b.addTest(.{
+        .root_module = tests_mod,
+    });
     const run_tests_unit_tests = b.addRunArtifact(tests_unit_tests);
     test_step.dependOn(&run_tests_unit_tests.step);
 
@@ -471,21 +513,25 @@ pub fn build(b: *std.Build) void {
     };
 
     for (test_files) |test_file| {
-        const module_tests = b.addTest(.{
+        const module = b.createModule(.{
             .root_source_file = b.path(test_file),
             .target = target,
             .optimize = optimize,
         });
-        linkFrameworks(b, module_tests);
-        addVersionImport(b, module_tests);
-        addGrabberPlistImports(b, module_tests);
-        module_tests.root_module.addOptions("build_options", options);
+        linkAgentFrameworks(b, module);
+        addVersionImport(b, module);
+        addGrabberPlistImports(b, module);
+        module.addOptions("build_options", exe_options);
         // RuleSet's test imports the shared protocol module by name;
         // grabber_protocol.zig itself is the module's root, so it
         // doesn't need (and can't have) an import of itself.
         if (!std.mem.eql(u8, test_file, "src/grabber_protocol.zig")) {
-            module_tests.root_module.addImport("grabber_protocol", grabber_protocol_mod);
+            module.addImport("grabber_protocol", grabber_protocol_mod);
         }
+
+        const module_tests = b.addTest(.{
+            .root_module = module,
+        });
         const run_module_tests = b.addRunArtifact(module_tests);
         test_step.dependOn(&run_module_tests.step);
     }

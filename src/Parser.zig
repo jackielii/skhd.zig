@@ -21,6 +21,7 @@ const LoadDirective = struct {
 };
 
 allocator: std.mem.Allocator,
+io: std.Io,
 tokenizer: Tokenizer = undefined,
 content: []const u8 = undefined,
 previous_token: ?Token = undefined,
@@ -70,7 +71,7 @@ pub fn deinit(self: *Parser) void {
     for (self.load_directives.items) |directive| {
         self.allocator.free(directive.filename);
     }
-    self.load_directives.deinit();
+    self.load_directives.deinit(self.allocator);
     if (self.error_info) |*error_info| {
         error_info.deinit();
     }
@@ -117,16 +118,14 @@ pub fn clearError(self: *Parser) void {
     }
 }
 
-pub fn init(allocator: std.mem.Allocator) !Parser {
-    // const f = try std.fs.cwd().openFile(filename, .{});
-    // defer f.close();
-    // const content = try f.readToEndAlloc(allocator, 1 << 24); // max size 16MB
+pub fn init(allocator: std.mem.Allocator, io: std.Io) !Parser {
     return Parser{
         .allocator = allocator,
+        .io = io,
         .previous_token = null,
         .next_token = null,
         .keycodes = try Keycodes.init(allocator),
-        .load_directives = std.ArrayList(LoadDirective).init(allocator),
+        .load_directives = .empty,
     };
 }
 
@@ -214,25 +213,25 @@ fn match(self: *Parser, typ: Tokenizer.TokenType) bool {
 
 /// Process escape sequences in a string, replacing \\ with \ and \" with "
 fn processStringOwned(self: *Parser, str: []const u8) ![]const u8 {
-    var result = std.ArrayList(u8).init(self.allocator);
-    errdefer result.deinit();
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(self.allocator);
 
     var i: usize = 0;
     while (i < str.len) {
         if (i + 1 < str.len and str[i] == '\\') {
             if (str[i + 1] == '\\' or str[i + 1] == '"') {
                 // Skip the backslash and append the next character
-                try result.append(str[i + 1]);
+                try result.append(self.allocator, str[i + 1]);
                 i += 2;
                 continue;
             }
         }
-        try result.append(str[i]);
+        try result.append(self.allocator, str[i]);
         i += 1;
     }
 
     // Always return owned slice
-    return try result.toOwnedSlice();
+    return try result.toOwnedSlice(self.allocator);
 }
 
 /// Helper function to handle errors from add_process_* methods with context
@@ -385,14 +384,14 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             const key_str = try Keycodes.formatKeyPressBuffer(&buf, hotkey.flags, hotkey.key);
 
             // Get the mode(s) where we're trying to add this hotkey
-            var mode_names = std.ArrayList(u8).init(self.allocator);
-            defer mode_names.deinit();
+            var mode_names: std.ArrayList(u8) = .empty;
+            defer mode_names.deinit(self.allocator);
 
             var it = hotkey.mode_list.iterator();
             var first = true;
             while (it.next()) |entry| {
-                if (!first) try mode_names.appendSlice(", ");
-                try mode_names.appendSlice(entry.key_ptr.*.name);
+                if (!first) try mode_names.appendSlice(self.allocator, ", ");
+                try mode_names.appendSlice(self.allocator, entry.key_ptr.*.name);
                 first = false;
             }
 
@@ -933,8 +932,8 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
     // Check for opening parenthesis
     if (self.match(.Token_BeginTuple)) {
         // Parse arguments
-        var args = std.ArrayList([]const u8).init(self.allocator);
-        defer args.deinit();
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(self.allocator);
         defer for (args.items) |arg| {
             self.allocator.free(arg);
         };
@@ -947,7 +946,7 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
             if (self.match(.Token_String)) {
                 const arg_token = self.previous();
                 const processed_arg = try self.processStringOwned(arg_token.text);
-                try args.append(processed_arg);
+                try args.append(self.allocator, processed_arg);
 
                 // Check for comma or closing paren
                 if (self.peek_check(.Token_EndTuple)) {
@@ -983,22 +982,22 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
         }
 
         // Expand the template using pre-parsed parts
-        var result = std.ArrayList(u8).init(self.allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(self.allocator);
 
         for (cmd_def.parts) |part| {
             switch (part) {
-                .text => |text| try result.appendSlice(text),
+                .text => |text| try result.appendSlice(self.allocator, text),
                 .placeholder => |num| {
                     if (num <= args.items.len) {
-                        try result.appendSlice(args.items[num - 1]);
+                        try result.appendSlice(self.allocator, args.items[num - 1]);
                     }
                     // Note: placeholders > args.len are silently ignored
                 },
             }
         }
 
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(self.allocator);
     } else if (cmd_def.max_placeholder > 0) {
         // Error: command expects arguments but none provided
         const msg = try std.fmt.allocPrint(self.allocator, "Command '@{s}' expects {d} arguments but none provided", .{ command_name, cmd_def.max_placeholder });
@@ -1008,27 +1007,27 @@ fn parse_command_reference(self: *Parser) ![]const u8 {
         return error.ParseErrorOccurred;
     } else {
         // No arguments needed, build from parts
-        var result = std.ArrayList(u8).init(self.allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(self.allocator);
 
         for (cmd_def.parts) |part| {
             switch (part) {
-                .text => |text| try result.appendSlice(text),
+                .text => |text| try result.appendSlice(self.allocator, text),
                 .placeholder => {}, // Should not have placeholders if max_placeholder is 0
             }
         }
 
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(self.allocator);
     }
 }
 
 fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !CommandDef {
-    var parts = std.ArrayList(CommandDef.Part).init(self.allocator);
+    var parts: std.ArrayList(CommandDef.Part) = .empty;
     errdefer {
         for (parts.items) |part| {
             part.deinit(self.allocator);
         }
-        parts.deinit();
+        parts.deinit(self.allocator);
     }
 
     var max_placeholder: u8 = 0;
@@ -1065,7 +1064,7 @@ fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !Comm
                     return error.ParseErrorOccurred;
                 }
 
-                try parts.append(.{ .placeholder = num });
+                try parts.append(self.allocator, .{ .placeholder = num });
                 if (num > max_placeholder) {
                     max_placeholder = num;
                 }
@@ -1084,12 +1083,12 @@ fn parseCommandTemplate(self: *Parser, template: []const u8, token: Token) !Comm
 
         // Add text part
         const text = try self.allocator.dupe(u8, template[pos..end]);
-        try parts.append(.{ .text = text });
+        try parts.append(self.allocator, .{ .text = text });
         pos = end;
     }
 
     return CommandDef{
-        .parts = try parts.toOwnedSlice(),
+        .parts = try parts.toOwnedSlice(self.allocator),
         .max_placeholder = max_placeholder,
     };
 }
@@ -1148,15 +1147,15 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             try self.command_defs.put(self.allocator, owned_name, parsed);
         } else if (self.match(.Token_BeginList)) {
             // Process group definition: define name ["app1", "app2"]
-            var process_list = std.ArrayList([]const u8).init(self.allocator);
+            var process_list: std.ArrayList([]const u8) = .empty;
             errdefer {
                 for (process_list.items) |process| self.allocator.free(process);
-                process_list.deinit();
+                process_list.deinit(self.allocator);
             }
 
             while (self.match(.Token_String)) {
                 const process_name = try self.processStringOwned(self.previous().text);
-                try process_list.append(process_name);
+                try process_list.append(self.allocator, process_name);
 
                 // Skip optional comma
                 _ = self.match(.Token_Comma);
@@ -1174,7 +1173,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             }
 
             const owned_name = try self.allocator.dupe(u8, name);
-            const owned_processes = try process_list.toOwnedSlice();
+            const owned_processes = try process_list.toOwnedSlice(self.allocator);
             try self.process_groups.put(self.allocator, owned_name, owned_processes);
         } else {
             const token = self.peek() orelse self.previous();
@@ -1185,7 +1184,7 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
         if (self.match(.Token_String)) {
             const filename_token = self.previous();
             const filename = try self.processStringOwned(filename_token.text);
-            try self.load_directives.append(LoadDirective{
+            try self.load_directives.append(self.allocator, LoadDirective{
                 .filename = filename,
                 .token = filename_token,
             });
@@ -1270,9 +1269,7 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         const resolved_path = try self.resolveLoadPath(directive.filename);
         defer self.allocator.free(resolved_path);
 
-        // Read the file content
-        const content = std.fs.cwd().readFileAlloc(self.allocator, resolved_path, 1 << 20) catch {
-            // Report error with line info from the .load directive
+        const content = std.Io.Dir.cwd().readFileAlloc(self.io, resolved_path, self.allocator, .limited(1 << 20)) catch {
             const msg = try std.fmt.allocPrint(self.allocator, "Could not open included file '{s}'", .{resolved_path});
             defer self.allocator.free(msg);
             self.error_info = try ParseError.fromToken(self.allocator, directive.token, msg, self.current_file_path);
@@ -1280,16 +1277,14 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         };
         defer self.allocator.free(content);
 
-        // Add the resolved path to the loaded files list
-        // Resolve to absolute path for hotloader
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const abs_path = std.fs.cwd().realpath(resolved_path, &path_buf) catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "Failed to resolve path '{s}': {s}", .{ resolved_path, @errorName(err) });
+        const sentinel_path = std.Io.Dir.cwd().realPathFileAlloc(self.io, resolved_path, self.allocator) catch {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed to resolve path '{s}': realpath failed", .{resolved_path});
             defer self.allocator.free(msg);
             self.error_info = try ParseError.fromToken(self.allocator, directive.token, msg, self.current_file_path);
             return error.ParseErrorOccurred;
         };
-        const duped_path = try self.allocator.dupe(u8, abs_path);
+        const duped_path = try self.allocator.dupe(u8, sentinel_path);
+        self.allocator.free(sentinel_path);
         try mappings.loaded_files.append(self.allocator, duped_path);
 
         // Create a new parser for the included file. We hand it the
@@ -1297,7 +1292,7 @@ pub fn processLoadDirectives(self: *Parser, mappings: *Mappings) !void {
         // files can use aliases, commands, and process groups declared
         // in the parent. After parsing, move the maps back so the
         // parent owns any new entries the included file added.
-        var included_parser = try Parser.init(self.allocator);
+        var included_parser = try Parser.init(self.allocator, self.io);
         included_parser.command_defs = self.command_defs;
         included_parser.process_groups = self.process_groups;
         included_parser.aliases = self.aliases;
@@ -1376,13 +1371,13 @@ fn addPathEntry(self: *Parser, mappings: *Mappings, token: Token) !void {
 fn expandHome(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
     // `~` alone, or `~/...` → $HOME / $HOME + suffix.
     if (std.mem.eql(u8, raw, "~") or std.mem.startsWith(u8, raw, "~/")) {
-        const home = std.posix.getenv("HOME") orelse return error.HomeNotSet;
+        const home = @import("utils.zig").getenv("HOME") orelse return error.HomeNotSet;
         if (raw.len == 1) return allocator.dupe(u8, home);
         return std.fmt.allocPrint(allocator, "{s}{s}", .{ home, raw[1..] });
     }
     // `$HOME` or `$HOME/...` (no other $VAR forms supported).
     if (std.mem.eql(u8, raw, "$HOME") or std.mem.startsWith(u8, raw, "$HOME/")) {
-        const home = std.posix.getenv("HOME") orelse return error.HomeNotSet;
+        const home = @import("utils.zig").getenv("HOME") orelse return error.HomeNotSet;
         if (raw.len == 5) return allocator.dupe(u8, home);
         return std.fmt.allocPrint(allocator, "{s}{s}", .{ home, raw[5..] });
     }
@@ -1764,16 +1759,16 @@ fn parse_device_decl(self: *Parser, mappings: *Mappings) !void {
 
 test "init" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 }
 
 test "Parse" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -1791,10 +1786,10 @@ test "Parse" {
 
 test "Parse mode decl" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings, ":: mode : command");
@@ -1803,10 +1798,10 @@ test "Parse mode decl" {
 
 test "Parse mode decl capture" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings, ":: mode @: command");
@@ -1815,10 +1810,10 @@ test "Parse mode decl capture" {
 
 test "double mode free" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -1831,10 +1826,10 @@ test "double mode free" {
 
 test "load directive" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Parse main content with .load directive
@@ -1852,10 +1847,10 @@ test "load directive" {
 
 test "load directive with cross-file mode reference" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Parse main content with mode definition and .load directive
@@ -1876,10 +1871,10 @@ test "load directive with cross-file mode reference" {
 
 test "nested load directives" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Parse main content that loads nested1
@@ -1897,10 +1892,10 @@ test "nested load directives" {
 
 test "load directive with relative paths" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Parse main content that loads the loader from testdata directory
@@ -1918,22 +1913,18 @@ test "load directive with relative paths" {
 
 test "load directive shares aliases with included files" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
-    const test_id = std.crypto.random.int(u32);
+    const test_id = std.testing.random_seed;
     const include_path = try std.fmt.allocPrint(alloc, "/tmp/skhd_alias_include_{d}.skhdrc", .{test_id});
     defer alloc.free(include_path);
-    defer std.fs.deleteFileAbsolute(include_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, include_path) catch {};
 
-    {
-        const file = try std.fs.createFileAbsolute(include_path, .{});
-        defer file.close();
-        try file.writeAll("$hyper - h : echo included");
-    }
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = include_path, .data = "$hyper - h : echo included" });
 
     const main_content = try std.fmt.allocPrint(alloc,
         \\.alias $hyper cmd + alt + ctrl + shift
@@ -1954,10 +1945,10 @@ test "load directive shares aliases with included files" {
 
 test "config duplicate detection allows disjoint side-specific modifiers" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -1971,10 +1962,10 @@ test "config duplicate detection allows disjoint side-specific modifiers" {
 
 test "shell directive" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Test default shell (should be from $SHELL env or /bin/bash)
@@ -1994,10 +1985,10 @@ test "shell directive" {
 
 test "shell directive with spaces" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Parse config with .shell directive containing spaces
@@ -2013,10 +2004,10 @@ test "shell directive with spaces" {
 
 test "shell directive error handling" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Test missing shell path
@@ -2026,10 +2017,10 @@ test "shell directive error handling" {
 
 test "path directive single entry" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings, ".path \"/opt/homebrew/bin\"");
@@ -2039,10 +2030,10 @@ test "path directive single entry" {
 
 test "path directive list form" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     const content =
@@ -2059,13 +2050,13 @@ test "path directive list form" {
 
 test "path directive expands tilde and HOME" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
-    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const home = @import("utils.zig").getenv("HOME") orelse return error.SkipZigTest;
 
     try parser.parse(&mappings,
         \\.path "~/.local/bin"
@@ -2084,10 +2075,10 @@ test "path directive expands tilde and HOME" {
 
 test "path directive missing argument errors" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, ".path"));
@@ -2095,10 +2086,10 @@ test "path directive missing argument errors" {
 
 test "command definition without placeholders" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a simple command
@@ -2124,10 +2115,10 @@ test "command definition without placeholders" {
 
 test "command definition with single placeholder" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a command with one placeholder
@@ -2160,10 +2151,10 @@ test "command definition with single placeholder" {
 
 test "command definition with multiple placeholders" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a command with multiple placeholders
@@ -2197,10 +2188,10 @@ test "command definition with multiple placeholders" {
 
 test "command definition with repeated placeholders" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a command where same placeholder appears multiple times
@@ -2226,10 +2217,10 @@ test "command definition with repeated placeholders" {
 
 test "command definition error: wrong argument count" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a command expecting 2 arguments but provide only 1
@@ -2247,10 +2238,10 @@ test "command definition error: wrong argument count" {
 
 test "command definition error: missing arguments" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a command expecting arguments but provide none
@@ -2268,10 +2259,10 @@ test "command definition error: missing arguments" {
 
 test "command definition error: too many arguments" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a command expecting 1 argument but provide 2
@@ -2290,10 +2281,10 @@ test "command definition error: too many arguments" {
 
 test "command definition error: undefined command" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Try to use undefined command
@@ -2312,10 +2303,10 @@ test "command definition error: undefined command" {
 
 test "command definition error: unquoted arguments" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define a command and try to use with unquoted arguments
@@ -2334,10 +2325,10 @@ test "command definition error: unquoted arguments" {
 
 test "command definition with escape sequences" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define command and use with escaped quotes
@@ -2361,10 +2352,10 @@ test "command definition with escape sequences" {
 
 test "command definition with comma-separated arguments" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Test with optional commas between arguments
@@ -2394,10 +2385,10 @@ test "command definition with comma-separated arguments" {
 
 test "command definition with whitespace handling" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Test whitespace in arguments and around parentheses
@@ -2422,10 +2413,10 @@ test "command definition with whitespace handling" {
 
 test "command definition complex placeholders" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Test non-sequential placeholders and highest placeholder detection
@@ -2449,10 +2440,10 @@ test "command definition complex placeholders" {
 
 test "process group in hotkey with command expansion" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Test command expansion within process lists
@@ -2483,10 +2474,10 @@ test "process group in hotkey with command expansion" {
 
 test "error on command invocation in process list" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Try to use command invocation as process list entry - should fail
@@ -2508,10 +2499,10 @@ test "error on command invocation in process list" {
 
 test "error on undefined process group in process list" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Try to use undefined process group - should fail
@@ -2533,10 +2524,10 @@ test "error on undefined process group in process list" {
 
 test "valid process group in process list" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Define process group and use it correctly
@@ -2573,10 +2564,10 @@ test "valid process group in process list" {
 
 test "invalid placeholder in command definition" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Test various invalid placeholders
@@ -2603,10 +2594,10 @@ test "invalid placeholder in command definition" {
 
 test "duplicate command definition returns error" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // First add a command definition
@@ -2627,10 +2618,10 @@ test "duplicate command definition returns error" {
 
 test "duplicate process group definition returns error" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // First add a process group
@@ -2651,10 +2642,10 @@ test "duplicate process group definition returns error" {
 
 test "modifier alias - basic definition and use" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2673,10 +2664,10 @@ test "modifier alias - basic definition and use" {
 
 test "modifier alias - combined with extra modifiers" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2693,10 +2684,10 @@ test "modifier alias - combined with extra modifiers" {
 
 test "modifier alias - nested alias" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2714,10 +2705,10 @@ test "modifier alias - nested alias" {
 
 test "modifier alias - undefined alias errors" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     const result = parser.parse(&mappings, "$hyper - h : echo nope");
@@ -2728,10 +2719,10 @@ test "modifier alias - undefined alias errors" {
 
 test "modifier alias - redefinition errors" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     const result = parser.parse(&mappings,
@@ -2743,10 +2734,10 @@ test "modifier alias - redefinition errors" {
 
 test "modifier alias - works in forward target" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2760,10 +2751,10 @@ test "modifier alias - works in forward target" {
 
 test "key alias - hex code in key position" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2781,10 +2772,10 @@ test "key alias - hex code in key position" {
 
 test "key alias - literal carries implicit flags (e.g., delete -> fn)" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2802,10 +2793,10 @@ test "key alias - literal carries implicit flags (e.g., delete -> fn)" {
 
 test "key alias - standalone without modifiers" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2819,10 +2810,10 @@ test "key alias - standalone without modifiers" {
 
 test "alias - key alias used in modifier position errors" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings, ".alias $grave 0x32");
@@ -2835,10 +2826,10 @@ test "alias - key alias used in modifier position errors" {
 
 test "alias - modifier alias used in key position errors" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings, ".alias $hyper cmd + alt");
@@ -2851,10 +2842,10 @@ test "alias - modifier alias used in key position errors" {
 
 test "alias - key alias inherits kind from referenced alias" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,
@@ -2871,9 +2862,9 @@ test "alias - key alias inherits kind from referenced alias" {
 
 test "mouse button - parses as a literal with synthetic keycode" {
     const alloc = std.testing.allocator;
-    var parser = try Parser.init(alloc);
+    var parser = try Parser.init(alloc, std.testing.io);
     defer parser.deinit();
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try parser.parse(&mappings,

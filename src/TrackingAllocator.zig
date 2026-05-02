@@ -22,6 +22,9 @@ const TrackingAllocator = @This();
 
 /// The underlying allocator that performs actual allocations
 child_allocator: std.mem.Allocator,
+/// Captured at init so the allocator vtable callbacks (which can't take an
+/// extra parameter) can drive `std.Io.Mutex` lock/unlock.
+io: std.Io,
 /// Map of allocation addresses to their metadata
 allocations: std.AutoHashMap(usize, AllocationInfo),
 /// Total bytes currently allocated
@@ -33,7 +36,7 @@ total_allocations: u64 = 0,
 /// Total number of deallocations made
 total_deallocations: u64 = 0,
 /// Mutex for thread safety
-mutex: std.Thread.Mutex = .{},
+mutex: std.Io.Mutex = .init,
 
 pub const AllocationInfo = struct {
     size: usize,
@@ -41,9 +44,10 @@ pub const AllocationInfo = struct {
     timestamp: i64,
 };
 
-pub fn init(child_allocator: std.mem.Allocator) !TrackingAllocator {
+pub fn init(child_allocator: std.mem.Allocator, io: std.Io) !TrackingAllocator {
     return TrackingAllocator{
         .child_allocator = child_allocator,
+        .io = io,
         .allocations = std.AutoHashMap(usize, AllocationInfo).init(child_allocator),
     };
 }
@@ -84,31 +88,22 @@ fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: us
 
     const result = self.child_allocator.rawAlloc(len, alignment, ret_addr) orelse return null;
 
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
-    // Record allocation
+    // Record allocation. Stack trace capture removed in Zig 0.16
+    // migration: captureCurrentStackTrace needs allow_stack_tracing
+    // + a Threaded io context that's awkward to plumb through alloc().
     const addr = @intFromPtr(result);
-    var stack_trace = std.builtin.StackTrace{
-        .instruction_addresses = &[_]usize{},
+    const stack_trace: std.builtin.StackTrace = .{
+        .instruction_addresses = &.{},
         .index = 0,
     };
-
-    // Capture stack trace if in debug mode
-    if (@import("builtin").mode == .Debug) {
-        var addresses: [32]usize = undefined;
-        var trace = std.builtin.StackTrace{
-            .instruction_addresses = &addresses,
-            .index = 0,
-        };
-        std.debug.captureStackTrace(ret_addr, &trace);
-        stack_trace = trace;
-    }
 
     self.allocations.put(addr, .{
         .size = len,
         .stack_trace = stack_trace,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = 0,
     }) catch {
         // If we can't track it, still return the allocation
         log.warn("Failed to track allocation of {} bytes", .{len});
@@ -120,14 +115,14 @@ fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: us
         self.peak_allocated = self.total_allocated;
     }
 
-    // Always log allocations
-    const stderr = std.io.getStdErr().writer();
-    stderr.print("[ALLOC] {} bytes at 0x{x} (total: {}, peak: {})\n", .{
+    // Always log allocations (std.debug.print avoids the io plumbing
+    // overhead — alloc tracking is debug-only).
+    std.debug.print("[ALLOC] {} bytes at 0x{x} (total: {}, peak: {})\n", .{
         len,
         addr,
         self.total_allocated,
         self.peak_allocated,
-    }) catch {};
+    });
 
     return result;
 }
@@ -139,8 +134,8 @@ fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usi
         return false;
     }
 
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
     const addr = @intFromPtr(buf.ptr);
     if (self.allocations.get(addr)) |info| {
@@ -160,13 +155,12 @@ fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usi
         }
 
         // Always log resizes
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("[RESIZE] {} -> {} bytes at 0x{x} (total: {})\n", .{
+        std.debug.print("[RESIZE] {} -> {} bytes at 0x{x} (total: {})\n", .{
             old_size,
             new_len,
             addr,
             self.total_allocated,
-        }) catch {};
+        });
     }
 
     return true;
@@ -175,8 +169,8 @@ fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usi
 fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
     const self: *TrackingAllocator = @ptrCast(@alignCast(ctx));
 
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
     const addr = @intFromPtr(buf.ptr);
     if (self.allocations.fetchRemove(addr)) |entry| {
@@ -184,12 +178,11 @@ fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usiz
         self.total_deallocations += 1;
 
         // Always log frees
-        const stderr = std.io.getStdErr().writer();
-        stderr.print("[FREE] {} bytes at 0x{x} (total: {})\n", .{
+        std.debug.print("[FREE] {} bytes at 0x{x} (total: {})\n", .{
             entry.value.size,
             addr,
             self.total_allocated,
-        }) catch {};
+        });
     } else {
         log.warn("Freeing untracked allocation at 0x{x}", .{addr});
     }
@@ -202,8 +195,8 @@ fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: u
 
     const result = self.child_allocator.vtable.remap(self.child_allocator.ptr, memory, alignment, new_len, ret_addr) orelse return null;
 
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
     const old_addr = @intFromPtr(memory.ptr);
     const new_addr = @intFromPtr(result);
@@ -215,7 +208,7 @@ fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: u
             self.allocations.put(new_addr, .{
                 .size = new_len,
                 .stack_trace = entry.value.stack_trace,
-                .timestamp = std.time.milliTimestamp(),
+                .timestamp = 0,
             }) catch {};
 
             // Update total allocated
@@ -250,9 +243,10 @@ fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: u
     return result;
 }
 
-pub fn printReport(self: *TrackingAllocator, writer: anytype) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+pub fn printReport(self: *TrackingAllocator, io: std.Io, writer: *std.Io.Writer) !void {
+    _ = io; // self.io is the source of truth; main.zig still passes io for symmetry
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
     try writer.print("\n=== Memory Allocation Report ===\n", .{});
     try writer.print("Total allocations: {}\n", .{self.total_allocations});
@@ -278,17 +272,17 @@ pub fn printReport(self: *TrackingAllocator, writer: anytype) !void {
 
 fn dumpStackTrace(trace: std.builtin.StackTrace) void {
     if (trace.index == 0) return;
-
-    const stderr = std.io.getStdErr().writer();
-    // Simple stack trace dumping for now - just print the addresses
-    stderr.print("Stack trace:\n", .{}) catch {};
+    std.debug.print("Stack trace:\n", .{});
     for (trace.instruction_addresses[0..trace.index]) |addr| {
-        stderr.print("  0x{x}\n", .{addr}) catch {};
+        std.debug.print("  0x{x}\n", .{addr});
     }
 }
 
 test "TrackingAllocator basic functionality" {
-    var tracker = try TrackingAllocator.init(std.testing.allocator);
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tracker = try TrackingAllocator.init(std.testing.allocator, io);
     defer tracker.deinit();
 
     const tracking_alloc = tracker.allocator();

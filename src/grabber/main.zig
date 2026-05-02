@@ -49,7 +49,7 @@ var should_exit: std.atomic.Value(bool) = .init(false);
 /// before exit so a stale file doesn't block respawn.
 var bound_socket_path: ?[]const u8 = null;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // stderr → file is block-buffered by libc default. Our SIGTERM
     // handler exits via _exit() which skips fflush, so block-buffered
     // logs from the seize loop never reach the log file. Switching
@@ -58,17 +58,14 @@ pub fn main() !void {
     _ = c.setvbuf(c.__stderrp, null, c._IONBF, 0);
     _ = c.setvbuf(c.__stdoutp, null, c._IONBF, 0);
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-        _ = debug_allocator.deinit();
-    };
-    const gpa = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => debug_allocator.allocator(),
-        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
-    };
+    const gpa = init.gpa;
+    const io = init.io;
+    const arena = init.arena.allocator();
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try init.minimal.args.toSlice(arena);
+    // io plumbed through Daemon + Vhidd.Client.connect. Other helpers
+    // still rely on the legacy posix layer until they need filesystem
+    // / async work.
 
     var socket_path: []const u8 = protocol.default_socket_path;
     var seize_test_vendor: ?u32 = null;
@@ -105,7 +102,7 @@ pub fn main() !void {
             printHelp();
             return;
         } else if (std.mem.eql(u8, a, "--inject-test-key")) {
-            injectTestKey(gpa) catch |err| {
+            injectTestKey(gpa, io) catch |err| {
                 log.err("inject-test-key failed: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -163,7 +160,7 @@ pub fn main() !void {
     if (seize_test_vendor) |vendor| {
         const product = seize_test_product.?;
         const mode: HidSeize.Mode = if (seize_test_observe) .observe else .seize;
-        seizeTest(gpa, .{ .vendor = vendor, .product = product }, seize_test_duration_ms, mode, seize_test_rule, profile) catch |err| {
+        seizeTest(gpa, io, .{ .vendor = vendor, .product = product }, seize_test_duration_ms, mode, seize_test_rule, profile) catch |err| {
             log.err("seize-test failed: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -172,7 +169,7 @@ pub fn main() !void {
 
     log.info("skhd-grabber starting (socket={s}, pid={d})", .{ socket_path, std.c.getpid() });
 
-    var daemon = Daemon.init(gpa, socket_path, profile) catch |err| {
+    var daemon = Daemon.init(gpa, io, socket_path, profile) catch |err| {
         log.err("daemon init failed: {s}", .{@errorName(err)});
         return err;
     };
@@ -201,7 +198,7 @@ const Subscription = struct {
     daemon: *Daemon,
     fd: c_int,
     uid: u32,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
     rules: []protocol.Rule,
     remaps: []protocol.Remap,
     /// Mirror of NSGlobalDomain `com.apple.keyboard.fnState` as read by
@@ -214,8 +211,9 @@ const Subscription = struct {
 
 const Daemon = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     socket_path: []const u8,
-    server: std.net.Server,
+    server: std.Io.net.Server,
 
     /// One per live agent connection. Most-recently-pushed apply_rules
     /// from the active console uid wins. When a subscription's socket
@@ -253,17 +251,20 @@ const Daemon = struct {
     /// subscription should be active.
     console_user_timer: c.CFRunLoopTimerRef = null,
 
-    pub fn init(allocator: std.mem.Allocator, socket_path: []const u8, profile: bool) !Daemon {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, profile: bool) !Daemon {
         try ensureSocketParentDir(socket_path);
         // Stale socket from a crashed previous run: bind() would EADDRINUSE.
-        posix.unlink(socket_path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
+        // libc unlink — Daemon.init runs before io is fully wired.
+        var sock_z: [std.fs.max_path_bytes]u8 = undefined;
+        if (socket_path.len >= sock_z.len) return error.PathTooLong;
+        @memcpy(sock_z[0..socket_path.len], socket_path);
+        sock_z[socket_path.len] = 0;
+        const ulrc = std.c.unlink(@ptrCast(&sock_z));
+        if (ulrc != 0 and std.c.errno(ulrc) != .NOENT) return error.UnlinkFailed;
 
-        var addr = try std.net.Address.initUnix(socket_path);
-        var server = try addr.listen(.{ .reuse_address = false });
-        errdefer server.deinit();
+        const addr = try std.Io.net.UnixAddress.init(socket_path);
+        var server = try addr.listen(io, .{});
+        errdefer server.deinit(io);
 
         bound_socket_path = socket_path;
         // Mode 0666 so any logged-in user's agent can connect. Per-uid
@@ -289,6 +290,7 @@ const Daemon = struct {
 
         return .{
             .allocator = allocator,
+            .io = io,
             .socket_path = socket_path,
             .server = server,
             .seize_ctx = .{
@@ -298,11 +300,11 @@ const Daemon = struct {
                 .hidsystem = hidsystem,
                 .profile = profile,
                 .profile_timer = if (comptime profile_supported)
-                    (if (profile) try std.time.Timer.start() else undefined)
+                    (if (profile) ProfileTimer.start(io) else undefined)
                 else
                     undefined,
             },
-            .layer_ctx = .{ .stream = null, .allocator = allocator },
+            .layer_ctx = .{ .stream = null, .allocator = allocator, .io = io },
             .active_uid = initial_uid,
         };
     }
@@ -333,8 +335,8 @@ const Daemon = struct {
             self.cf_listener = null;
         }
         if (self.seize_ctx.hidsystem) |*h| h.deinit();
-        self.server.deinit();
-        posix.unlink(self.socket_path) catch {};
+        self.server.deinit(self.io);
+        std.Io.Dir.deleteFileAbsolute(self.io, self.socket_path) catch {};
         bound_socket_path = null;
     }
 
@@ -346,7 +348,7 @@ const Daemon = struct {
         c.CFRelease(s.cf_source);
         c.CFFileDescriptorInvalidate(s.cf_fd);
         c.CFRelease(s.cf_fd);
-        s.stream.close();
+        s.stream.close(self.io);
         for (s.rules) |r| if (r.hold_layer) |l| self.allocator.free(l);
         self.allocator.free(s.rules);
         self.allocator.free(s.remaps);
@@ -381,7 +383,7 @@ const Daemon = struct {
         };
         const cf_fd = c.CFFileDescriptorCreate(
             c.kCFAllocatorDefault,
-            self.server.stream.handle,
+            self.server.socket.handle,
             0, // closeOnInvalidate=false: server owns the fd
             listenerCallback,
             &ctx,
@@ -399,23 +401,23 @@ const Daemon = struct {
     }
 
     fn handleListener(self: *Daemon) void {
-        const conn = self.server.accept() catch |err| {
+        const conn = self.server.accept(self.io) catch |err| {
             log.warn("accept failed: {s}", .{@errorName(err)});
             return;
         };
 
-        const result = Ipc.serve(self.allocator, conn.stream) catch |err| blk: {
+        const result = Ipc.serve(self.allocator, self.io, conn) catch |err| blk: {
             log.warn("client session ended: {s}", .{@errorName(err)});
             break :blk Ipc.ServeResult.closed;
         };
 
         switch (result) {
-            .closed => conn.stream.close(),
+            .closed => conn.close(self.io),
             .rules_applied => |applied| {
-                self.addSubscription(conn.stream, applied) catch |err| {
+                self.addSubscription(conn, applied) catch |err| {
                     log.err("addSubscription failed: {s}", .{@errorName(err)});
                     applied.free(self.allocator);
-                    conn.stream.close();
+                    conn.close(self.io);
                     return;
                 };
                 self.applyLatestRules() catch |err| {
@@ -432,12 +434,12 @@ const Daemon = struct {
     /// takes over. Subscriptions from non-active uids stay parked in
     /// the list — silenced now, candidate for "active" if the
     /// console user switches.
-    fn addSubscription(self: *Daemon, stream: std.net.Stream, applied: Ipc.AppliedRules) !void {
+    fn addSubscription(self: *Daemon, stream: std.Io.net.Stream, applied: Ipc.AppliedRules) !void {
         const sub = try self.allocator.create(Subscription);
         errdefer self.allocator.destroy(sub);
         sub.* = .{
             .daemon = self,
-            .fd = stream.handle,
+            .fd = stream.socket.handle,
             .uid = applied.uid,
             .stream = stream,
             .rules = applied.rules,
@@ -456,7 +458,7 @@ const Daemon = struct {
         };
         const cf_fd = c.CFFileDescriptorCreate(
             c.kCFAllocatorDefault,
-            stream.handle,
+            stream.socket.handle,
             0,
             subscriptionCallback,
             &ctx,
@@ -533,15 +535,15 @@ const Daemon = struct {
         const remaps = sub.remaps;
 
         var has_layer_rule = false;
-        var matches = std.ArrayList(HidSeize.Match).init(self.allocator);
-        defer matches.deinit();
+        var matches: std.ArrayList(HidSeize.Match) = .empty;
+        defer matches.deinit(self.allocator);
 
         const addMatch = struct {
-            fn call(list: *std.ArrayList(HidSeize.Match), dev: protocol.Device) !void {
+            fn call(allocator: std.mem.Allocator, list: *std.ArrayList(HidSeize.Match), dev: protocol.Device) !void {
                 for (list.items) |m| {
                     if (m.vendor == dev.vendor and m.product == dev.product) return;
                 }
-                try list.append(.{ .vendor = dev.vendor, .product = dev.product });
+                try list.append(allocator, .{ .vendor = dev.vendor, .product = dev.product });
             }
         }.call;
 
@@ -551,10 +553,10 @@ const Daemon = struct {
                 return error.MissingDevice;
             };
             if (rule.hold_layer != null) has_layer_rule = true;
-            try addMatch(&matches, dev);
+            try addMatch(self.allocator, &matches, dev);
         }
         for (remaps) |rm| {
-            try addMatch(&matches, rm.device);
+            try addMatch(self.allocator, &matches, rm.device);
         }
 
         log.info("apply_rules: {d} rule(s), {d} remap(s) across {d} device(s) layer_push={}", .{ rules.len, remaps.len, matches.items.len, has_layer_rule });
@@ -574,7 +576,7 @@ const Daemon = struct {
             log.info("connecting to vhidd_server", .{});
             const v = try self.allocator.create(Vhidd.Client);
             errdefer self.allocator.destroy(v);
-            v.* = try Vhidd.Client.connect(self.allocator);
+            v.* = try Vhidd.Client.connect(self.allocator, self.io);
             errdefer v.close();
             log.info("initializing virtual keyboard", .{});
             try v.initializeKeyboard(.{});
@@ -738,7 +740,7 @@ const Daemon = struct {
     }
 };
 
-fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
+fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const d: *Daemon = @ptrCast(@alignCast(info orelse return));
     const new_uid = currentConsoleUid();
     if (new_uid == d.active_uid) return; // no change
@@ -758,7 +760,7 @@ fn listenerCallback(
     cf_fd: c.CFFileDescriptorRef,
     callback_types: c.CFOptionFlags,
     info: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = callback_types;
     const d: *Daemon = @ptrCast(@alignCast(info orelse return));
     d.handleListener();
@@ -777,26 +779,25 @@ fn subscriptionCallback(
     cf_fd: c.CFFileDescriptorRef,
     callback_types: c.CFOptionFlags,
     info: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = callback_types;
     const sub: *Subscription = @ptrCast(@alignCast(info orelse return));
 
-    // macOS MSG flags: MSG_PEEK=0x2, MSG_DONTWAIT=0x80. Hand-rolled
-    // because std.posix.MSG isn't exposed on Zig 0.14 darwin.
-    const MSG_PEEK: u32 = 0x2;
-    const MSG_DONTWAIT: u32 = 0x80;
     var byte: [1]u8 = undefined;
-    const n = posix.recv(sub.fd, &byte, MSG_PEEK | MSG_DONTWAIT) catch |err| switch (err) {
-        error.WouldBlock => {
+    const n = c.recv(sub.fd, &byte, byte.len, c.MSG_PEEK | c.MSG_DONTWAIT);
+    if (n < 0) {
+        // EAGAIN and EWOULDBLOCK share the same value on macOS; one match
+        // covers both per recv(2). Anything else means the connection is
+        // gone and we drop the subscription.
+        const errno = std.c._errno().*;
+        if (errno == @intFromEnum(std.c.E.AGAIN)) {
             c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
             return;
-        },
-        else => {
-            log.info("subscription recv error ({s}) — dropping", .{@errorName(err)});
-            sub.daemon.handleConnectionClose(sub);
-            return;
-        },
-    };
+        }
+        log.info("subscription recv error (errno={d}) — dropping", .{errno});
+        sub.daemon.handleConnectionClose(sub);
+        return;
+    }
     if (n == 0) {
         // Peer closed cleanly.
         sub.daemon.handleConnectionClose(sub);
@@ -807,7 +808,7 @@ fn subscriptionCallback(
     // tolerate it rather than tear down.
     log.warn("subscription uid={d}: unexpected {d} byte(s) from agent — discarding", .{ sub.uid, n });
     var drain: [256]u8 = undefined;
-    _ = posix.recv(sub.fd, &drain, MSG_DONTWAIT) catch {};
+    _ = c.recv(sub.fd, &drain, drain.len, c.MSG_DONTWAIT);
     c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
 }
 
@@ -829,10 +830,13 @@ fn currentConsoleUid() ?u32 {
 
 fn ensureSocketParentDir(socket_path: []const u8) !void {
     const dir = std.fs.path.dirname(socket_path) orelse return;
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    var stack: [std.fs.max_path_bytes]u8 = undefined;
+    if (dir.len >= stack.len) return error.PathTooLong;
+    @memcpy(stack[0..dir.len], dir);
+    stack[dir.len] = 0;
+    if (std.c.mkdir(@ptrCast(&stack), 0o755) != 0) {
+        if (std.c.errno(@as(c_int, -1)) != .EXIST) return error.MkdirFailed;
+    }
 }
 
 fn chmodPath(path: []const u8, mode: u32) !void {
@@ -847,23 +851,23 @@ fn chmodPath(path: []const u8, mode: u32) !void {
 fn installSignalHandlers() void {
     var act: posix.Sigaction = .{
         .handler = .{ .handler = handleSignal },
-        .mask = posix.empty_sigset,
+        .mask = posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(posix.SIG.TERM, &act, null);
-    posix.sigaction(posix.SIG.INT, &act, null);
-    posix.sigaction(posix.SIG.HUP, &act, null);
+    posix.sigaction(.TERM, &act, null);
+    posix.sigaction(.INT, &act, null);
+    posix.sigaction(.HUP, &act, null);
     // SIGPIPE: client dropped mid-write; we want EPIPE from write() and
     // graceful continue, not whole-process termination.
     var ignore: posix.Sigaction = .{
         .handler = .{ .handler = posix.SIG.IGN },
-        .mask = posix.empty_sigset,
+        .mask = posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(posix.SIG.PIPE, &ignore, null);
+    posix.sigaction(.PIPE, &ignore, null);
 }
 
-fn handleSignal(_: c_int) callconv(.C) void {
+fn handleSignal(_: posix.SIG) callconv(.c) void {
     should_exit.store(true, .release);
     // Best-effort unlink so the next launchd respawn binds cleanly.
     // Path access is safe here because we set bound_socket_path once
@@ -888,9 +892,9 @@ fn handleSignal(_: c_int) callconv(.C) void {
 /// Connect to vhidd_server, initialize the virtual keyboard, wait for
 /// the ready signal, then send Escape keydown + keyup. Used to verify
 /// the Karabiner DriverKit injection path end-to-end (D2 phase).
-fn injectTestKey(allocator: std.mem.Allocator) !void {
+fn injectTestKey(allocator: std.mem.Allocator, io: std.Io) !void {
     log.info("connecting to vhidd_server…", .{});
-    var client = try Vhidd.Client.connect(allocator);
+    var client = try Vhidd.Client.connect(allocator, io);
     defer client.close();
 
     log.info("initializing virtual keyboard…", .{});
@@ -903,7 +907,7 @@ fn injectTestKey(allocator: std.mem.Allocator) !void {
     // Brief settle; in practice the ready signal is enough but Apple
     // Silicon DriverKit sometimes needs a beat before injection lands
     // reliably (matches the example client's 100ms post-ready sleep).
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
 
     // 'a' (HID 0x04). Picked over Escape because Escape is invisible in
     // most terminals — 'a' shows up on screen so injection success is
@@ -913,14 +917,14 @@ fn injectTestKey(allocator: std.mem.Allocator) !void {
     log.info("posting keydown (a, HID 0x{X:0>2})", .{test_usage});
     try client.postKeyboardReport(.{}, &.{test_usage});
 
-    std.time.sleep(50 * std.time.ns_per_ms);
+    std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
 
     log.info("posting keyup (empty)", .{});
     try client.postKeyboardReport(.{}, &.{});
 
     // Small post-write grace period before close so the kernel has
     // time to deliver our final keyup before we tear the socket down.
-    std.time.sleep(50 * std.time.ns_per_ms);
+    std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     log.info("done", .{});
 }
 
@@ -990,7 +994,27 @@ const SeizeCtx = struct {
     /// Monotonic clock anchor used by profile traces. Only valid when
     /// `profile` is true; left undefined otherwise so the no-profile
     /// path doesn't pay for the syscall.
-    profile_timer: std.time.Timer = undefined,
+    profile_timer: ProfileTimer = undefined,
+};
+
+/// std.time.Timer was removed in Zig 0.16. `std.Io.Clock.Timestamp.now(io,
+/// .awake)` is the monotonic-clock replacement (`.awake` excludes time
+/// the system was suspended; on macOS this maps to `CLOCK_UPTIME_RAW`).
+/// Subtracting two reads gives ns-since-start for the profile traces.
+const ProfileTimer = struct {
+    io: std.Io,
+    start_ns: i128 = 0,
+
+    pub fn start(io: std.Io) ProfileTimer {
+        const ts = std.Io.Clock.Timestamp.now(io, .awake);
+        return .{ .io = io, .start_ns = ts.raw.nanoseconds };
+    }
+
+    pub fn read(self: *ProfileTimer) u64 {
+        const ts = std.Io.Clock.Timestamp.now(self.io, .awake);
+        const delta = ts.raw.nanoseconds - self.start_ns;
+        return if (delta < 0) 0 else @intCast(delta);
+    }
 };
 
 /// Profile-trace helper: ns-since-`profile_timer.start()` cast to
@@ -1003,8 +1027,9 @@ inline fn profUs(cx: *SeizeCtx) u64 {
 /// State for the layer-hold sink: a borrowed agent IPC stream + the
 /// allocator we use to build outbound JSON payloads.
 const LayerPushCtx = struct {
-    stream: ?std.net.Stream,
+    stream: ?std.Io.net.Stream,
     allocator: std.mem.Allocator,
+    io: std.Io,
 };
 
 /// TapHold layer sink: write a `mode_change` message back to the
@@ -1022,11 +1047,17 @@ fn layerPushSink(ctx_ptr: ?*anyopaque, layer: []const u8, entering: bool) void {
     // default". Push the layer name on enter so multi-layer setups
     // can target named modes individually.
     const target: []const u8 = if (entering) layer else "";
-    protocol.writeMessage(stream, lctx.allocator, .{
+    var wbuf: [256]u8 = undefined;
+    var sw = stream.writer(lctx.io, &wbuf);
+    protocol.writeMessage(&sw.interface, lctx.allocator, .{
         .@"type" = "mode_change",
         .mode = target,
     }) catch |err| {
         log.warn("mode_change push failed: {s}", .{@errorName(err)});
+        return;
+    };
+    sw.interface.flush() catch |err| {
+        log.warn("mode_change flush failed: {s}", .{@errorName(err)});
     };
 }
 
@@ -1093,7 +1124,7 @@ fn cancelTapHoldTimer(slot: *EngineSlot) void {
     }
 }
 
-fn tapHoldTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
+fn tapHoldTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const slot: *EngineSlot = @ptrCast(@alignCast(info orelse return));
     if (comptime profile_supported) {
         if (slot.seize_ctx.profile) {
@@ -1363,6 +1394,7 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
 /// any rules are wired up.
 fn seizeTest(
     allocator: std.mem.Allocator,
+    io: std.Io,
     match: HidSeize.Match,
     duration_ms: u32,
     mode: HidSeize.Mode,
@@ -1392,7 +1424,7 @@ fn seizeTest(
     }
 
     log.info("connecting to vhidd_server", .{});
-    var vhidd = try Vhidd.Client.connect(allocator);
+    var vhidd = try Vhidd.Client.connect(allocator, io);
     defer vhidd.close();
 
     log.info("initializing virtual keyboard", .{});
@@ -1409,7 +1441,7 @@ fn seizeTest(
         },
         .profile = profile,
         .profile_timer = if (comptime profile_supported)
-            (if (profile) try std.time.Timer.start() else undefined)
+            (if (profile) ProfileTimer.start(io) else undefined)
         else
             undefined,
     };
@@ -1469,7 +1501,7 @@ const TimerCtx = struct {
     stop: bool = false,
 };
 
-fn timerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
+fn timerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const ctx: *TimerCtx = @ptrCast(@alignCast(info orelse return));
     ctx.stop = true;
     c.CFRunLoopStop(c.CFRunLoopGetCurrent());

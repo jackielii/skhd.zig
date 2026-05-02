@@ -124,10 +124,17 @@ pub const Client = struct {
         const ue = std.c.errno(rc);
         if (ue != .SUCCESS and ue != .NOENT) return error.ClientSocketBindFailed;
 
-        const fd_rc = std.c.socket(std.c.AF.UNIX, std.c.SOCK.DGRAM | std.c.SOCK.CLOEXEC, 0);
+        // Darwin doesn't accept SOCK_CLOEXEC in the type bits the way Linux
+        // does — `std.c.SOCK.CLOEXEC` is a Zig-internal shim flag that the
+        // (now-removed) `std.posix.socket` wrapper used to translate into a
+        // post-creation fcntl. Calling `std.c.socket` directly we have to do
+        // that fcntl ourselves, otherwise the syscall rejects the unknown
+        // bit and returns -1.
+        const fd_rc = std.c.socket(std.c.AF.UNIX, std.c.SOCK.DGRAM, 0);
         if (fd_rc < 0) return error.ClientSocketBindFailed;
         const fd: posix.fd_t = fd_rc;
         errdefer _ = std.c.close(fd);
+        _ = std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
 
         try bindUnix(fd, client_path);
         errdefer _ = std.c.unlink(path_z.ptr);

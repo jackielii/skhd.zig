@@ -639,8 +639,9 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
 }
 
 /// Run `argv` with stdio captured (to avoid noise in the terminal) and
-/// return the exit code. `null` is returned for signal-terminated children;
-/// caller treats both negative and unknown terms as failure.
+/// return the exit code. Returns `-1` for signal-terminated or otherwise
+/// non-`.exited` children; callers treat both negative and unknown terms
+/// as failure.
 fn runQuiet(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) !i32 {
     const result = try std.process.run(allocator, io, .{ .argv = argv });
     defer allocator.free(result.stdout);

@@ -112,7 +112,11 @@ fn resolveGrabberBinary(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
 }
 
 fn fileExists(io: std.Io, path: []const u8) bool {
-    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    } else {
+        std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    }
     return true;
 }
 

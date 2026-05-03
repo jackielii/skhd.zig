@@ -69,21 +69,13 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, io: std.Io, key_string: []con
 pub fn synthesizeText(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     _ = allocator;
 
-    // Convert text to CFString. CFStringCreateWithCString needs a
-    // NUL-terminated source, so dupe to a sentinel slice when we
-    // don't already have one.
-    var stack_buf: [256]u8 = undefined;
-    const text_z: [:0]const u8 = blk: {
-        if (text.len < stack_buf.len) {
-            @memcpy(stack_buf[0..text.len], text);
-            stack_buf[text.len] = 0;
-            break :blk stack_buf[0..text.len :0];
-        }
-        // Caller's allocator unused; emergency long-input path
-        // would need it — defer if/when we hit that.
-        unreachable;
-    };
-    const text_ref = c.CFStringCreateWithCString(null, text_z.ptr, c.kCFStringEncodingUTF8);
+    const text_ref = c.CFStringCreateWithBytes(
+        c.kCFAllocatorDefault,
+        text.ptr,
+        @intCast(text.len),
+        c.kCFStringEncodingUTF8,
+        0,
+    );
     defer c.CFRelease(text_ref);
 
     const text_length = c.CFStringGetLength(text_ref);

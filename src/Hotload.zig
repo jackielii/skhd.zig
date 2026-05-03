@@ -247,9 +247,12 @@ test "hotload file watching" {
     // Reset test state
     test_reload_count = 0;
 
-    // Create a test file with absolute path
+    // Create a test file with absolute path. Use std.process.currentPath
+    // because std.Io.Dir.cwd() returns a Dir handle whose `handle` field is
+    // the AT.FDCWD pseudo-fd on POSIX — fcntl(AT.FDCWD, F.GETPATH) (which
+    // backs Dir.realPath on macOS) fails with EBADF.
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_len = try std.Io.Dir.cwd().realPath(std.testing.io, &path_buf);
+    const cwd_len = try std.process.currentPath(std.testing.io, &path_buf);
     const cwd_path = path_buf[0..cwd_len];
     const test_file = try std.fmt.allocPrint(allocator, "{s}/test_hotload_file.txt", .{cwd_path});
     defer allocator.free(test_file);

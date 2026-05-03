@@ -401,7 +401,12 @@ pub fn build(b: *std.Build) void {
     );
     check_constants_step.dependOn(&check_constants_cmd.step);
 
+    // `zig build test` also runs check-c-constants — the comptime drift
+    // test (in src/tests.zig) covers c.zig ↔ .c divergence, and clang
+    // here covers .c ↔ SDK divergence; both must pass for tests to
+    // succeed.
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&check_constants_cmd.step);
 
     // Benchmark executable
     const bench_mod = b.createModule(.{

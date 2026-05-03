@@ -567,6 +567,12 @@ pub fn getKeyString(keyCode: u32) []const u8 {
         125 => "down",
         126 => "up",
 
+        mouseButtonCode(1) => "mouse1",
+        mouseButtonCode(2) => "mouse2",
+        mouseButtonCode(3) => "mouse3",
+        mouseButtonCode(4) => "mouse4",
+        mouseButtonCode(5) => "mouse5",
+
         else => "unknown",
     };
 }

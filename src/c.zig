@@ -453,6 +453,26 @@ pub extern fn InstallEventHandler(
 pub extern fn RemoveEventHandler(inHandlerRef: EventHandlerRef) OSStatus;
 pub extern fn GetApplicationEventTarget() EventTargetRef;
 
+pub const EventParamName = OSType;
+pub const EventParamType = OSType;
+// inBufferSize / outActualSize are ByteCount (c_ulong → 64-bit on arm64
+// macOS). Declaring them as UInt32 leaves the upper 32 bits of the
+// register unspecified at the AArch64 PCS level, and Apple's stdlib can
+// read them — the call then fails or scribbles past outData.
+pub extern fn GetEventParameter(
+    inEvent: EventRef,
+    inName: EventParamName,
+    inDesiredType: EventParamType,
+    outActualType: ?*EventParamType,
+    inBufferSize: ByteCount,
+    outActualSize: ?*ByteCount,
+    outData: ?*anyopaque,
+) OSStatus;
+
+// FourCharCode 'psn ' for both the param name and type.
+pub const kEventParamProcessID: EventParamName = 0x70736E20;
+pub const typeProcessSerialNumber: EventParamType = 0x70736E20;
+
 /// Apple ships InstallApplicationEventHandler as an inline shim around
 /// `InstallEventHandler(GetApplicationEventTarget(), ...)`. We mirror it
 /// here so call sites read the same as in Apple sample code.
@@ -466,10 +486,12 @@ pub inline fn InstallApplicationEventHandler(
     return InstallEventHandler(GetApplicationEventTarget(), handler, numTypes, list, userData, outHandlerRef);
 }
 
-// Carbon application event class/kinds (from CarbonEvents.h enums).
-// FourCharCode 'appl'/'fwsw'.
+// Carbon application event class + kinds (from CarbonEvents.h).
+// Classes are FourCharCodes; event kinds are plain integers within
+// their class. kEventAppFrontSwitched is enum value 7 — using
+// 'fwsw' here silently mis-registers the handler so it never fires.
 pub const kEventClassApplication: OSType = 0x6170706c; // 'appl'
-pub const kEventAppFrontSwitched: UInt32 = 0x66777377; // 'fwsw'
+pub const kEventAppFrontSwitched: UInt32 = 7;
 
 // =====================================================================
 // HIToolbox — Events.h: virtual keycodes (kVK_*)

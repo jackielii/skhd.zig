@@ -1875,3 +1875,110 @@ test "NX media key forwarding" {
     try std.testing.expect(found_backslash);
     try std.testing.expect(found_cmd_p);
 }
+
+// ---------------------------------------------------------------------------
+// tools/check_c_constants.c ↔ c.zig drift check.
+//
+// The .c file's `_Static_assert`s catch divergence between the .c file
+// and Apple's SDK at build time (`zig build check-c-constants`). This
+// test catches divergence in the *other* direction: c.zig changing
+// without the .c file being updated. With both checks in place, all
+// three (SDK / .c / c.zig) must agree.
+//
+// We parse `_Static_assert(LHS == RHS, "NAME");` lines at comptime,
+// look up `c.<NAME>`, and compare its value to RHS. Mismatches surface
+// as @compileError pointing at the offending constant.
+
+fn parseCExpr(comptime expr: []const u8) i128 {
+    var s = std.mem.trim(u8, expr, " \t");
+
+    // Strip a leading "(unsigned)" cast — purely a width hint, doesn't
+    // affect the integer's value.
+    if (std.mem.startsWith(u8, s, "(unsigned)")) {
+        s = std.mem.trim(u8, s["(unsigned)".len..], " \t");
+    }
+    // Strip a leading "(int)" cast and sign-extend if the literal has
+    // the high bit set — this is the C convention for IOReturn-style
+    // negative-int constants spelled as `(int)0xE0000XXX`.
+    var is_int_cast = false;
+    if (std.mem.startsWith(u8, s, "(int)")) {
+        is_int_cast = true;
+        s = std.mem.trim(u8, s["(int)".len..], " \t");
+    }
+
+    // Strip wrapping parens.
+    while (s.len >= 2 and s[0] == '(' and s[s.len - 1] == ')') {
+        // Don't strip "(1 << 0)" prematurely — we still want the parens
+        // gone so the shift parser below sees plain "1 << 0".
+        s = std.mem.trim(u8, s[1 .. s.len - 1], " \t");
+    }
+
+    // Handle `LHS << RHS`. Recurse so each side gets its own stripping.
+    if (std.mem.indexOf(u8, s, "<<")) |op| {
+        const lhs = parseCExpr(std.mem.trim(u8, s[0..op], " \t"));
+        const rhs = parseCExpr(std.mem.trim(u8, s[op + 2 ..], " \t"));
+        return lhs << @intCast(rhs);
+    }
+
+    // Strip integer suffixes. Order matters (longest first).
+    inline for (.{ "ULL", "ull", "LL", "ll", "UL", "ul", "U", "u", "L", "l" }) |suf| {
+        if (std.mem.endsWith(u8, s, suf)) {
+            s = s[0 .. s.len - suf.len];
+            break;
+        }
+    }
+
+    const value = std.fmt.parseInt(u128, s, 0) catch |err| @compileError(
+        std.fmt.comptimePrint("parseCExpr can't parse '{s}': {s}", .{ s, @errorName(err) }),
+    );
+    if (is_int_cast and value > std.math.maxInt(i32)) {
+        // Sign-extend from 32-bit.
+        return @as(i32, @bitCast(@as(u32, @intCast(value))));
+    }
+    return @intCast(value);
+}
+
+test "tools/check_c_constants.c values agree with c.zig" {
+    const c = @import("c.zig");
+    const src = @embedFile("check_c_constants_c");
+
+    @setEvalBranchQuota(1_000_000);
+    comptime var line_iter = std.mem.tokenizeScalar(u8, src, '\n');
+    inline while (comptime line_iter.next()) |line| {
+        const trimmed = comptime std.mem.trim(u8, line, " \t");
+        if (comptime !std.mem.startsWith(u8, trimmed, "_Static_assert(")) continue;
+
+        // Body: everything between the first `(` and the trailing `);`.
+        const body = comptime blk: {
+            const start = std.mem.indexOfScalar(u8, trimmed, '(').? + 1;
+            // Find the matching closing paren of `_Static_assert(...)`.
+            // The body contains a string literal but no nested unbalanced
+            // parens, so a last-`)` scan is fine.
+            const end = std.mem.lastIndexOfScalar(u8, trimmed, ')').?;
+            break :blk trimmed[start..end];
+        };
+
+        // Split on the *last* top-level `,` — the value side may contain
+        // commas inside casts in the future, so prefer last over first.
+        const last_comma = comptime std.mem.lastIndexOfScalar(u8, body, ',').?;
+        const lhs_eq_rhs = comptime std.mem.trim(u8, body[0..last_comma], " \t");
+        const name_quoted = comptime std.mem.trim(u8, body[last_comma + 1 ..], " \t");
+        const name = comptime std.mem.trim(u8, name_quoted, "\"");
+
+        // Split LHS == RHS.
+        const eq = comptime std.mem.indexOf(u8, lhs_eq_rhs, "==").?;
+        const rhs_str = comptime std.mem.trim(u8, lhs_eq_rhs[eq + 2 ..], " \t");
+        const expected: i128 = comptime parseCExpr(rhs_str);
+
+        if (!@hasDecl(c, name)) {
+            @compileError("tools/check_c_constants.c references unknown c." ++ name);
+        }
+        const actual: i128 = comptime @intCast(@field(c, name));
+        if (comptime actual != expected) {
+            @compileError(std.fmt.comptimePrint(
+                "drift between c.{s} ({d}) and tools/check_c_constants.c ({d}); update both",
+                .{ name, actual, expected },
+            ));
+        }
+    }
+}

@@ -383,6 +383,24 @@ pub fn build(b: *std.Build) void {
     const install_dext_step = b.step("install-dext", "Download and install pinned Karabiner-DriverKit-VirtualHIDDevice (required by skhd-grabber)");
     install_dext_step.dependOn(&install_dext_cmd.step);
 
+    // `zig build check-c-constants` — cross-check c.zig's hand-rolled
+    // integer constants against Apple's SDK headers. tools/check_c_constants.c
+    // is a `_Static_assert` table; clang -fsyntax-only flags any mismatch
+    // at compile time. Catches the class of bug where a hand-rolled hex
+    // literal silently disagrees with the SDK (e.g. kEventAppFrontSwitched
+    // was once 'fwsw' when it should be 7, see commit 9bd7b0d).
+    const check_constants_cmd = b.addSystemCommand(&[_][]const u8{
+        "clang",
+        "-fsyntax-only",
+        "-Wno-deprecated-declarations",
+    });
+    check_constants_cmd.addFileArg(b.path("tools/check_c_constants.c"));
+    const check_constants_step = b.step(
+        "check-c-constants",
+        "Cross-check c.zig hand-rolled integer constants against Apple SDK headers",
+    );
+    check_constants_step.dependOn(&check_constants_cmd.step);
+
     const test_step = b.step("test", "Run unit tests");
 
     // Benchmark executable
@@ -489,6 +507,12 @@ pub fn build(b: *std.Build) void {
     addGrabberPlistImports(b, tests_mod);
     tests_mod.addOptions("build_options", exe_options);
     tests_mod.addImport("grabber_protocol", grabber_protocol_mod);
+    // The c.zig drift check @embedFile's tools/check_c_constants.c, which
+    // lives outside src/. addAnonymousImport is the supported escape
+    // hatch for embedding files outside the module's package root.
+    tests_mod.addAnonymousImport("check_c_constants_c", .{
+        .root_source_file = b.path("tools/check_c_constants.c"),
+    });
 
     const tests_unit_tests = b.addTest(.{
         .root_module = tests_mod,

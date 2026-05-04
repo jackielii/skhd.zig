@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0-alpha] - 2026-04-28
+## [0.1.0] - 2026-05-04
 
-> Major release introducing **skhd-grabber** — a system daemon that handles caps_lock-class tap-hold rules through HID seize, enabling QMK-style keyboard remapping that the user-session-level event tap can't reach. This is an alpha; the wire format between agent and grabber and the new `.remap` / `.taphold` / `.device` directives are still subject to change. Run for a while before relying on it for everything.
+> Major release introducing **skhd-grabber** — a system daemon that handles caps_lock-class tap-hold rules through HID seize, enabling QMK-style keyboard remapping that the user-session-level event tap can't reach. The wire format between agent and grabber and the new `.remap` / `.taphold` / `.device` directives are now considered stable.
 
 ### Added
 - **`.remap` / `.taphold` / `.device` directives** for QMK-style keyboard remapping. Two paths depending on what the rule needs:
@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Hotkeys functional` false negative in `--status`** — the log-tail scan now anchors on the current daemon's `(PID N)` start marker so stale `ACCESSIBILITY PERMISSIONS REQUIRED` lines from prior crashed instances no longer poison the read. Returns `Unknown` instead of `Denied` when the marker isn't in the read window yet.
 
 ### Internal
+- **Toolchain upgraded to Zig 0.16.** `std.Io` is plumbed through `Skhd` / `Mappings` / `Hotload` / `Parser` / `CarbonEvent` / `TrackingAllocator` as a struct field set at init, and through `service` / `grabber_cli` per call. `main()` takes `std.process.Init` so gpa, io, arena, and args come from the runtime. File I/O moves to `std.Io.Dir` / `std.Io.File`, process spawning to `std.process.spawn(io, ...)` / `std.process.run(gpa, io, ...)`, unix sockets to `std.Io.net.UnixAddress`. Format methods adopt the new `(self, w: *std.Io.Writer)` signature.
 - **`mappings.tapholds` / `mappings.remaps` / `mappings.device_aliases`** — parser and runtime data for the new directives.
 - **`grabber_protocol`** — shared module defining the agent ↔ grabber wire format. Versioned (`protocol_version`) so handshake mismatches surface clearly. Currently v2.
 - **Daemon refactored around `CFRunLoop`-driven IPC listener** so the agent can react to grabber pushes (layer-hold mode changes) without polling.
@@ -444,7 +445,8 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
 
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.0.24...HEAD
+[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jackielii/skhd.zig/compare/v0.0.24...v0.1.0
 [0.0.24]: https://github.com/jackielii/skhd.zig/compare/v0.0.23...v0.0.24
 [0.0.23]: https://github.com/jackielii/skhd.zig/compare/v0.0.22...v0.0.23
 [0.0.22]: https://github.com/jackielii/skhd.zig/compare/v0.0.21...v0.0.22

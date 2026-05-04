@@ -6,7 +6,7 @@ This implementation is **fully compatible with the original skhd configuration f
 
 📋 [View Changelog](CHANGELOG.md)
 
-## v0.1.0-alpha — QMK-style keyboard remapping
+## v0.1.0 — QMK-style keyboard remapping
 
 skhd.zig now ships a system-level **grabber daemon** that enables remapping the user-session event tap can't reach. New directives:
 
@@ -15,10 +15,17 @@ skhd.zig now ships a system-level **grabber daemon** that enables remapping the 
 - **Layer holds** — `hold` can target a skhd mode instead of a key, so holding the source key activates the layer for the duration of the hold (e.g. hold `space` to enter `fn_layer`, where `fn_layer < 1 | f1` rebinds the number row to F-keys).
 - **`.device <alias> { vendor: 0x…, product: 0x… }`** — scope rules to a specific keyboard, so one config does the right thing on each machine.
 
-**Install the alpha** (Homebrew formula stays on 0.0.24 until v0.1.0 stable; eager testers download from GitHub releases):
+**Install** via Homebrew, or download the `.app` bundle from GitHub releases:
 
 ```bash
-gh release download v0.1.0-alpha --repo jackielii/skhd.zig --pattern '*-arm64-macos.tar.gz'
+brew install jackielii/tap/skhd-zig
+skhd --install-service
+```
+
+Or, manual install:
+
+```bash
+gh release download v0.1.0 --repo jackielii/skhd.zig --pattern '*-arm64-macos.tar.gz'
 tar -xzf skhd-arm64-macos.tar.gz -C /tmp
 sudo mv /tmp/skhd.app /Applications/
 /Applications/skhd.app/Contents/MacOS/skhd --install-service
@@ -65,7 +72,7 @@ Save, then `skhd --restart-service`. Tap `caps_lock` → escape. Hold `caps_lock
 - skhd config: <https://gist.github.com/jackielii/9d24095af57ec35df0d46d38bbbe0449>
 - QMK source-of-truth keymap it mirrors: <https://github.com/jackielii/qmk_firmware/blob/jackie/keyboards/keebio/convolution/keymaps/jackie/keymap.c>
 
-See [skhd-grabber](#skhd-grabber-caps_lock-class-tap-hold) below for the full architecture, [SYNTAX.md](SYNTAX.md) for the new directive grammar, and the [v0.1.0-alpha CHANGELOG entry](CHANGELOG.md#010-alpha---2026-04-28) for everything that changed.
+See [skhd-grabber](#skhd-grabber-caps_lock-class-tap-hold) below for the full architecture, [SYNTAX.md](SYNTAX.md) for the new directive grammar, and the [v0.1.0 CHANGELOG entry](CHANGELOG.md#010---2026-05-04) for everything that changed.
 
 ## Installation
 
@@ -196,7 +203,7 @@ The service will:
 - **Modal system**: Multi-level modal hotkey system with capture modes
 - **Configuration file**: Compatible with original skhd configuration format
 - **Hot reloading**: Automatic config reload on file changes
-- **Device-aware HID remapping** (v0.1.0-alpha): per-keyboard 1:1 remaps via `hidutil` and tap-vs-hold rules via the optional `skhd-grabber` daemon. See [Device-aware remapping](#device-aware-remapping-device--remap).
+- **Device-aware HID remapping** (v0.1.0): per-keyboard 1:1 remaps via `hidutil` and tap-vs-hold rules via the optional `skhd-grabber` daemon. See [Device-aware remapping](#device-aware-remapping-device--remap).
 
 ### Additional Features (New in skhd.zig!)
 
@@ -206,8 +213,8 @@ The service will:
 - **Command definitions**: Define reusable commands with placeholders to reduce repetition
 - **Key Forwarding**: Forward / remap key binding to another key binding
 - **Mode activation with command**: Execute a command when switching modes (e.g., `cmd - w ; window : echo "Window mode"`)
-- **`.device` + `.remap` (v0.1.0-alpha)**: per-device HID-layer remapping, both colon (1:1) and block (tap/hold) forms.
-- **Layer holds (v0.1.0-alpha)**: a `.remap` `hold:` target can be a skhd mode, so holding a key activates a layer for the duration of the hold.
+- **`.device` + `.remap` (v0.1.0)**: per-device HID-layer remapping, both colon (1:1) and block (tap/hold) forms.
+- **Layer holds (v0.1.0)**: a `.remap` `hold:` target can be a skhd mode, so holding a key activates a layer for the duration of the hold.
 
 ### Command-Line Interface
 
@@ -318,7 +325,7 @@ The configuration syntax is fully compatible with the original skhd. See [SYNTAX
 .define resize_window : yabai -m window --resize {{1}}:{{2}}:{{3}}
 .define toggle_scratchpad : yabai -m window --toggle {{1}} || open -a "{{2}}"
 
-# Declare a keyboard by VendorID/ProductID (v0.1.0-alpha)
+# Declare a keyboard by VendorID/ProductID (v0.1.0)
 # See "Device-aware remapping" below for full details.
 .device builtin { vendor: 0x05AC, product: 0x0342 }
 

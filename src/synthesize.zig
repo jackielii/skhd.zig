@@ -15,13 +15,13 @@ const Modifier_Keycode_Ctrl = 0x3B;
 const Modifier_Keycode_Fn = 0x3F;
 
 /// Synthesize a keypress from a key specification string (e.g., "cmd - space")
-pub fn synthesizeKey(allocator: std.mem.Allocator, key_string: []const u8) !void {
+pub fn synthesizeKey(allocator: std.mem.Allocator, io: std.Io, key_string: []const u8) !void {
     // Parse the key string
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, io);
     defer parser.deinit();
 
     // Create temporary mappings just for parsing
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, io);
     defer mappings.deinit();
 
     // For synthesis, we need to add a dummy command since the parser expects a complete hotkey
@@ -42,7 +42,7 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, key_string: []const u8) !void
 
             // Disable local event suppression and state combining for clean synthesis
             _ = c.CGSetLocalEventsSuppressionInterval(0.0);
-            _ = c.CGEnableEventStateCombining(0);
+            _ = c.CGEnableEventStateCombining(false);
 
             // Press modifiers down
             synthesizeModifiers(hotkey.flags, true);
@@ -66,11 +66,16 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, key_string: []const u8) !void
 }
 
 /// Synthesize text input
-pub fn synthesizeText(allocator: std.mem.Allocator, text: []const u8) !void {
+pub fn synthesizeText(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     _ = allocator;
 
-    // Convert text to CFString
-    const text_ref = c.CFStringCreateWithCString(null, text.ptr, c.kCFStringEncodingUTF8);
+    const text_ref = c.CFStringCreateWithBytes(
+        c.kCFAllocatorDefault,
+        text.ptr,
+        @intCast(text.len),
+        c.kCFStringEncodingUTF8,
+        0,
+    );
     defer c.CFRelease(text_ref);
 
     const text_length = c.CFStringGetLength(text_ref);
@@ -89,16 +94,17 @@ pub fn synthesizeText(allocator: std.mem.Allocator, text: []const u8) !void {
     // Send each character
     var i: c.CFIndex = 0;
     while (i < text_length) : (i += 1) {
-        const char = c.CFStringGetCharacterAtIndex(text_ref, i);
+        var chars: [1]c.UniChar = .{c.CFStringGetCharacterAtIndex(text_ref, i)};
 
         // Set the unicode character for both events
-        c.CGEventKeyboardSetUnicodeString(down_event, 1, &char);
+        c.CGEventKeyboardSetUnicodeString(down_event, 1, &chars);
         c.CGEventPost(c.kCGAnnotatedSessionEventTap, down_event);
 
-        // Small delay between key down and up
-        std.time.sleep(1000 * 1000); // 1ms in nanoseconds
+        // Small delay between key down and up so the receiving app
+        // sees a real keystroke, not a one-tick spike.
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
 
-        c.CGEventKeyboardSetUnicodeString(up_event, 1, &char);
+        c.CGEventKeyboardSetUnicodeString(up_event, 1, &chars);
         c.CGEventPost(c.kCGAnnotatedSessionEventTap, up_event);
     }
 
@@ -108,7 +114,7 @@ pub fn synthesizeText(allocator: std.mem.Allocator, text: []const u8) !void {
 fn createAndPostKeyEvent(keycode: u16, pressed: bool) void {
     // Use the deprecated but working CGPostKeyboardEvent for now
     // This matches the original skhd implementation
-    _ = c.CGPostKeyboardEvent(0, keycode, if (pressed) 1 else 0);
+    _ = c.CGPostKeyboardEvent(0, keycode, pressed);
 }
 
 fn synthesizeModifiers(flags: ModifierFlag, pressed: bool) void {
@@ -136,12 +142,15 @@ fn synthesizeModifiers(flags: ModifierFlag, pressed: bool) void {
 test "synthesize key parsing" {
     const testing = std.testing;
     const allocator = testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     // Test that we can parse a simple key specification
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, io);
     defer mappings.deinit();
 
     try parser.parse(&mappings, "cmd - space : echo test");

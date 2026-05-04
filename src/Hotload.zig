@@ -19,6 +19,7 @@ const WatchedFile = struct {
 
 // Core fields
 allocator: std.mem.Allocator,
+io: std.Io,
 callback: Callback,
 watch_list: std.ArrayList(WatchedFile),
 enabled: bool = false,
@@ -29,14 +30,15 @@ paths: ?c.CFMutableArrayRef = null,
 
 /// Create a new Hotload instance on the heap
 /// Caller must call destroy() when done
-pub fn create(allocator: std.mem.Allocator, callback: Callback) !*Hotload {
+pub fn create(allocator: std.mem.Allocator, io: std.Io, callback: Callback) !*Hotload {
     const self = try allocator.create(Hotload);
     errdefer allocator.destroy(self);
 
     self.* = .{
         .allocator = allocator,
+        .io = io,
         .callback = callback,
-        .watch_list = std.ArrayList(WatchedFile).init(allocator),
+        .watch_list = .empty,
         .enabled = false,
         .stream = null,
         .paths = null,
@@ -53,7 +55,7 @@ pub fn destroy(self: *Hotload) void {
     for (self.watch_list.items) |*entry| {
         self.allocator.free(entry.absolutepath);
     }
-    self.watch_list.deinit();
+    self.watch_list.deinit(self.allocator);
 
     // Free self
     const allocator = self.allocator;
@@ -64,17 +66,17 @@ pub fn addFile(self: *Hotload, file_path: []const u8) !void {
     if (self.enabled) return error.AlreadyEnabled;
 
     // Resolve symlinks and get real path
-    const real_path = try resolveSymlink(self.allocator, file_path);
+    const real_path = try resolveSymlink(self.allocator, self.io, file_path);
     errdefer self.allocator.free(real_path);
 
     // Verify it's a file
-    const stat = try std.fs.cwd().statFile(real_path);
+    const stat = try std.Io.Dir.cwd().statFile(self.io, real_path, .{});
     if (stat.kind != .file) {
         return error.NotAFile;
     }
 
     // Add to watch list
-    try self.watch_list.append(.{
+    try self.watch_list.append(self.allocator, .{
         .absolutepath = real_path,
     });
 }
@@ -171,9 +173,9 @@ pub fn stop(self: *Hotload) void {
 
 // Helper functions
 
-fn resolveSymlink(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn resolveSymlink(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     // Try to stat the file
-    const stat = std.fs.cwd().statFile(path) catch {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
         // If stat fails, just return a copy of the path
         return allocator.dupe(u8, path);
     };
@@ -185,8 +187,8 @@ fn resolveSymlink(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
     // Resolve the symlink
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const real_path = try std.fs.cwd().realpath(path, &buffer);
-    return allocator.dupe(u8, real_path);
+    const real_len = try std.Io.Dir.cwd().realPathFile(io, path, &buffer);
+    return allocator.dupe(u8, buffer[0..real_len]);
 }
 
 fn createCFString(str: []const u8) ?c.CFStringRef {
@@ -207,7 +209,7 @@ fn fseventsCallback(
     event_paths: ?*anyopaque,
     event_flags: [*c]const c.FSEventStreamEventFlags,
     event_ids: [*c]const c.FSEventStreamEventId,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = stream;
     _ = event_flags;
     _ = event_ids;
@@ -245,16 +247,20 @@ test "hotload file watching" {
     // Reset test state
     test_reload_count = 0;
 
-    // Create a test file with absolute path
+    // Create a test file with absolute path. Use std.process.currentPath
+    // because std.Io.Dir.cwd() returns a Dir handle whose `handle` field is
+    // the AT.FDCWD pseudo-fd on POSIX — fcntl(AT.FDCWD, F.GETPATH) (which
+    // backs Dir.realPath on macOS) fails with EBADF.
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = try std.fs.cwd().realpath(".", &path_buf);
+    const cwd_len = try std.process.currentPath(std.testing.io, &path_buf);
+    const cwd_path = path_buf[0..cwd_len];
     const test_file = try std.fmt.allocPrint(allocator, "{s}/test_hotload_file.txt", .{cwd_path});
     defer allocator.free(test_file);
 
-    try std.fs.cwd().writeFile(.{ .sub_path = "test_hotload_file.txt", .data = "Initial content\n" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "test_hotload_file.txt", .data = "Initial content\n" });
 
     // Create hotloader
-    const hotloader = try create(allocator, testCallback);
+    const hotloader = try create(allocator, std.testing.io, testCallback);
     defer hotloader.destroy();
 
     // Add the test file
@@ -267,7 +273,7 @@ test "hotload file watching" {
     const TimerContext = struct {
         count: u32 = 0,
 
-        fn timerCallback(timer: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.C) void {
+        fn timerCallback(timer: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
             _ = timer;
             const self = @as(*@This(), @ptrCast(@alignCast(info.?)));
             self.count += 1;
@@ -280,7 +286,7 @@ test "hotload file watching" {
             ) catch return;
             defer std.heap.c_allocator.free(new_content);
 
-            std.fs.cwd().writeFile(.{ .sub_path = "test_hotload_file.txt", .data = new_content }) catch return;
+            std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = "test_hotload_file.txt", .data = new_content }) catch return;
 
             if (self.count >= 3) {
                 // Stop after 3 modifications
@@ -315,7 +321,7 @@ test "hotload file watching" {
     _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, 3.0, 0); // Run for max 3 seconds
 
     // Clean up test file before checking
-    std.fs.cwd().deleteFile("test_hotload_file.txt") catch {};
+    std.Io.Dir.cwd().deleteFile(std.testing.io, "test_hotload_file.txt") catch {};
 
     // Verify we got at least 2 file change events (sometimes FSEvents coalesces)
     try testing.expect(test_reload_count >= 2);

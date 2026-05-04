@@ -51,14 +51,14 @@ pub const kCFRunLoopRunStopped: CFRunLoopRunResult = 2;
 pub const kCFRunLoopRunTimedOut: CFRunLoopRunResult = 3;
 pub const kCFRunLoopRunHandledSource: CFRunLoopRunResult = 4;
 
-pub const CFRunLoopTimerCallBack = ?*const fn (CFRunLoopTimerRef, ?*anyopaque) callconv(.C) void;
+pub const CFRunLoopTimerCallBack = ?*const fn (CFRunLoopTimerRef, ?*anyopaque) callconv(.c) void;
 
 pub const CFRunLoopTimerContext = extern struct {
     version: CFIndex = 0,
     info: ?*anyopaque = null,
-    retain: ?*const fn (?*const anyopaque) callconv(.C) ?*const anyopaque = null,
-    release: ?*const fn (?*const anyopaque) callconv(.C) void = null,
-    copyDescription: ?*const fn (?*const anyopaque) callconv(.C) CFStringRef = null,
+    retain: ?*const fn (?*const anyopaque) callconv(.c) ?*const anyopaque = null,
+    release: ?*const fn (?*const anyopaque) callconv(.c) void = null,
+    copyDescription: ?*const fn (?*const anyopaque) callconv(.c) CFStringRef = null,
 };
 
 pub extern const kCFAllocatorDefault: CFAllocatorRef;
@@ -89,14 +89,14 @@ pub extern fn CFRunLoopTimerInvalidate(timer: CFRunLoopTimerRef) void;
 pub extern fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef) void;
 pub extern fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef) void;
 
-pub const CFFileDescriptorCallBack = ?*const fn (CFFileDescriptorRef, CFOptionFlags, ?*anyopaque) callconv(.C) void;
+pub const CFFileDescriptorCallBack = ?*const fn (CFFileDescriptorRef, CFOptionFlags, ?*anyopaque) callconv(.c) void;
 
 pub const CFFileDescriptorContext = extern struct {
     version: CFIndex = 0,
     info: ?*anyopaque = null,
-    retain: ?*const fn (?*const anyopaque) callconv(.C) ?*const anyopaque = null,
-    release: ?*const fn (?*const anyopaque) callconv(.C) void = null,
-    copyDescription: ?*const fn (?*const anyopaque) callconv(.C) CFStringRef = null,
+    retain: ?*const fn (?*const anyopaque) callconv(.c) ?*const anyopaque = null,
+    release: ?*const fn (?*const anyopaque) callconv(.c) void = null,
+    copyDescription: ?*const fn (?*const anyopaque) callconv(.c) CFStringRef = null,
 };
 
 pub const kCFFileDescriptorReadCallBack: CFOptionFlags = 1 << 0;
@@ -145,7 +145,7 @@ pub const IOHIDValueCallback = ?*const fn (
     result: IOReturn,
     sender: ?*anyopaque,
     value: IOHIDValueRef,
-) callconv(.C) void;
+) callconv(.c) void;
 
 // Matching dictionary keys (string constants in IOHIDKeys.h).
 pub const kIOHIDVendorIDKey: [*:0]const u8 = "VendorID";
@@ -265,6 +265,16 @@ pub extern fn CGEventSourceFlagsState(stateID: CGEventSourceStateID) CGEventFlag
 
 // libc bits (geteuid for the seize permission check).
 pub extern fn geteuid() c_uint;
+
+// recv(2) for the subscription EOS check. CFFileDescriptor calls our
+// callback when the fd becomes readable; we use MSG_PEEK | MSG_DONTWAIT
+// to distinguish "peer closed" from "peer wrote unexpected data". Zig's
+// std.Io doesn't expose MSG_PEEK semantics, and we already have the raw
+// fd from the CFFileDescriptor context — going through a Stream wrapper
+// just to call recv would hide the operation, not improve it.
+pub extern fn recv(fd: c_int, buf: [*]u8, len: usize, flags: c_int) isize;
+pub const MSG_PEEK: c_int = 0x2;
+pub const MSG_DONTWAIT: c_int = 0x80;
 
 // stdio handle for setvbuf — when launchd redirects our stdout/stderr
 // to a file, they go block-buffered; per-event log lines then aren't

@@ -25,6 +25,7 @@ const log = std.log.scoped(.hidutil);
 const Hidutil = @This();
 
 allocator: std.mem.Allocator,
+io: std.Io,
 /// Devices we currently have a UserKeyMapping applied on. Populated by
 /// applyRemaps; consulted by restoreAll. Owned strings.
 applied_devices: std.ArrayListUnmanaged(VendorProduct),
@@ -35,13 +36,14 @@ pub const VendorProduct = struct {
     product: u32,
 };
 
-pub fn init(allocator: std.mem.Allocator) !*Hidutil {
+pub fn init(allocator: std.mem.Allocator, io: std.Io) !*Hidutil {
     const state_path = try resolveStatePath(allocator);
     errdefer allocator.free(state_path);
 
     const self = try allocator.create(Hidutil);
     self.* = .{
         .allocator = allocator,
+        .io = io,
         .applied_devices = .empty,
         .state_path = state_path,
     };
@@ -96,7 +98,7 @@ pub fn applyRemaps(self: *Hidutil, mappings: *const Mappings) !void {
     var grp_it = groups.iterator();
     while (grp_it.next()) |kv| {
         const alias = mappings.device_aliases.get(kv.key_ptr.*).?;
-        applyForDevice(self.allocator, alias.vendor, alias.product, kv.value_ptr.items) catch |err| {
+        applyForDevice(self.allocator, self.io, alias.vendor, alias.product, kv.value_ptr.items) catch |err| {
             log.err("Failed to apply remap for device '{s}' ({x:0>4}:{x:0>4}): {s}", .{ kv.key_ptr.*, alias.vendor, alias.product, @errorName(err) });
             any_failure = true;
         };
@@ -109,7 +111,7 @@ pub fn applyRemaps(self: *Hidutil, mappings: *const Mappings) !void {
 /// recovery (where `applied_devices` was populated from the state file).
 pub fn restoreAll(self: *Hidutil) void {
     for (self.applied_devices.items) |vp| {
-        clearForDevice(self.allocator, vp.vendor, vp.product) catch |err| {
+        clearForDevice(self.allocator, self.io, vp.vendor, vp.product) catch |err| {
             log.err("Failed to clear UserKeyMapping on {x:0>4}:{x:0>4}: {s}", .{ vp.vendor, vp.product, @errorName(err) });
         };
     }
@@ -123,13 +125,10 @@ pub fn restoreAll(self: *Hidutil) void {
 /// previous skhd instance was killed via SIGKILL or panicked before it
 /// could restore.
 pub fn recoverFromCrash(self: *Hidutil) !void {
-    const file = std.fs.cwd().openFile(self.state_path, .{}) catch |err| {
+    const content = std.Io.Dir.cwd().readFileAlloc(self.io, self.state_path, self.allocator, .limited(64 * 1024)) catch |err| {
         if (err == error.FileNotFound) return;
         return err;
     };
-    defer file.close();
-
-    const content = try file.readToEndAlloc(self.allocator, 64 * 1024);
     defer self.allocator.free(content);
 
     const parsed = std.json.parseFromSlice(StateFile, self.allocator, content, .{}) catch |err| {
@@ -159,41 +158,41 @@ fn writeState(self: *Hidutil) !void {
     // Ensure parent dir exists. Errors here are fatal — without the
     // state file we can't recover from a future crash.
     if (std.fs.path.dirname(self.state_path)) |dir| {
-        try std.fs.cwd().makePath(dir);
+        try std.Io.Dir.cwd().createDirPath(self.io, dir);
     }
-
-    var file = try std.fs.cwd().createFile(self.state_path, .{ .truncate = true });
-    defer file.close();
 
     const state = StateFile{
         .pid = @intCast(std.c.getpid()),
         .devices = self.applied_devices.items,
     };
-    try std.json.stringify(state, .{}, file.writer());
+    var aw: std.Io.Writer.Allocating = .init(self.allocator);
+    defer aw.deinit();
+    try std.json.Stringify.value(state, .{}, &aw.writer);
+    try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = self.state_path, .data = aw.written() });
 }
 
 fn deleteState(self: *Hidutil) !void {
-    std.fs.cwd().deleteFile(self.state_path) catch |err| {
+    std.Io.Dir.cwd().deleteFile(self.io, self.state_path) catch |err| {
         if (err == error.FileNotFound) return;
         return err;
     };
 }
 
 fn resolveStatePath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = std.posix.getenv("HOME") orelse return error.HomeNotSet;
+    const home = @import("utils.zig").getenv("HOME") orelse return error.HomeNotSet;
     return try std.fmt.allocPrint(allocator, "{s}/.cache/skhd/hidutil_state.json", .{home});
 }
 
 fn isProcessRunning(pid: i32) bool {
     // kill(pid, 0) returns 0 if process exists and we have permission.
     // -1 with ESRCH means no such process.
-    return std.c.kill(pid, 0) == 0;
+    return std.c.kill(pid, @enumFromInt(0)) == 0;
 }
 
-fn applyForDevice(allocator: std.mem.Allocator, vendor: u32, product: u32, remaps: []const Mappings.RemapDecl) !void {
-    var json_buf = std.ArrayList(u8).init(allocator);
+fn applyForDevice(allocator: std.mem.Allocator, io: std.Io, vendor: u32, product: u32, remaps: []const Mappings.RemapDecl) !void {
+    var json_buf: std.Io.Writer.Allocating = .init(allocator);
     defer json_buf.deinit();
-    const w = json_buf.writer();
+    const w = &json_buf.writer;
     try w.writeAll("{\"UserKeyMapping\":[");
     for (remaps, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
@@ -204,37 +203,31 @@ fn applyForDevice(allocator: std.mem.Allocator, vendor: u32, product: u32, remap
     var matching_buf: [128]u8 = undefined;
     const matching = try std.fmt.bufPrint(&matching_buf, "{{\"VendorID\":{d},\"ProductID\":{d}}}", .{ vendor, product });
 
-    try runHidutilSet(allocator, matching, json_buf.items);
+    try runHidutilSet(allocator, io, matching, json_buf.written());
 }
 
-fn clearForDevice(allocator: std.mem.Allocator, vendor: u32, product: u32) !void {
+fn clearForDevice(allocator: std.mem.Allocator, io: std.Io, vendor: u32, product: u32) !void {
     var matching_buf: [128]u8 = undefined;
     const matching = try std.fmt.bufPrint(&matching_buf, "{{\"VendorID\":{d},\"ProductID\":{d}}}", .{ vendor, product });
-    try runHidutilSet(allocator, matching, "{\"UserKeyMapping\":[]}");
+    try runHidutilSet(allocator, io, matching, "{\"UserKeyMapping\":[]}");
 }
 
-fn runHidutilSet(allocator: std.mem.Allocator, matching: []const u8, set_value: []const u8) !void {
-    var child = std.process.Child.init(&.{
-        "/usr/bin/hidutil",
-        "property",
-        "--matching",
-        matching,
-        "--set",
-        set_value,
-    }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Pipe;
-    try child.spawn();
-
-    var stderr_data = std.ArrayList(u8).init(allocator);
-    defer stderr_data.deinit();
-    if (child.stderr) |stderr| {
-        stderr.reader().readAllArrayList(&stderr_data, 4096) catch {};
-    }
-    const term = try child.wait();
-    if (term != .Exited or term.Exited != 0) {
-        log.err("hidutil failed (term={any}): {s}", .{ term, std.mem.trim(u8, stderr_data.items, " \r\n\t") });
+fn runHidutilSet(allocator: std.mem.Allocator, io: std.Io, matching: []const u8, set_value: []const u8) !void {
+    const result = try std.process.run(allocator, io, .{
+        .argv = &.{
+            "/usr/bin/hidutil",
+            "property",
+            "--matching",
+            matching,
+            "--set",
+            set_value,
+        },
+        .stderr_limit = .limited(4096),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        log.err("hidutil failed (term={any}): {s}", .{ result.term, std.mem.trim(u8, result.stderr, " \r\n\t") });
         return error.HidutilFailed;
     }
 }
@@ -249,11 +242,11 @@ test "VendorProduct round-trip via state file" {
         .pid = 12345,
         .devices = devices[0..],
     };
-    var buf = std.ArrayList(u8).init(alloc);
-    defer buf.deinit();
-    try std.json.stringify(state, .{}, buf.writer());
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    try std.json.Stringify.value(state, .{}, &aw.writer);
 
-    const parsed = try std.json.parseFromSlice(StateFile, alloc, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(StateFile, alloc, aw.written(), .{});
     defer parsed.deinit();
     try std.testing.expectEqual(@as(i32, 12345), parsed.value.pid);
     try std.testing.expectEqual(@as(usize, 2), parsed.value.devices.len);

@@ -43,7 +43,7 @@ fn nsString(utf8: [*:0]const u8) c.id {
     const NSStringClass = c.objc_getClass("NSString") orelse return null;
     const sel = c.sel_registerName("stringWithUTF8String:");
     const msg = @extern(
-        *const fn (c.id, c.SEL, [*:0]const u8) callconv(.C) c.id,
+        *const fn (c.id, c.SEL, [*:0]const u8) callconv(.c) c.id,
         .{ .name = "objc_msgSend" },
     );
     return msg(@as(c.id, @ptrCast(@alignCast(NSStringClass))), sel, utf8);
@@ -60,7 +60,7 @@ pub fn agentService(plist_name: [*:0]const u8) ?Service {
     };
     const sel = c.sel_registerName("agentServiceWithPlistName:");
     const msg = @extern(
-        *const fn (c.id, c.SEL, c.id) callconv(.C) c.id,
+        *const fn (c.id, c.SEL, c.id) callconv(.c) c.id,
         .{ .name = "objc_msgSend" },
     );
     const plist_ns = nsString(plist_name);
@@ -71,7 +71,7 @@ pub fn agentService(plist_name: [*:0]const u8) ?Service {
 pub fn status(service: Service) Status {
     const sel = c.sel_registerName("status");
     const msg = @extern(
-        *const fn (c.id, c.SEL) callconv(.C) c_long,
+        *const fn (c.id, c.SEL) callconv(.c) c_long,
         .{ .name = "objc_msgSend" },
     );
     return @enumFromInt(msg(service, sel));
@@ -85,7 +85,7 @@ pub fn register(service: Service) !void {
     // (Zig type), on x86_64-darwin it translates to i8 (signed char). Both
     // are 1-byte on the Darwin ABI, so u8 marshals correctly on either.
     const msg = @extern(
-        *const fn (c.id, c.SEL, *c.id) callconv(.C) u8,
+        *const fn (c.id, c.SEL, *c.id) callconv(.c) u8,
         .{ .name = "objc_msgSend" },
     );
     var err: c.id = null;
@@ -100,7 +100,7 @@ pub fn register(service: Service) !void {
 pub fn unregister(service: Service) !void {
     const sel = c.sel_registerName("unregisterAndReturnError:");
     const msg = @extern(
-        *const fn (c.id, c.SEL, *c.id) callconv(.C) u8,
+        *const fn (c.id, c.SEL, *c.id) callconv(.c) u8,
         .{ .name = "objc_msgSend" },
     );
     var err: c.id = null;
@@ -115,7 +115,7 @@ pub fn unregister(service: Service) !void {
 fn logNSError(prefix: []const u8, err: c.id) void {
     const sel_desc = c.sel_registerName("localizedDescription");
     const desc_msg = @extern(
-        *const fn (c.id, c.SEL) callconv(.C) c.id,
+        *const fn (c.id, c.SEL) callconv(.c) c.id,
         .{ .name = "objc_msgSend" },
     );
     const desc = desc_msg(err, sel_desc);
@@ -126,7 +126,7 @@ fn logNSError(prefix: []const u8, err: c.id) void {
 
     const sel_utf8 = c.sel_registerName("UTF8String");
     const utf8_msg = @extern(
-        *const fn (c.id, c.SEL) callconv(.C) ?[*:0]const u8,
+        *const fn (c.id, c.SEL) callconv(.c) ?[*:0]const u8,
         .{ .name = "objc_msgSend" },
     );
     const utf8 = utf8_msg(desc, sel_utf8) orelse {

@@ -41,25 +41,21 @@ pub fn set_command(self: *Mode, command: []const u8) !void {
     self.command = try self.allocator.dupeZ(u8, command);
 }
 
-pub fn format(self: *const Mode, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    // if (fmt.len != 0) {
-    //     std.fmt.invalidFmtError(fmt, self);
-    // }
-    _ = fmt;
-    try writer.print("Mode{{", .{});
+pub fn format(self: Mode, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.writeAll("Mode{");
     try writer.print("\n  name: {s}", .{self.name});
     try writer.print("\n  command: {?s}", .{self.command});
     try writer.print("\n  capture: {}", .{self.capture});
     try writer.print("\n  initialized: {}", .{self.initialized});
-    try writer.print("\n  hotkey_map: {{\n", .{});
+    try writer.writeAll("\n  hotkey_map: {\n");
     {
         var it = self.hotkey_map.iterator();
         while (it.next()) |kv| {
-            try utils.indentPrint(self.allocator, writer, "    ", "{}", kv.key_ptr.*);
+            utils.indentPrint(self.allocator, writer, "    ", "{f}", kv.key_ptr.*) catch return error.WriteFailed;
         }
     }
-    try writer.print("\n  }}", .{});
-    try writer.print("\n}}", .{});
+    try writer.writeAll("\n  }");
+    try writer.writeAll("\n}");
 }
 
 pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {

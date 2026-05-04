@@ -87,57 +87,67 @@ const vhidd_plist_template = @embedFile("vhidd_plist");
 /// know what to copy. We resolve it relative to the running skhd
 /// binary's directory so a Homebrew install picks up the bundled copy
 /// in libexec/, while a `zig build run` picks up zig-out/bin/.
-fn resolveGrabberBinary(allocator: std.mem.Allocator) ![]const u8 {
-    const self_path = try std.fs.selfExePathAlloc(allocator);
+fn resolveGrabberBinary(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const self_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(self_path);
 
     // Try a sibling `skhd-grabber` next to ourselves first; that
     // covers both bundled installs (libexec/) and dev runs (zig-out/bin/).
     const dir = std.fs.path.dirname(self_path) orelse ".";
     const sibling = try std.fs.path.join(allocator, &.{ dir, "skhd-grabber" });
-    if (fileExists(sibling)) return sibling;
+    if (fileExists(io, sibling)) return sibling;
     allocator.free(sibling);
 
     // Fallback: cwd-relative dev path so a `--install-grabber` invoked
     // from the repo root works even if the agent itself was launched
     // from elsewhere.
     const dev = try allocator.dupe(u8, grabber_binary_rel);
-    if (fileExists(dev)) return dev;
+    // dev is a relative path; resolve via cwd for the access check.
+    if (std.Io.Dir.cwd().access(io, dev, .{})) |_| {
+        return dev;
+    } else |_| {}
     allocator.free(dev);
 
     return error.GrabberBinaryNotFound;
 }
 
-fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+fn fileExists(io: std.Io, path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    } else {
+        std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    }
     return true;
 }
 
-/// Run `/bin/launchctl <args...>`. Stdio is inherited so launchctl's own
-/// error messages reach the user. Returns error on non-zero exit.
-fn runLaunchctl(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    var argv = std.ArrayList([]const u8).init(allocator);
-    defer argv.deinit();
-    try argv.append("/bin/launchctl");
-    try argv.appendSlice(args);
-
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    const term = try child.spawnAndWait();
-    if (term != .Exited or term.Exited != 0) return error.LaunchctlFailed;
+/// Run `/bin/launchctl <args...>`. Returns error on non-zero exit.
+fn runLaunchctl(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "/bin/launchctl");
+    try argv.appendSlice(allocator, args);
+    const result = std.process.run(allocator, io, .{ .argv = argv.items }) catch return error.LaunchctlFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.LaunchctlFailed,
+        else => return error.LaunchctlFailed,
+    }
 }
 
 /// Create or overwrite an absolute path with `content`, mode 0644. Used
 /// for system plists.
-fn writePlistAbsolute(path: []const u8, content: []const u8) !void {
-    var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o644 });
-    defer file.close();
-    try file.writeAll(content);
+fn writePlistAbsolute(io: std.Io, path: []const u8, content: []const u8) !void {
+    var file = try std.Io.Dir.createFileAbsolute(io, path, .{
+        .truncate = true,
+        .permissions = .fromMode(0o644),
+    });
+    defer file.close(io);
+    try file.setPermissions(io, .fromMode(0o644));
+    try file.writeStreamingAll(io, content);
 }
 
-pub fn installGrabber(allocator: std.mem.Allocator) !void {
+pub fn installGrabber(allocator: std.mem.Allocator, io: std.Io) !void {
     if (c.geteuid() != 0) {
         std.debug.print(
             \\skhd --install-grabber needs root.
@@ -153,14 +163,14 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     // (no dext at all) and `plist_unregistered` (dext loaded but the
     // VHIDD launchd entry is missing — common after a partial Karabiner
     // uninstall) by re-running the .pkg + writing our shipped VHIDD plist.
-    var hid_state = try checkHidDaemonState(allocator);
+    var hid_state = try checkHidDaemonState(allocator, io);
     if (hid_state == .not_installed or hid_state == .plist_unregistered) {
         std.debug.print(
             "\nKarabiner-DriverKit-VirtualHIDDevice setup needed (state: {s}). Installing pinned v{s}...\n",
             .{ @tagName(hid_state), pinned_dext_version },
         );
-        try installDext(allocator);
-        hid_state = try checkHidDaemonState(allocator);
+        try installDext(allocator, io);
+        hid_state = try checkHidDaemonState(allocator, io);
     }
     if (hid_state != .running) {
         printHidDaemonRemediation(hid_state);
@@ -174,7 +184,7 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     // Daemon is running — check the major version matches our pinned one.
     // Refuse on `.older` (IPC likely broken). `.newer` is allowed with a
     // warning; the user opted into a newer version explicitly.
-    if (readHidDaemonVersion(allocator)) |installed_dext| {
+    if (readHidDaemonVersion(allocator, io)) |installed_dext| {
         defer allocator.free(installed_dext);
         const compat = compareVersions(installed_dext, pinned_dext_version);
         if (compat == .older) {
@@ -183,7 +193,7 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
         }
         if (compat == .newer) printVersionMismatchRemediation(installed_dext, compat);
     }
-    if (isKarabinerElementsActive(allocator)) {
+    if (isKarabinerElementsActive(allocator, io)) {
         std.debug.print(
             \\warning: Karabiner-Elements is running and will conflict with
             \\skhd-grabber for HID seize. Disable Karabiner-Elements (or
@@ -193,7 +203,7 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
         , .{});
     }
 
-    const binary = resolveGrabberBinary(allocator) catch {
+    const binary = resolveGrabberBinary(allocator, io) catch {
         std.debug.print(
             \\error: skhd-grabber binary not found.
             \\Looked next to skhd at <bundle>/Contents/MacOS/skhd-grabber and
@@ -205,7 +215,8 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     };
     defer allocator.free(binary);
 
-    const binary_abs = std.fs.realpathAlloc(allocator, binary) catch try allocator.dupe(u8, binary);
+    const binary_abs = std.Io.Dir.cwd().realPathFileAlloc(io, binary, allocator) catch
+        try allocator.dupeZ(u8, binary);
     defer allocator.free(binary_abs);
 
     // The plist's ProgramArguments path is critical for bundle-keyed TCC:
@@ -239,20 +250,20 @@ pub fn installGrabber(allocator: std.mem.Allocator) !void {
     // 2. Write the LaunchDaemon plist (no binary copy — we run the grabber
     //    in place from inside the bundle so TCC bundle-shares the grant).
     std.debug.print("Installing plist → {s} (program={s})\n", .{ grabber_plist_path, grabber_path_for_plist });
-    try writePlistAbsolute(grabber_plist_path, rendered_plist);
+    try writePlistAbsolute(io, grabber_plist_path, rendered_plist);
 
     // 3. bootout-then-bootstrap so re-runs are idempotent. enable +
     //    kickstart in case launchd has the service disabled or stopped
     //    (e.g. after a previous uninstall).
     const target = "system/" ++ grabber_launchd_label;
-    runLaunchctl(allocator, &.{ "bootout", target }) catch {};
-    try runLaunchctl(allocator, &.{ "bootstrap", "system", grabber_plist_path });
-    runLaunchctl(allocator, &.{ "enable", target }) catch {};
-    runLaunchctl(allocator, &.{ "kickstart", "-k", target }) catch {};
+    runLaunchctl(allocator, io, &.{ "bootout", target }) catch {};
+    try runLaunchctl(allocator, io, &.{ "bootstrap", "system", grabber_plist_path });
+    runLaunchctl(allocator, io, &.{ "enable", target }) catch {};
+    runLaunchctl(allocator, io, &.{ "kickstart", "-k", target }) catch {};
 
     // Brief pause for the daemon to bind its socket so a follow-up
     // --grabber-status reports "running" instead of "socket absent".
-    std.time.sleep(400 * std.time.ns_per_ms);
+    std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
 
     std.debug.print(
         \\
@@ -295,9 +306,8 @@ fn renderGrabberPlist(allocator: std.mem.Allocator, grabber_path: []const u8) ![
 /// True when the grabber LaunchDaemon plist is installed. Used by
 /// the smart `--install-service` flow to skip the sudo prompt for
 /// users who already installed the grabber separately.
-pub fn isGrabberInstalled() bool {
-    std.fs.accessAbsolute(grabber_plist_path, .{}) catch return false;
-    return true;
+pub fn isGrabberInstalled(io: std.Io) bool {
+    return fileExists(io, grabber_plist_path);
 }
 
 /// Re-exec ourselves under sudo with `--install-grabber`. Sudo
@@ -305,19 +315,24 @@ pub fn isGrabberInstalled() bool {
 /// so this only works in an interactive terminal context. Returns an
 /// error if sudo or the install fails — caller logs and tells the
 /// user how to retry by hand.
-pub fn installGrabberViaSudo(allocator: std.mem.Allocator) !void {
-    const self_path = try std.fs.selfExePathAlloc(allocator);
+pub fn installGrabberViaSudo(allocator: std.mem.Allocator, io: std.Io) !void {
+    const self_path = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(self_path);
 
-    var child = std.process.Child.init(&.{ "/usr/bin/sudo", self_path, "--install-grabber" }, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    const term = try child.spawnAndWait();
-    if (term != .Exited or term.Exited != 0) return error.GrabberInstallFailed;
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "/usr/bin/sudo", self_path, "--install-grabber" },
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch return error.GrabberInstallFailed;
+    const term = child.wait(io) catch return error.GrabberInstallFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.GrabberInstallFailed,
+        else => return error.GrabberInstallFailed,
+    }
 }
 
-pub fn uninstallGrabber(allocator: std.mem.Allocator) !void {
+pub fn uninstallGrabber(allocator: std.mem.Allocator, io: std.Io) !void {
     if (c.geteuid() != 0) {
         std.debug.print(
             \\skhd --uninstall-grabber needs root.
@@ -329,13 +344,13 @@ pub fn uninstallGrabber(allocator: std.mem.Allocator) !void {
 
     // 1. skhd-grabber LaunchDaemon (always ours).
     const grabber_target = "system/" ++ grabber_launchd_label;
-    if (fileExists(grabber_plist_path)) {
+    if (fileExists(io, grabber_plist_path)) {
         std.debug.print("Stopping skhd-grabber...\n", .{});
-        runLaunchctl(allocator, &.{ "bootout", grabber_target }) catch {};
+        runLaunchctl(allocator, io, &.{ "bootout", grabber_target }) catch {};
         std.debug.print("Removing {s}\n", .{grabber_plist_path});
-        std.fs.deleteFileAbsolute(grabber_plist_path) catch |err| switch (err) {
+        std.Io.Dir.deleteFileAbsolute(io, grabber_plist_path) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => return err,
+            else => return error.UnlinkFailed,
         };
     }
 
@@ -345,20 +360,20 @@ pub fn uninstallGrabber(allocator: std.mem.Allocator) !void {
     //    reliable signal that --install-dext put it there. Bootout first
     //    so a Karabiner install that follows can SMAppService-register
     //    against the same label without colliding.
-    if (fileExists(vhidd_plist_path)) {
+    if (fileExists(io, vhidd_plist_path)) {
         const vhidd_target = "system/" ++ vhidd_launchd_label;
         std.debug.print("Stopping VHIDD daemon...\n", .{});
-        runLaunchctl(allocator, &.{ "bootout", vhidd_target }) catch {};
+        runLaunchctl(allocator, io, &.{ "bootout", vhidd_target }) catch {};
         std.debug.print("Removing {s}\n", .{vhidd_plist_path});
-        std.fs.deleteFileAbsolute(vhidd_plist_path) catch |err| switch (err) {
+        std.Io.Dir.deleteFileAbsolute(io, vhidd_plist_path) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => return err,
+            else => return error.UnlinkFailed,
         };
     }
 
     // 3. Best-effort socket dir cleanup. Harmless if empty/missing.
-    std.fs.deleteFileAbsolute(grabber_socket_default) catch {};
-    std.fs.deleteDirAbsolute(grabber_socket_dir) catch {};
+    std.Io.Dir.deleteFileAbsolute(io, grabber_socket_default) catch {};
+    std.Io.Dir.deleteDirAbsolute(io, grabber_socket_dir) catch {};
 
     std.debug.print(
         \\
@@ -382,7 +397,7 @@ pub fn uninstallGrabber(allocator: std.mem.Allocator) !void {
 /// where the chain breaks. One command users can run when something
 /// isn't working — gives a clear "this is where it's broken, this is
 /// how to fix it" without them having to know the layered design.
-pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !void {
+pub fn grabberStatus(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     std.debug.print("skhd-grabber status\n", .{});
     std.debug.print("===================\n\n", .{});
 
@@ -395,8 +410,8 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
     //    Loaded-but-disabled (System Settings → Login Items & Extensions
     //    toggled off) is also a fail — the dext process keeps running so
     //    pgrep matches, but the kernel detaches it from HID dispatch.
-    if (try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice")) {
-        if (isDextEnabled(allocator)) |enabled| {
+    if (try processRunning(allocator, io, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice")) {
+        if (isDextEnabled(allocator, io)) |enabled| {
             if (enabled) {
                 std.debug.print("  [OK]      Karabiner-DriverKit-VirtualHIDDevice (dext) loaded and enabled\n", .{});
                 ok_count += 1;
@@ -429,7 +444,7 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
     // 2. Karabiner-VirtualHIDDevice-Daemon (userland helper that
     //    bridges our IPC to the dext). It's the process we connect
     //    to via vhidd_server socket.
-    if (try processRunning(allocator, "Karabiner-VirtualHIDDevice-Daemon")) {
+    if (try processRunning(allocator, io, "Karabiner-VirtualHIDDevice-Daemon")) {
         std.debug.print("  [OK]      Karabiner-VirtualHIDDevice-Daemon running\n", .{});
         ok_count += 1;
     } else {
@@ -444,7 +459,7 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
 
     // 3. skhd-grabber LaunchDaemon plist (we installed it via
     //    --install-grabber).
-    if (isGrabberInstalled()) {
+    if (isGrabberInstalled(io)) {
         std.debug.print("  [OK]      skhd-grabber LaunchDaemon plist installed\n", .{});
         ok_count += 1;
     } else {
@@ -458,7 +473,7 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
     }
 
     // 4. skhd-grabber process running.
-    if (try processRunning(allocator, "skhd-grabber")) {
+    if (try processRunning(allocator, io, "skhd-grabber")) {
         std.debug.print("  [OK]      skhd-grabber process running\n", .{});
         ok_count += 1;
     } else {
@@ -472,7 +487,7 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
     }
 
     // 5. IPC socket reachable + protocol version match.
-    var client = Client.connect(allocator, socket_path) catch |err| {
+    var client = Client.connect(allocator, io, socket_path) catch |err| {
         std.debug.print(
             \\  [FAIL]    IPC socket not reachable at {s} ({s})
             \\
@@ -503,14 +518,16 @@ pub fn grabberStatus(allocator: std.mem.Allocator, socket_path: []const u8) !voi
 
 /// True if at least one running process matches `needle` in its
 /// argv. Uses pgrep so we don't need root for system-domain queries.
-fn processRunning(allocator: std.mem.Allocator, needle: []const u8) !bool {
-    var child = std.process.Child.init(&.{ "/usr/bin/pgrep", "-f", needle }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-    const term = try child.wait();
-    return term == .Exited and term.Exited == 0;
+fn processRunning(allocator: std.mem.Allocator, io: std.Io, needle: []const u8) !bool {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "/usr/bin/pgrep", "-f", needle },
+    }) catch return error.SpawnFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    return switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Path to the daemon binary's Info.plist — single source of truth for the
@@ -552,8 +569,8 @@ const vhidd_launchd_label = "org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-
 /// Probe the HID daemon dependency chain and return the first failure
 /// found, or `running` if every layer is up. The caller is expected to
 /// branch on the result for state-specific messaging.
-pub fn checkHidDaemonState(allocator: std.mem.Allocator) !HidDaemonState {
-    const dext_loaded = try processRunning(allocator, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice");
+pub fn checkHidDaemonState(allocator: std.mem.Allocator, io: std.Io) !HidDaemonState {
+    const dext_loaded = try processRunning(allocator, io, "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice");
     if (!dext_loaded) return .not_installed;
 
     // The dext can be loaded-but-disabled — user toggled it off in
@@ -564,11 +581,11 @@ pub fn checkHidDaemonState(allocator: std.mem.Allocator) !HidDaemonState {
     // `--status` reported 5/5 OK while seize / injection silently
     // failed. `systemextensionsctl list` is the only programmatic
     // signal we have for this state.
-    if (isDextEnabled(allocator)) |enabled| {
+    if (isDextEnabled(allocator, io)) |enabled| {
         if (!enabled) return .dext_disabled;
     }
 
-    const daemon_running = try processRunning(allocator, "Karabiner-VirtualHIDDevice-Daemon");
+    const daemon_running = try processRunning(allocator, io, "Karabiner-VirtualHIDDevice-Daemon");
     if (daemon_running) return .running;
 
     // Daemon process not running. Distinguish "launchd doesn't know about
@@ -576,7 +593,7 @@ pub fn checkHidDaemonState(allocator: std.mem.Allocator) !HidDaemonState {
     // knows about it, just not running right now" (stopped, kickstart
     // works). `launchctl print system/<label>` returns non-zero with
     // "Could not find service" for the former.
-    const registered = try launchdServiceRegistered(allocator);
+    const registered = try launchdServiceRegistered(allocator, io);
     return if (registered) .stopped else .plist_unregistered;
 }
 
@@ -587,26 +604,20 @@ pub fn checkHidDaemonState(allocator: std.mem.Allocator) !HidDaemonState {
 /// tell (command failed, output unparseable, bundle not in the list at
 /// all) — caller treats that as "give the user the benefit of the doubt"
 /// to avoid false alarms in unusual environments.
-fn isDextEnabled(allocator: std.mem.Allocator) ?bool {
-    var child = std.process.Child.init(
-        &.{ "/usr/bin/systemextensionsctl", "list" },
-        allocator,
-    );
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
-
-    var buf: [16 * 1024]u8 = undefined;
-    var n: usize = 0;
-    if (child.stdout) |stdout| {
-        n = stdout.reader().read(&buf) catch 0;
+fn isDextEnabled(allocator: std.mem.Allocator, io: std.Io) ?bool {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "/usr/bin/systemextensionsctl", "list" },
+        .stdout_limit = .limited(16 * 1024),
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
     }
-    const term = child.wait() catch return null;
-    if (term != .Exited or term.Exited != 0) return null;
 
     const dext_id = "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice";
-    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     while (lines.next()) |line| {
         if (std.mem.indexOf(u8, line, dext_id) == null) continue;
         if (std.mem.indexOf(u8, line, "[activated enabled]") != null) return true;
@@ -620,39 +631,35 @@ fn isDextEnabled(allocator: std.mem.Allocator) ?bool {
 }
 
 
-fn launchdServiceRegistered(allocator: std.mem.Allocator) !bool {
+fn launchdServiceRegistered(allocator: std.mem.Allocator, io: std.Io) !bool {
     const target = "system/" ++ vhidd_launchd_label;
-    var child = std.process.Child.init(&.{ "/bin/launchctl", "print", target }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-    const term = try child.wait();
-    return term == .Exited and term.Exited == 0;
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "/bin/launchctl", "print", target },
+    }) catch return error.SpawnFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    return switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Read CFBundleShortVersionString from the daemon's Info.plist (which
 /// matches the dext's version — they ship together). Returns null if the
 /// file is absent or PlistBuddy fails. Caller frees.
-pub fn readHidDaemonVersion(allocator: std.mem.Allocator) ?[]const u8 {
-    var child = std.process.Child.init(
-        &.{ "/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", vhidd_info_plist },
-        allocator,
-    );
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
-
-    var buf: [128]u8 = undefined;
-    var n: usize = 0;
-    if (child.stdout) |stdout| {
-        n = stdout.reader().read(&buf) catch 0;
+pub fn readHidDaemonVersion(allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", vhidd_info_plist },
+        .stdout_limit = .limited(128),
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
     }
-    const term = child.wait() catch return null;
-    if (term != .Exited or term.Exited != 0) return null;
 
-    const trimmed = std.mem.trim(u8, buf[0..n], " \r\n\t");
+    const trimmed = std.mem.trim(u8, result.stdout, " \r\n\t");
     if (trimmed.len == 0) return null;
     return allocator.dupe(u8, trimmed) catch null;
 }
@@ -660,8 +667,8 @@ pub fn readHidDaemonVersion(allocator: std.mem.Allocator) ?[]const u8 {
 /// True iff Karabiner-Elements' userland grabber is currently running.
 /// Coexists badly with skhd-grabber (both seize keyboards via the same
 /// dext), so we surface this as a warning in --install-grabber and --status.
-pub fn isKarabinerElementsActive(allocator: std.mem.Allocator) bool {
-    return processRunning(allocator, "karabiner_grabber") catch false;
+pub fn isKarabinerElementsActive(allocator: std.mem.Allocator, io: std.Io) bool {
+    return processRunning(allocator, io, "karabiner_grabber") catch false;
 }
 
 /// URL + SHA-256 for the pinned .pkg, exposed via build_options so the
@@ -675,7 +682,7 @@ const karabiner_dext_sha256 = build_options.karabiner_dext_sha256;
 /// multiple versions don't collide; transient location (/tmp under root,
 /// $XDG_CACHE_HOME or $HOME/.cache otherwise) since the .pkg is purely a
 /// download cache, not configuration.
-fn dextCachePath(allocator: std.mem.Allocator) ![]u8 {
+fn dextCachePath(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     const filename = try std.fmt.allocPrint(allocator, "skhd-Karabiner-DriverKit-VirtualHIDDevice-{s}.pkg", .{pinned_dext_version});
     defer allocator.free(filename);
 
@@ -686,57 +693,54 @@ fn dextCachePath(allocator: std.mem.Allocator) ![]u8 {
         return std.fmt.allocPrint(allocator, "/tmp/{s}", .{filename});
     }
 
-    const home = std.posix.getenv("HOME") orelse return error.NoHome;
+    const home = @import("utils.zig").getenv("HOME") orelse return error.NoHome;
     const dir = try std.fmt.allocPrint(allocator, "{s}/.cache/skhd", .{home});
     defer allocator.free(dir);
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, dir, .fromMode(0o755)) catch |err| switch (err) {
         error.PathAlreadyExists => {},
-        else => return err,
+        else => return error.MkdirFailed,
     };
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, filename });
 }
 
-fn fileSha256(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
+fn fileSha256(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+
+    var read_buf: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var buf: [64 * 1024]u8 = undefined;
     while (true) {
-        const n = try file.read(&buf);
-        if (n == 0) break;
-        hasher.update(buf[0..n]);
+        const slice = reader.interface.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        hasher.update(slice);
+        reader.interface.toss(slice.len);
     }
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     hasher.final(&digest);
 
     var hex_buf: [digest.len * 2]u8 = undefined;
-    return allocator.dupe(u8, std.fmt.bufPrint(&hex_buf, "{}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable);
+    return allocator.dupe(u8, std.fmt.bufPrint(&hex_buf, "{x}", .{&digest}) catch unreachable);
 }
 
 /// Download + verify + install the pinned Karabiner-DriverKit-VirtualHIDDevice
 /// .pkg. Idempotent: re-runs reuse the cached .pkg, and pqrs's installer is
 /// a no-op when the same version is already installed. Re-execs via sudo
 /// when not already root.
-pub fn installDext(allocator: std.mem.Allocator) !void {
-    const pkg_path = try dextCachePath(allocator);
+pub fn installDext(allocator: std.mem.Allocator, io: std.Io) !void {
+    const pkg_path = try dextCachePath(allocator, io);
     defer allocator.free(pkg_path);
 
     // 1. Download to cache if missing.
-    if (std.fs.accessAbsolute(pkg_path, .{})) |_| {
+    if (fileExists(io, pkg_path)) {
         std.debug.print("Using cached pkg at {s}\n", .{pkg_path});
-    } else |_| {
+    } else {
         std.debug.print("Downloading Karabiner-DriverKit-VirtualHIDDevice {s}...\n", .{pinned_dext_version});
         std.debug.print("  {s}\n", .{karabiner_dext_url});
-        var dl = std.process.Child.init(&.{ "/usr/bin/curl", "-fsSL", "-o", pkg_path, karabiner_dext_url }, allocator);
-        dl.stdin_behavior = .Inherit;
-        dl.stdout_behavior = .Inherit;
-        dl.stderr_behavior = .Inherit;
-        const term = try dl.spawnAndWait();
-        if (term != .Exited or term.Exited != 0) {
-            std.debug.print("error: curl failed downloading {s}\n", .{karabiner_dext_url});
-            return error.DownloadFailed;
-        }
+        try runInherit(allocator, io, &.{ "/usr/bin/curl", "-fsSL", "-o", pkg_path, karabiner_dext_url }, error.DownloadFailed);
     }
 
     // 2. Verify sha256 against the pinned hash. On mismatch, drop the
@@ -744,7 +748,7 @@ pub fn installDext(allocator: std.mem.Allocator) !void {
     // against a partial/corrupt download but won't auto-retry on what
     // could be a legitimate upstream re-tag (the user has to bump
     // build.zig in that case).
-    const actual_hex = try fileSha256(allocator, pkg_path);
+    const actual_hex = try fileSha256(allocator, io, pkg_path);
     defer allocator.free(actual_hex);
     if (!std.mem.eql(u8, actual_hex, karabiner_dext_sha256)) {
         std.debug.print(
@@ -753,7 +757,7 @@ pub fn installDext(allocator: std.mem.Allocator) !void {
             \\  got:      {s}
             \\
         , .{ pkg_path, karabiner_dext_sha256, actual_hex });
-        std.fs.deleteFileAbsolute(pkg_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(io, pkg_path) catch {};
         return error.Sha256Mismatch;
     }
 
@@ -763,31 +767,21 @@ pub fn installDext(allocator: std.mem.Allocator) !void {
     // running `installer` directly is that the user sees one sudo
     // password prompt instead of being told to run a separate command).
     if (c.geteuid() != 0) {
-        const self_path = try std.fs.selfExePathAlloc(allocator);
+        const self_path = try std.process.executablePathAlloc(io, allocator);
         defer allocator.free(self_path);
         std.debug.print("Installing Karabiner-DriverKit-VirtualHIDDevice {s} (sudo will prompt for your password)...\n", .{pinned_dext_version});
-        var elev = std.process.Child.init(&.{ "/usr/bin/sudo", self_path, "--install-dext" }, allocator);
-        elev.stdin_behavior = .Inherit;
-        elev.stdout_behavior = .Inherit;
-        elev.stderr_behavior = .Inherit;
-        const term = try elev.spawnAndWait();
-        if (term != .Exited or term.Exited != 0) return error.SudoFailed;
+        try runInherit(allocator, io, &.{ "/usr/bin/sudo", self_path, "--install-dext" }, error.SudoFailed);
         return;
     }
 
-    var inst = std.process.Child.init(&.{ "/usr/sbin/installer", "-pkg", pkg_path, "-target", "/" }, allocator);
-    inst.stdin_behavior = .Inherit;
-    inst.stdout_behavior = .Inherit;
-    inst.stderr_behavior = .Inherit;
-    const term = try inst.spawnAndWait();
-    if (term != .Exited or term.Exited != 0) return error.InstallerFailed;
+    try runInherit(allocator, io, &.{ "/usr/sbin/installer", "-pkg", pkg_path, "-target", "/" }, error.InstallerFailed);
 
     // 4. Register the VHIDD daemon with launchd. The pqrs .pkg's
     //    postinstall is a no-op `killall` — the launchd plist that
     //    historically registered the daemon ships with Karabiner-Elements,
     //    not the standalone DriverKit pkg, so without our help the daemon
     //    never gets a launchd entry on a fresh box.
-    try installVhiddDaemon(allocator);
+    try installVhiddDaemon(allocator, io);
 
     std.debug.print(
         \\
@@ -796,6 +790,30 @@ pub fn installDext(allocator: std.mem.Allocator) !void {
         \\Privacy & Security; approve it before running skhd-grabber.
         \\
     , .{pinned_dext_version});
+}
+
+/// Spawn `argv` with stdio inherited (sudo / curl / installer prompts and
+/// progress bars must reach the user's terminal). Returns `err_tag` on
+/// non-zero exit or spawn failure. Used for interactive sub-commands the
+/// caller wants to surface output for.
+fn runInherit(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: []const []const u8,
+    err_tag: anyerror,
+) !void {
+    _ = allocator;
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch return err_tag;
+    const term = child.wait(io) catch return err_tag;
+    switch (term) {
+        .exited => |code| if (code != 0) return err_tag,
+        else => return err_tag,
+    }
 }
 
 /// Install + bootstrap the VHIDD daemon's launchd entry. Coexists with
@@ -812,37 +830,37 @@ pub fn installDext(allocator: std.mem.Allocator) !void {
 /// Side effect on uninstall: we deliberately do NOT remove our VHIDD plist
 /// in `uninstallGrabber` — leaving it behind keeps the daemon working for
 /// any other consumer (e.g. user installs Karabiner-Elements after us).
-fn installVhiddDaemon(allocator: std.mem.Allocator) !void {
+fn installVhiddDaemon(allocator: std.mem.Allocator, io: std.Io) !void {
     const target = "system/" ++ vhidd_launchd_label;
 
-    if (try launchdServiceRegistered(allocator)) {
+    if (try launchdServiceRegistered(allocator, io)) {
         std.debug.print(
             \\VHIDD launchd entry already registered (Karabiner-Elements or a
             \\prior --install-dext run). Skipping plist install to avoid a
             \\duplicate registration; will just (re)kick the daemon.
             \\
         , .{});
-        runLaunchctl(allocator, &.{ "kickstart", "-k", target }) catch {};
-        std.time.sleep(400 * std.time.ns_per_ms);
+        runLaunchctl(allocator, io, &.{ "kickstart", "-k", target }) catch {};
+        std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
         return;
     }
 
     // Stale plist on disk but launchd doesn't know about it: bootout is a
     // no-op (will fail silently), then bootstrap from the path on disk.
-    if (fileExists(vhidd_plist_path)) {
-        runLaunchctl(allocator, &.{ "bootout", target }) catch {};
+    if (fileExists(io, vhidd_plist_path)) {
+        runLaunchctl(allocator, io, &.{ "bootout", target }) catch {};
     } else {
         std.debug.print("Installing VHIDD launchd plist → {s}\n", .{vhidd_plist_path});
-        try writePlistAbsolute(vhidd_plist_path, vhidd_plist_template);
+        try writePlistAbsolute(io, vhidd_plist_path, vhidd_plist_template);
     }
 
-    try runLaunchctl(allocator, &.{ "bootstrap", "system", vhidd_plist_path });
-    runLaunchctl(allocator, &.{ "enable", target }) catch {};
-    runLaunchctl(allocator, &.{ "kickstart", "-k", target }) catch {};
+    try runLaunchctl(allocator, io, &.{ "bootstrap", "system", vhidd_plist_path });
+    runLaunchctl(allocator, io, &.{ "enable", target }) catch {};
+    runLaunchctl(allocator, io, &.{ "kickstart", "-k", target }) catch {};
 
     // Pause so checkHidDaemonState() right after this reports running
     // instead of the in-flight bootstrapped-but-not-yet-spawned state.
-    std.time.sleep(400 * std.time.ns_per_ms);
+    std.Io.sleep(io, .fromMilliseconds(400), .awake) catch {};
 }
 
 /// Print the one-line `--status` summary for the HID daemon. Returns the
@@ -850,13 +868,13 @@ fn installVhiddDaemon(allocator: std.mem.Allocator) !void {
 /// remediation block below the existing remediation chain. Errors during
 /// the probe are reported inline and treated as `.running` so we don't
 /// spam an irrelevant remediation in unusual environments.
-pub fn printHidDaemonStatus(allocator: std.mem.Allocator) HidDaemonState {
-    const state = checkHidDaemonState(allocator) catch |err| {
+pub fn printHidDaemonStatus(allocator: std.mem.Allocator, io: std.Io) HidDaemonState {
+    const state = checkHidDaemonState(allocator, io) catch |err| {
         std.debug.print("  HID daemon:           Unknown ({s})\n", .{@errorName(err)});
         return .running;
     };
 
-    const version = readHidDaemonVersion(allocator);
+    const version = readHidDaemonVersion(allocator, io);
     defer if (version) |v| allocator.free(v);
 
     switch (state) {
@@ -889,7 +907,7 @@ pub fn printHidDaemonStatus(allocator: std.mem.Allocator) HidDaemonState {
         },
     }
 
-    if (isKarabinerElementsActive(allocator)) {
+    if (isKarabinerElementsActive(allocator, io)) {
         std.debug.print("  Karabiner-Elements:   Active — conflicts with skhd-grabber for HID seize\n", .{});
     }
 
@@ -982,7 +1000,7 @@ pub fn printVersionMismatchRemediation(installed: []const u8, compat: Compatibil
 /// Send a hard-coded sample rule to the grabber so we can validate the
 /// IPC plumbing end-to-end before parser integration lands. Logs at
 /// the grabber side print the parsed rule.
-pub fn grabberTestRule(allocator: std.mem.Allocator, socket_path: []const u8) !void {
+pub fn grabberTestRule(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !void {
     const sample_rules = [_]protocol.Rule{
         .{
             .src_usage = 0x39, // caps_lock
@@ -996,7 +1014,7 @@ pub fn grabberTestRule(allocator: std.mem.Allocator, socket_path: []const u8) !v
         },
     };
 
-    var client = try Client.connect(allocator, socket_path);
+    var client = try Client.connect(allocator, io, socket_path);
     defer client.close();
 
     try client.hello();

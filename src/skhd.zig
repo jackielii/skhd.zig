@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c.zig");
+const c_mod = c;
 const agent_grabber_client = @import("agent_grabber_client.zig");
 const agent_layer_listener = @import("agent_layer_listener.zig");
 const CarbonEvent = @import("CarbonEvent.zig");
@@ -38,6 +39,7 @@ const HotkeyResult = enum {
 };
 
 allocator: std.mem.Allocator,
+io: std.Io,
 mappings: Mappings,
 current_mode: ?*Mode = null,
 event_tap: EventTap,
@@ -65,22 +67,22 @@ grabber_reconnect_timer: c.CFRunLoopTimerRef = null,
 /// returns to default.
 hidutil: ?*Hidutil = null,
 
-pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
+pub fn init(gpa: std.mem.Allocator, io: std.Io, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
 
-    var mappings = try Mappings.init(gpa);
+    var mappings = try Mappings.init(gpa, io);
     errdefer mappings.deinit();
 
     // Parse configuration file
-    var parser = try Parser.init(gpa);
+    var parser = try Parser.init(gpa, io);
     defer parser.deinit();
 
-    const content = try std.fs.cwd().readFileAlloc(gpa, config_file, 1 << 20); // 1MB max
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, config_file, gpa, .limited(1 << 20)); // 1MB max
     defer gpa.free(content);
 
     parser.parseWithPath(&mappings, content, config_file) catch |err| {
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {f}", .{parse_err});
         }
         return err;
     };
@@ -89,7 +91,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     // errors with their file:line, same as the top-level file.
     parser.processLoadDirectives(&mappings) catch |err| {
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {f}", .{parse_err});
         }
         return err;
     };
@@ -102,18 +104,18 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     // Log loaded modes
     var mode_iter = mappings.mode_map.iterator();
-    var modes_list = std.ArrayList(u8).init(gpa);
+    var modes_list: std.Io.Writer.Allocating = .init(gpa);
     defer modes_list.deinit();
     while (mode_iter.next()) |entry| {
-        try modes_list.writer().print("'{s}' ", .{entry.key_ptr.*});
+        try modes_list.writer.print("'{s}' ", .{entry.key_ptr.*});
     }
-    log.info("Loaded modes: {s}", .{modes_list.items});
+    log.info("Loaded modes: {s}", .{modes_list.written()});
 
     // Log shell configuration
     log.info("Using shell: {s}", .{mappings.shell});
 
     // Initialize Carbon event handler for app switching
-    var carbon_event = try CarbonEvent.init(gpa);
+    var carbon_event = try CarbonEvent.init(gpa, io);
     errdefer carbon_event.deinit();
 
     log.info("Initial process: {s}", .{carbon_event.getProcessName()});
@@ -123,7 +125,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
     // UserKeyMapping is cleared before we apply our own.
     var hidutil: ?*Hidutil = null;
     if (mappings.remaps.items.len > 0) {
-        hidutil = Hidutil.init(gpa) catch |err| blk: {
+        hidutil = Hidutil.init(gpa, io) catch |err| blk: {
             log.warn("Hidutil init failed: {s}. .remap colon-form ignored.", .{@errorName(err)});
             break :blk null;
         };
@@ -148,6 +150,7 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 
     return Skhd{
         .allocator = gpa,
+        .io = io,
         .mappings = mappings,
         .current_mode = current_mode,
         .event_tap = EventTap{ .mask = mask },
@@ -162,8 +165,10 @@ pub fn init(gpa: std.mem.Allocator, config_file: []const u8, verbose: bool, prof
 pub fn deinit(self: *Skhd) void {
     // Print tracer summary before cleanup
     if (self.tracer.enabled) {
-        const stderr = std.io.getStdErr().writer();
-        self.tracer.printSummary(stderr) catch {};
+        var buf: [4096]u8 = undefined;
+        var stderr_w = std.Io.File.stderr().writer(self.io, &buf);
+        self.tracer.printSummary(&stderr_w.interface) catch {};
+        stderr_w.interface.flush() catch {};
     }
 
     // Clear hidutil UserKeyMapping FIRST so the user's keyboard isn't
@@ -259,10 +264,10 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
         }
     }.check;
 
-    var rules = try std.ArrayList(grabber_protocol.Rule).initCapacity(self.allocator, self.mappings.tapholds.items.len);
-    defer rules.deinit();
-    var remaps = try std.ArrayList(grabber_protocol.Remap).initCapacity(self.allocator, self.mappings.remaps.items.len);
-    defer remaps.deinit();
+    var rules: std.ArrayList(grabber_protocol.Rule) = try .initCapacity(self.allocator, self.mappings.tapholds.items.len);
+    defer rules.deinit(self.allocator);
+    var remaps: std.ArrayList(grabber_protocol.Remap) = try .initCapacity(self.allocator, self.mappings.remaps.items.len);
+    defer remaps.deinit(self.allocator);
 
     var has_layer_rule = false;
     var skipped_absent: usize = 0;
@@ -277,7 +282,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
             continue;
         }
         if (th.hold_layer != null) has_layer_rule = true;
-        try rules.append(.{
+        try rules.append(self.allocator, .{
             .src_usage = th.src_usage,
             .tap_usage = th.tap_usage,
             .hold_usage = th.hold_usage,
@@ -299,7 +304,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
             skipped_absent += 1;
             continue;
         }
-        try remaps.append(.{
+        try remaps.append(self.allocator, .{
             .src_usage = rm.src_usage,
             .dst_usage = rm.dst_usage,
             .device = .{ .vendor = alias.vendor, .product = alias.product },
@@ -320,7 +325,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
 
     const client = try self.allocator.create(agent_grabber_client.Client);
     errdefer self.allocator.destroy(client);
-    client.* = try agent_grabber_client.Client.connect(self.allocator, grabber_protocol.default_socket_path);
+    client.* = try agent_grabber_client.Client.connect(self.allocator, self.io, grabber_protocol.default_socket_path);
     errdefer client.close();
 
     try client.hello();
@@ -335,7 +340,8 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
     self.grabber_client = client;
     self.layer_listener = try agent_layer_listener.Listener.init(
         self.allocator,
-        client.stream.handle,
+        self.io,
+        client.stream.socket.handle,
         modeChangePushed,
         self,
     );
@@ -514,7 +520,7 @@ fn watchdogCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void
     }
     if (trusted and !have_tap) {
         log.info("Accessibility re-granted — recreating event tap.", .{});
-        self.event_tap.begin(keyHandler, self) catch |err| {
+        self.event_tap.begin(self.io, keyHandler, self) catch |err| {
             log.err("Failed to recreate event tap after re-grant: {} — will retry on next watchdog tick.", .{err});
             return;
         };
@@ -526,18 +532,18 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // Set up signal handler for config reload
     const usr1_act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigusr1 },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.USR1, &usr1_act, null);
+    std.posix.sigaction(.USR1, &usr1_act, null);
 
     // Set up signal handler for SIGINT (Ctrl+C) to print trace summary
     const int_act = std.posix.Sigaction{
         .handler = .{ .handler = handleSigint },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.INT, &int_act, null);
+    std.posix.sigaction(.INT, &int_act, null);
 
     // Store a global reference for the signal handler
     global_skhd = self;
@@ -561,7 +567,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     };
 
     // Check if config file is a regular file
-    const stat = std.fs.cwd().statFile(self.config_file) catch |err| {
+    const stat = std.Io.Dir.cwd().statFile(self.io, self.config_file, .{}) catch |err| {
         log.err("Cannot stat config file {s}: {}", .{ self.config_file, err });
         return err;
     };
@@ -606,17 +612,17 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // interactive `--install-service` flow instead, where the user is at
     // a terminal and expects dialogs.
     log.info("Starting event tap", .{});
-    self.event_tap.begin(keyHandler, self) catch |err| {
+    self.event_tap.begin(self.io, keyHandler, self) catch |err| {
         if (err == error.AccessibilityPermissionDenied) {
-            const raw_path: ?[]u8 = std.fs.selfExePathAlloc(self.allocator) catch null;
+            const raw_path: ?[:0]u8 = std.process.executablePathAlloc(self.io, self.allocator) catch null;
             defer if (raw_path) |p| self.allocator.free(p);
             const stable_path: ?[]const u8 = if (raw_path) |p|
-                service.resolveStableExePath(self.allocator, p) catch null
+                service.resolveStableExePath(self.allocator, self.io, p) catch null
             else
                 null;
             defer if (stable_path) |p| self.allocator.free(p);
             const bundle_path: ?[]const u8 = if (stable_path) |p|
-                service.resolveBundlePath(self.allocator, p) catch null
+                service.resolveBundlePath(self.allocator, self.io, p) catch null
             else
                 null;
             defer if (bundle_path) |p| self.allocator.free(p);
@@ -656,7 +662,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     };
 
     // Call NSApplicationLoad() like the original skhd
-    c.NSApplicationLoad();
+    c_mod.NSApplicationLoad();
 
     log.info("Event tap created successfully. skhd is now running.", .{});
 
@@ -1081,7 +1087,7 @@ fn nsEventOtherEvent(ns_event_class: c.id, event_type: c_ulong, subtype: c_short
         c_short,
         c_long,
         c_long,
-    ) callconv(.C) c.id, .{ .name = "objc_msgSend" });
+    ) callconv(.c) c.id, .{ .name = "objc_msgSend" });
 
     return msgSend(
         ns_event_class,
@@ -1102,7 +1108,7 @@ fn nsEventOtherEvent(ns_event_class: c.id, event_type: c_ulong, subtype: c_short
 /// Get CGEvent from NSEvent by calling [event CGEvent]
 fn nsEventToCGEvent(ns_event: c.id) c.CGEventRef {
     const sel = c.sel_registerName("CGEvent");
-    const msgSend = @extern(*const fn (c.id, c.SEL) callconv(.C) ?*anyopaque, .{ .name = "objc_msgSend" });
+    const msgSend = @extern(*const fn (c.id, c.SEL) callconv(.c) ?*anyopaque, .{ .name = "objc_msgSend" });
     return @ptrCast(msgSend(ns_event, sel));
 }
 
@@ -1291,12 +1297,12 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
 }
 
 /// Signal handler for SIGUSR1 - reload configuration
-fn handleSigusr1(_: c_int) callconv(.C) void {
+fn handleSigusr1(_: std.posix.SIG) callconv(.c) void {
     reload_requested.store(true, .release);
 }
 
 /// Signal handler for SIGINT - stop the run loop to allow graceful shutdown
-fn handleSigint(_: c_int) callconv(.C) void {
+fn handleSigint(_: std.posix.SIG) callconv(.c) void {
     stop_requested.store(true, .release);
 }
 
@@ -1305,25 +1311,25 @@ pub fn reloadConfig(self: *Skhd) !void {
     log.info("Reloading configuration from: {s}", .{self.config_file});
 
     // Parse new configuration
-    var new_mappings = try Mappings.init(self.allocator);
+    var new_mappings = try Mappings.init(self.allocator, self.io);
     errdefer new_mappings.deinit();
 
-    var parser = try Parser.init(self.allocator);
+    var parser = try Parser.init(self.allocator, self.io);
     defer parser.deinit();
 
-    const content = try std.fs.cwd().readFileAlloc(self.allocator, self.config_file, 1 << 20);
+    const content = try std.Io.Dir.cwd().readFileAlloc(self.io, self.config_file, self.allocator, .limited(1 << 20));
     defer self.allocator.free(content);
 
     parser.parseWithPath(&new_mappings, content, self.config_file) catch |err| {
         // Log the parse error with proper formatting
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {f}", .{parse_err});
         }
         return err;
     };
     parser.processLoadDirectives(&new_mappings) catch |err| {
         if (parser.error_info) |parse_err| {
-            log.err("skhd: {}", .{parse_err});
+            log.err("skhd: {f}", .{parse_err});
         }
         return err;
     };
@@ -1345,7 +1351,7 @@ pub fn reloadConfig(self: *Skhd) !void {
     // reflect the previous parse. Lazy-init the Hidutil owner if the
     // previous config had no remaps but the new one does.
     if (self.hidutil == null and self.mappings.remaps.items.len > 0) {
-        self.hidutil = Hidutil.init(self.allocator) catch |err| blk: {
+        self.hidutil = Hidutil.init(self.allocator, self.io) catch |err| blk: {
             log.warn("Hidutil init on reload failed: {s}. .remap colon-form ignored.", .{@errorName(err)});
             break :blk null;
         };
@@ -1403,11 +1409,12 @@ pub fn enableHotReload(self: *Skhd) !void {
     global_skhd = self;
 
     // Create hotloader (already heap-allocated by create())
-    const hotloader = try Hotload.create(self.allocator, hotloadCallback);
+    const hotloader = try Hotload.create(self.allocator, self.io, hotloadCallback);
 
     // Resolve main config file to absolute path for FSEvents
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs_path = try std.fs.cwd().realpath(self.config_file, &path_buf);
+    const abs_len = try std.Io.Dir.cwd().realPathFile(self.io, self.config_file, &path_buf);
+    const abs_path = path_buf[0..abs_len];
 
     log.info("Watching main config: {s} (resolved to: {s})", .{ self.config_file, abs_path });
     try hotloader.addFile(abs_path);
@@ -1490,12 +1497,12 @@ inline fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPres
 }
 
 // Test helper to create a Skhd instance from a config string
-fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !Skhd {
+fn createTestSkhdFromConfig(allocator: std.mem.Allocator, io: std.Io, config: []const u8) !Skhd {
     // Parse the config
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, io);
     errdefer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1507,11 +1514,12 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
     }
 
     // Create carbon event mock
-    const carbon_event = try CarbonEvent.init(allocator);
+    const carbon_event = try CarbonEvent.init(allocator, io);
     errdefer carbon_event.deinit();
 
     return Skhd{
         .allocator = allocator,
+        .io = io,
         .mappings = mappings,
         .current_mode = current_mode,
         .event_tap = EventTap{ .mask = 0 },
@@ -1524,29 +1532,24 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, config: []const u8) !S
 
 test "hot reload refresh is deferred until maintenance turn" {
     const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
     hotload_refresh_pending.store(false, .release);
     defer hotload_refresh_pending.store(false, .release);
 
-    const test_id = std.crypto.random.int(u32);
+    const test_id = std.testing.random_seed;
     const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_{d}.skhdrc", .{test_id});
     defer allocator.free(config_path);
     const include_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_include_{d}.skhdrc", .{test_id});
     defer allocator.free(include_path);
 
-    {
-        const file = try std.fs.createFileAbsolute(config_path, .{});
-        defer file.close();
-        try file.writeAll("cmd - a : echo initial");
-    }
-    {
-        const file = try std.fs.createFileAbsolute(include_path, .{});
-        defer file.close();
-        try file.writeAll("cmd - b : echo included");
-    }
-    defer std.fs.deleteFileAbsolute(config_path) catch {};
-    defer std.fs.deleteFileAbsolute(include_path) catch {};
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = "cmd - a : echo initial" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = include_path, .data = "cmd - b : echo included" });
+    defer std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, include_path) catch {};
 
-    var skhd = try Skhd.init(allocator, config_path, false, false);
+    var skhd = try Skhd.init(allocator, io, config_path, false, false);
     defer skhd.deinit();
 
     try skhd.enableHotReload();
@@ -1559,9 +1562,7 @@ test "hot reload refresh is deferred until maintenance turn" {
             \\cmd - a : echo reloaded
         , .{include_path});
         defer allocator.free(updated);
-        const file = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(updated);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = updated });
     }
 
     try skhd.reloadConfig();
@@ -1583,7 +1584,10 @@ test "processHotkey respects passthrough in capture mode" {
         \\capture < cmd - c ~
     ;
 
-    var skhd = try createTestSkhdFromConfig(alloc, config);
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, config);
     defer skhd.deinit();
 
     // Switch to capture mode
@@ -1633,7 +1637,10 @@ test "capture-mode wildcard: no-modifier rule matches any-modifier press" {
         \\fn_layer < 0x04 | 0x7B
     ; // 0x04 = 'h' (macOS keycode), 0x7B = left arrow
 
-    var skhd = try createTestSkhdFromConfig(alloc, config);
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, config);
     defer skhd.deinit();
 
     skhd.current_mode = skhd.mappings.mode_map.getPtr("fn_layer");
@@ -1671,7 +1678,10 @@ test "capture-mode wildcard: explicit-modifier rule wins over wildcard" {
         \\fn_layer < shift - 0x04 | 0x7C
     ; // 0x7B = left, 0x7C = right
 
-    var skhd = try createTestSkhdFromConfig(alloc, config);
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, config);
     defer skhd.deinit();
 
     skhd.current_mode = skhd.mappings.mode_map.getPtr("fn_layer");
@@ -1700,7 +1710,10 @@ test "non-capture mode: wildcard does NOT fire" {
         \\0x04 | 0x7B
     ;
 
-    var skhd = try createTestSkhdFromConfig(alloc, config);
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, config);
     defer skhd.deinit();
     const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
 

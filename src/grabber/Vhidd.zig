@@ -107,26 +107,37 @@ pub const Client = struct {
     /// Ephemeral path we bound — needs unlink on close.
     bound_path: []u8,
 
-    pub fn connect(allocator: std.mem.Allocator) !Client {
-        const server_path = try findServerSocket(allocator);
+    pub fn connect(allocator: std.mem.Allocator, io: std.Io) !Client {
+        const server_path = try findServerSocket(allocator, io);
         defer allocator.free(server_path);
 
-        try ensureClientDir();
+        try ensureClientDir(io);
 
         const client_path = try ephemeralClientPath(allocator);
         errdefer allocator.free(client_path);
 
         // Stale file from a prior crash would make bind() fail with EADDRINUSE.
-        posix.unlink(client_path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return error.ClientSocketBindFailed,
-        };
+        // libc unlink returns -1 / sets errno on failure; ENOENT is expected.
+        const path_z = try allocator.dupeZ(u8, client_path);
+        defer allocator.free(path_z);
+        const rc = std.c.unlink(path_z.ptr);
+        const ue = std.c.errno(rc);
+        if (ue != .SUCCESS and ue != .NOENT) return error.ClientSocketBindFailed;
 
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0);
-        errdefer posix.close(fd);
+        // Darwin doesn't accept SOCK_CLOEXEC in the type bits the way Linux
+        // does — `std.c.SOCK.CLOEXEC` is a Zig-internal shim flag that the
+        // (now-removed) `std.posix.socket` wrapper used to translate into a
+        // post-creation fcntl. Calling `std.c.socket` directly we have to do
+        // that fcntl ourselves, otherwise the syscall rejects the unknown
+        // bit and returns -1.
+        const fd_rc = std.c.socket(std.c.AF.UNIX, std.c.SOCK.DGRAM, 0);
+        if (fd_rc < 0) return error.ClientSocketBindFailed;
+        const fd: posix.fd_t = fd_rc;
+        errdefer _ = std.c.close(fd);
+        _ = std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
 
         try bindUnix(fd, client_path);
-        errdefer posix.unlink(client_path) catch {};
+        errdefer _ = std.c.unlink(path_z.ptr);
 
         try connectUnix(fd, server_path);
 
@@ -140,8 +151,12 @@ pub const Client = struct {
     }
 
     pub fn close(self: *Client) void {
-        posix.close(self.fd);
-        posix.unlink(self.bound_path) catch {};
+        _ = std.c.close(self.fd);
+        const path_z = self.allocator.dupeZ(u8, self.bound_path) catch null;
+        if (path_z) |p| {
+            defer self.allocator.free(p);
+            _ = std.c.unlink(p.ptr);
+        }
         self.allocator.free(self.bound_path);
         self.* = undefined;
     }
@@ -240,18 +255,21 @@ pub const Client = struct {
     /// `true` arrival. Heartbeats and non-matching responses are
     /// silently consumed.
     pub fn waitForBoolTrue(self: *Client, want: Response, timeout_ms: u32) !void {
-        const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+        const deadline_ms = nowMillis() + @as(i64, @intCast(timeout_ms));
         while (true) {
-            const remaining = deadline_ms - std.time.milliTimestamp();
+            const remaining = deadline_ms - nowMillis();
             if (remaining <= 0) return error.Timeout;
 
             try setRecvTimeout(self.fd, @intCast(remaining));
 
             var buf: [1024]u8 = undefined;
-            const n = posix.recv(self.fd, &buf, 0) catch |err| switch (err) {
-                error.WouldBlock => return error.Timeout,
-                else => return err,
-            };
+            const n_signed = std.c.recv(self.fd, &buf, buf.len, 0);
+            if (n_signed < 0) {
+                const e = std.c.errno(n_signed);
+                if (e == .AGAIN) return error.Timeout;
+                return error.RecvFailed;
+            }
+            const n: usize = @intCast(n_signed);
             if (n == 0) continue;
 
             // Wire frame: [type:u8] [body…].
@@ -287,8 +305,9 @@ pub const Client = struct {
         if (body.len + 1 > buf.len) return error.PayloadTooLarge;
         buf[0] = @intFromEnum(FrameType.user_data);
         @memcpy(buf[1..][0..body.len], body);
-        const sent = try posix.send(self.fd, buf[0 .. body.len + 1], 0);
-        if (sent != body.len + 1) return error.ShortWrite;
+        const sent = std.c.send(self.fd, buf[0 .. body.len + 1].ptr, body.len + 1, 0);
+        if (sent < 0) return error.SendFailed;
+        if (@as(usize, @intCast(sent)) != body.len + 1) return error.ShortWrite;
     }
 };
 
@@ -300,38 +319,52 @@ fn encodeHeader(buf: []u8, req: Request) usize {
     return 5;
 }
 
-fn ensureClientDir() !void {
-    std.fs.makeDirAbsolute(client_socket_dir) catch |err| switch (err) {
+fn ensureClientDir(io: std.Io) !void {
+    std.Io.Dir.createDirAbsolute(io, client_socket_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
-        error.AccessDenied => return error.PermissionDenied,
+        error.AccessDenied, error.PermissionDenied => return error.PermissionDenied,
         else => return error.ClientSocketDirCreate,
     };
+}
+
+/// `clock_gettime(REALTIME)` in milliseconds. std.time.milliTimestamp
+/// was removed in Zig 0.16.
+fn nowMillis() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+    return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+        @divFloor(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
 fn ephemeralClientPath(allocator: std.mem.Allocator) ![]u8 {
     // Karabiner uses hex-formatted nanoseconds since epoch; we match
     // that since the server doesn't care about the format, only that
-    // it's unique.
-    const ns = std.time.nanoTimestamp();
-    return std.fmt.allocPrint(allocator, "{s}/{x}.sock", .{ client_socket_dir, @as(u128, @bitCast(ns)) });
+    // it's unique. Using clock_gettime directly — std.time.nanoTimestamp
+    // was removed in Zig 0.16 and the new Io.Timestamp API would require
+    // plumbing io through every caller for what's just a "unique enough"
+    // ephemeral name.
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+    const ns: u128 = @as(u128, @intCast(ts.sec)) * std.time.ns_per_s + @as(u128, @intCast(ts.nsec));
+    return std.fmt.allocPrint(allocator, "{s}/{x}.sock", .{ client_socket_dir, ns });
 }
 
 /// Find the server's listening socket. Karabiner restarts produce
 /// a new file (epoch-named in hex), so we glob and pick the lexically
 /// last one — same algorithm Karabiner's own client uses.
-fn findServerSocket(allocator: std.mem.Allocator) ![]u8 {
-    var dir = std.fs.openDirAbsolute(server_socket_dir, .{ .iterate = true }) catch |err| switch (err) {
+fn findServerSocket(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    var dir = std.Io.Dir.openDirAbsolute(io, server_socket_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.ServerSocketDirMissing,
-        error.AccessDenied => return error.PermissionDenied,
+        error.AccessDenied, error.PermissionDenied => return error.PermissionDenied,
         else => return err,
     };
-    defer dir.close();
+    defer dir.close(io);
 
     var best: ?[]u8 = null;
     errdefer if (best) |p| allocator.free(p);
 
     var it = dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .unix_domain_socket and entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".sock")) continue;
         if (best) |existing| {
@@ -356,10 +389,10 @@ fn bindUnix(fd: posix.fd_t, path: []const u8) !void {
     };
     if (path.len >= addr.path.len) return error.PathTooLong;
     @memcpy(addr.path[0..path.len], path);
-    posix.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) catch |err| {
-        log.warn("bind {s} failed: {s}", .{ path, @errorName(err) });
+    if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) {
+        log.warn("bind {s} failed: errno={d}", .{ path, @intFromEnum(std.c.errno(@as(c_int, -1))) });
         return error.ClientSocketBindFailed;
-    };
+    }
 }
 
 fn connectUnix(fd: posix.fd_t, path: []const u8) !void {
@@ -369,7 +402,9 @@ fn connectUnix(fd: posix.fd_t, path: []const u8) !void {
     };
     if (path.len >= addr.path.len) return error.PathTooLong;
     @memcpy(addr.path[0..path.len], path);
-    try posix.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
+    if (std.c.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) {
+        return error.ConnectFailed;
+    }
 }
 
 fn setRecvTimeout(fd: posix.fd_t, ms: u32) !void {
@@ -377,7 +412,9 @@ fn setRecvTimeout(fd: posix.fd_t, ms: u32) !void {
         .sec = @intCast(ms / 1000),
         .usec = @intCast((ms % 1000) * 1000),
     };
-    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
+    if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, std.mem.asBytes(&tv).ptr, @sizeOf(@TypeOf(tv))) != 0) {
+        return error.SetSockOptFailed;
+    }
 }
 
 test "encodeHeader writes magic + version + request" {

@@ -6,7 +6,7 @@ const c = @import("c.zig");
 
 extern fn NSApplicationLoad() void;
 
-pub fn echo() !void {
+pub fn echo(io: std.Io) !void {
     // NSApplicationLoad();
     const mask: u32 = (1 << c.kCGEventKeyDown) |
         (1 << c.kCGEventFlagsChanged) |
@@ -17,7 +17,7 @@ pub fn echo() !void {
     var event_tap = EventTap{ .mask = mask };
     defer event_tap.deinit();
     std.debug.print("Ctrl+C to exit\n", .{});
-    try event_tap.begin(callback, null);
+    try event_tap.begin(io, callback, null);
     c.CFRunLoopRun();
 }
 
@@ -71,7 +71,7 @@ fn printKeydown(event: c.CGEventRef) !c.CGEventRef {
     const flags: c.CGEventFlags = c.CGEventGetFlags(event);
     if (keycode == c.kVK_ANSI_C and flags & c.kCGEventFlagMaskControl != 0) {
         std.debug.print("Ctrl+C pressed\n", .{});
-        std.posix.exit(0);
+        std.process.exit(0);
     }
     if (flags & c.kCGEventFlagMaskShift != 0) {
         std.debug.print("Shift ", .{});
@@ -156,7 +156,7 @@ fn translateKey(buffer: *[255]u8, keyCode: u16, modifierState: u32) !void {
     if (num_bytes > 64) {
         @panic("num_bytes for cfstring > 64");
     }
-    if (c.CFStringGetCString(cfstring, buffer, num_bytes, c.kCFStringEncodingUTF8) == c.false) {
+    if (c.CFStringGetCString(cfstring, buffer, num_bytes, c.kCFStringEncodingUTF8) == 0) {
         std.debug.print("str {?x} len: {d}\n", .{ cfstring.?, num_bytes });
         std.debug.print("chars: {x}\n", .{chars});
         return error.@"Failed to get c string from CFString";

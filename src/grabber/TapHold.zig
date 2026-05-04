@@ -106,7 +106,12 @@ sink_ctx: ?*anyopaque,
 /// otherwise. Owner's responsibility.
 layer_sink: ?LayerSink = null,
 layer_sink_ctx: ?*anyopaque = null,
-buffer: std.BoundedArray(Event, max_buffered_events) = .{},
+// std.BoundedArray was removed in 0.16. We hold the storage inline
+// and track the live length separately so the data is address-stable
+// across struct moves (an ArrayList view's `.items.ptr` would point at
+// the now-stale function frame after `init` returns by value).
+buffer_storage: [max_buffered_events]Event = undefined,
+buffer_len: usize = 0,
 /// HID usages currently parked in `buffer` as a still-pressed down
 /// (not yet matched by an up). Used to decide whether an arriving
 /// key-up should be buffered (its down was buffered, replay them
@@ -114,13 +119,34 @@ buffer: std.BoundedArray(Event, max_buffered_events) = .{},
 /// down was emitted before the pending window — buffering the up
 /// would let the OS see the key as held for the entire pending
 /// window and autorepeat it).
-buffered_downs: std.BoundedArray(u16, max_buffered_events) = .{},
+buffered_downs_storage: [max_buffered_events]u16 = undefined,
+buffered_downs_len: usize = 0,
 /// Whether any non-source key event has been seen since this rule
 /// last entered pending. Drives `retro_tap` (emit tap on release if
 /// nothing else was pressed during the hold).
 other_key_seen: bool = false,
 
 const Self = @This();
+
+inline fn bufferItems(self: *Self) []Event {
+    return self.buffer_storage[0..self.buffer_len];
+}
+
+inline fn bufferedDownsItems(self: *Self) []u16 {
+    return self.buffered_downs_storage[0..self.buffered_downs_len];
+}
+
+inline fn pushBuffer(self: *Self, ev: Event) error{OutOfMemory}!void {
+    if (self.buffer_len >= self.buffer_storage.len) return error.OutOfMemory;
+    self.buffer_storage[self.buffer_len] = ev;
+    self.buffer_len += 1;
+}
+
+inline fn pushBufferedDown(self: *Self, usage: u16) error{OutOfMemory}!void {
+    if (self.buffered_downs_len >= self.buffered_downs_storage.len) return error.OutOfMemory;
+    self.buffered_downs_storage[self.buffered_downs_len] = usage;
+    self.buffered_downs_len += 1;
+}
 
 pub fn init(rule: Rule, sink: Sink, sink_ctx: ?*anyopaque) Self {
     return .{ .rule = rule, .sink = sink, .sink_ctx = sink_ctx };
@@ -200,9 +226,12 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                     // fires and a single physical press shows up as
                     // many characters.
                     var down_was_buffered = false;
-                    for (self.buffered_downs.constSlice(), 0..) |u, i| {
-                        if (u == ev_usage16) {
-                            _ = self.buffered_downs.swapRemove(i);
+                    var i: usize = 0;
+                    while (i < self.buffered_downs_len) : (i += 1) {
+                        if (self.buffered_downs_storage[i] == ev_usage16) {
+                            // swap-remove
+                            self.buffered_downs_len -= 1;
+                            self.buffered_downs_storage[i] = self.buffered_downs_storage[self.buffered_downs_len];
                             down_was_buffered = true;
                             break;
                         }
@@ -212,15 +241,15 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                         return .{ .disposition = .pass, .timer = .none };
                     }
                 }
-                self.buffer.append(ev) catch {
+                self.pushBuffer(ev) catch {
                     log.warn("buffer overflow — flushing as tap", .{});
                     self.commitTap();
                     return .{ .disposition = .pass, .timer = .cancel };
                 };
                 if (ev.pressed) {
-                    self.buffered_downs.append(ev_usage16) catch {};
+                    self.pushBufferedDown(ev_usage16) catch {};
                 }
-                log.info("buffer: slot src=0x{X:0>2} +usage=0x{X:0>2} pressed={} (depth={d})", .{ self.rule.src_usage, ev.usage, ev.pressed, self.buffer.len });
+                log.info("buffer: slot src=0x{X:0>2} +usage=0x{X:0>2} pressed={} (depth={d})", .{ self.rule.src_usage, ev.usage, ev.pressed, self.buffer_len });
                 if (self.rule.permissive_hold and !self.isLayer() and !ev.pressed) {
                     // Modifier-style permissive_hold: nested down+up
                     // commits hold and replays the inner key under
@@ -333,32 +362,33 @@ fn emit(self: *Self, usage: u16, pressed: bool) void {
 }
 
 fn flushBuffer(self: *Self) void {
-    if (self.buffer.len > 0) {
-        log.info("flush: slot src=0x{X:0>2} replaying {d} buffered event(s)", .{ self.rule.src_usage, self.buffer.len });
+    if (self.buffer_len > 0) {
+        log.info("flush: slot src=0x{X:0>2} replaying {d} buffered event(s)", .{ self.rule.src_usage, self.buffer_len });
     }
-    for (self.buffer.constSlice()) |ev| {
+    for (self.bufferItems()) |ev| {
         self.sink(self.sink_ctx, ev);
     }
-    self.buffer.clear();
-    self.buffered_downs.clear();
+    self.buffer_len = 0;
+    self.buffered_downs_len = 0;
 }
 
 // ─── tests ───────────────────────────────────────────────────────
 
 const TestSink = struct {
+    allocator: std.mem.Allocator,
     out: std.ArrayList(Event),
 
     fn init(allocator: std.mem.Allocator) TestSink {
-        return .{ .out = std.ArrayList(Event).init(allocator) };
+        return .{ .allocator = allocator, .out = .empty };
     }
 
     fn deinit(self: *TestSink) void {
-        self.out.deinit();
+        self.out.deinit(self.allocator);
     }
 
     fn callback(ctx: ?*anyopaque, ev: Event) void {
         const self: *TestSink = @ptrCast(@alignCast(ctx.?));
-        self.out.append(ev) catch unreachable;
+        self.out.append(self.allocator, ev) catch unreachable;
     }
 };
 
@@ -515,13 +545,13 @@ test "layer hold: hold_on_other_key_press triggers layer enter+exit through laye
 
         fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
             const s: *@This() = @ptrCast(@alignCast(ctx.?));
-            s.events.append(.{ .layer = layer, .entering = entering }) catch unreachable;
+            s.events.append(std.testing.allocator, .{ .layer = layer, .entering = entering }) catch unreachable;
         }
     };
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var ll = LayerLog{ .events = std.ArrayList(LayerEvent).init(std.testing.allocator) };
-    defer ll.events.deinit();
+    var ll = LayerLog{ .events = .empty };
+    defer ll.events.deinit(std.testing.allocator);
 
     var eng = initWithLayerSink(.{
         .src_usage = 0x2C, // space
@@ -561,13 +591,13 @@ test "layer hold: timer-only commit, buffered events replayed in order on tap" {
 
         fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
             const s: *@This() = @ptrCast(@alignCast(ctx.?));
-            s.events.append(.{ .layer = layer, .entering = entering }) catch unreachable;
+            s.events.append(std.testing.allocator, .{ .layer = layer, .entering = entering }) catch unreachable;
         }
     };
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var ll = LayerLog{ .events = std.ArrayList(LayerEvent).init(std.testing.allocator) };
-    defer ll.events.deinit();
+    var ll = LayerLog{ .events = .empty };
+    defer ll.events.deinit(std.testing.allocator);
 
     // Layer rule with neither permissive_hold nor hold_on_other_key_press
     // explicitly set — should still buffer non-source events because
@@ -608,13 +638,13 @@ test "layer hold: timer fires after buffered events → enter layer + replay" {
 
         fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
             const s: *@This() = @ptrCast(@alignCast(ctx.?));
-            s.events.append(.{ .layer = layer, .entering = entering }) catch unreachable;
+            s.events.append(std.testing.allocator, .{ .layer = layer, .entering = entering }) catch unreachable;
         }
     };
     var sink = TestSink.init(std.testing.allocator);
     defer sink.deinit();
-    var ll = LayerLog{ .events = std.ArrayList(LayerEvent).init(std.testing.allocator) };
-    defer ll.events.deinit();
+    var ll = LayerLog{ .events = .empty };
+    defer ll.events.deinit(std.testing.allocator);
 
     var eng = initWithLayerSink(.{
         .src_usage = 0x2C,
@@ -770,13 +800,13 @@ test "bench: pure-tap loop (modifier rule, no buffering)" {
     );
 
     const iterations = 200_000;
-    var timer = try std.time.Timer.start();
+    const t0 = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         _ = eng.feed(kbev(0x39, true));
         _ = eng.feed(kbev(0x39, false));
     }
-    const total_ns = timer.read();
+    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake); const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
     const events = iterations * 2;
     benchReport("pure-tap", total_ns, events);
     // Each iteration produces 2 emitted events (tap_down + tap_up).
@@ -803,7 +833,7 @@ test "bench: layer rule, fast typing burst (5 keys per hold)" {
 
     const iterations = 50_000;
     const inner_keys = 5;
-    var timer = try std.time.Timer.start();
+    const t0 = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         _ = eng.feed(kbev(0x2C, true));
@@ -814,7 +844,7 @@ test "bench: layer rule, fast typing burst (5 keys per hold)" {
         }
         _ = eng.feed(kbev(0x2C, false));
     }
-    const total_ns = timer.read();
+    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake); const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
     const events = iterations * (2 + inner_keys * 2);
     benchReport("layer-roll-5keys", total_ns, events);
 }
@@ -838,7 +868,7 @@ test "bench: hold-on-other-key-press eager commit" {
 
     const iterations = 50_000;
     const inner_keys = 5;
-    var timer = try std.time.Timer.start();
+    const t0 = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
         _ = eng.feed(kbev(0x39, true));
@@ -849,7 +879,7 @@ test "bench: hold-on-other-key-press eager commit" {
         }
         _ = eng.feed(kbev(0x39, false));
     }
-    const total_ns = timer.read();
+    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake); const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
     const events = iterations * (2 + inner_keys * 2);
     benchReport("hold-on-other-key-press", total_ns, events);
 }

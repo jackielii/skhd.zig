@@ -63,13 +63,13 @@ pub const Token = struct {
     line: usize,
     cursor: usize,
 
-    pub fn format(self: *const Token, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try writer.print("Token{{", .{});
+    pub fn format(self: Token, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeAll("Token{");
         try writer.print("\n  line: {d}", .{self.line});
         try writer.print("\n  cursor: {d}", .{self.cursor});
         try writer.print("\n  type: {any}", .{self.type});
         try writer.print("\n  text: {s}", .{self.text});
-        try writer.print("\n}}", .{});
+        try writer.writeAll("\n}");
     }
 };
 
@@ -315,7 +315,7 @@ fn acceptCommand(self: *Tokenizer) []const u8 {
             break;
         }
     }
-    return std.mem.trimRight(u8, self.buffer[start..self.pos], "\n");
+    return std.mem.trimEnd(u8, self.buffer[start..self.pos], "\n");
 }
 
 fn acceptString(self: *Tokenizer) []const u8 {
@@ -386,10 +386,11 @@ test "nextRune" {
         \\
     ;
     var tokenizer = try init(content);
-    var got = std.ArrayList(u8).init(std.testing.allocator);
-    defer got.deinit();
+    const alloc = std.testing.allocator;
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(alloc);
     while (tokenizer.peekRune()) |rune| {
-        try got.appendSlice(rune);
+        try got.appendSlice(alloc, rune);
         tokenizer.pos += rune.len;
     }
     try std.testing.expectEqualStrings(got.items, content);

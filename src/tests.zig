@@ -12,6 +12,7 @@ const ParseError = @import("ParseError.zig").ParseError;
 const print = std.debug.print;
 const log = std.log.scoped(.tests);
 
+
 test "ModifierFlag basic operations" {
     // Test basic flag creation
     const flag1 = ModifierFlag{ .cmd = true, .shift = true };
@@ -117,10 +118,10 @@ test "Mode creation and management" {
 test "Basic parsing" {
     const allocator = testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Parse a simple hotkey
@@ -138,10 +139,10 @@ test "Basic parsing" {
 test "Mode declaration parsing" {
     const allocator = testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Parse mode declaration
@@ -158,10 +159,10 @@ test "Mode declaration parsing" {
 test "Mode switching hotkey" {
     const allocator = testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Parse mode declaration and mode switching hotkey
@@ -193,10 +194,10 @@ test "Mode switching hotkey" {
 test "Left/right modifier parsing" {
     const allocator = testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Parse hotkeys with left/right modifiers
@@ -237,10 +238,10 @@ test "Left/right modifier parsing" {
 test "Blacklist parsing" {
     const allocator = testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Parse blacklist
@@ -259,14 +260,14 @@ test "Blacklist parsing" {
 test "Shell option parsing" {
     const allocator = testing.allocator;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Default shell should be from environment or /bin/bash
     const initial_shell = mappings.shell;
     try testing.expect(initial_shell.len > 0);
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     // Test parsing shell option
@@ -285,11 +286,11 @@ test "Shell from environment" {
     const allocator = testing.allocator;
 
     // Test that SHELL env var is respected on init
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Should use SHELL env var if set, otherwise /bin/bash
-    if (std.posix.getenv("SHELL")) |env_shell| {
+    if (@import("utils.zig").getenv("SHELL")) |env_shell| {
         try testing.expectEqualStrings(env_shell, mappings.shell);
     } else {
         try testing.expectEqualStrings("/bin/bash", mappings.shell);
@@ -298,12 +299,13 @@ test "Shell from environment" {
 
 test "Config file resolution" {
     const allocator = testing.allocator;
+    const io = std.testing.io;
 
     // Test getting config file
     const getConfigFile = @import("main.zig").getConfigFile;
 
     // This should resolve to a path based on environment
-    const config_path = try getConfigFile(allocator, "skhdrc");
+    const config_path = try getConfigFile(allocator, io, "skhdrc");
     defer allocator.free(config_path);
 
     // Should be one of:
@@ -314,7 +316,7 @@ test "Config file resolution" {
     try testing.expect(config_path.len > 0);
 
     // Test that the function returns a valid path
-    if (std.posix.getenv("HOME")) |home| {
+    if (@import("utils.zig").getenv("HOME")) |home| {
         // If we have HOME, the path should contain it or be the fallback
         const has_home = std.mem.indexOf(u8, config_path, home) != null;
         const is_fallback = std.mem.eql(u8, config_path, "skhdrc");
@@ -326,7 +328,7 @@ test "Config reload memory leak test" {
     const allocator = testing.allocator;
 
     // Create temporary config files
-    const test_id = std.crypto.random.int(u32);
+    const test_id = std.testing.random_seed;
     const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_reload_{d}.skhdrc", .{test_id});
     defer allocator.free(config_path);
 
@@ -340,16 +342,14 @@ test "Config reload memory leak test" {
             \\test_mode < cmd - x : echo "test mode X"
         ;
 
-        const file = try std.fs.createFileAbsolute(config_path, .{});
-        defer file.close();
-        try file.writeAll(initial_config);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config_path, .data = initial_config });
     }
 
     // Clean up config file after test
-    defer std.fs.deleteFileAbsolute(config_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, config_path) catch {};
 
     // Initialize skhd with initial config
-    var skhd = try Skhd.init(allocator, config_path, false, false);
+    var skhd = try Skhd.init(allocator, std.testing.io, config_path, false, false);
     defer skhd.deinit();
 
     // Verify initial state
@@ -372,10 +372,7 @@ test "Config reload memory leak test" {
             \\]
         ;
 
-        const file = std.fs.openFileAbsolute(config_path, .{ .mode = .write_only }) catch unreachable;
-        defer file.close();
-        try file.setEndPos(0); // Truncate file
-        try file.writeAll(modified_config);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config_path, .data = modified_config });
     }
 
     // Reload config
@@ -403,10 +400,7 @@ test "Config reload memory leak test" {
         , .{ i, 'a' + @as(u8, @intCast(i)), i });
         defer allocator.free(multi_config);
 
-        const file = std.fs.openFileAbsolute(config_path, .{ .mode = .write_only }) catch unreachable;
-        defer file.close();
-        try file.setEndPos(0);
-        try file.writeAll(multi_config);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config_path, .data = multi_config });
 
         // Reload
         try skhd.reloadConfig();
@@ -424,7 +418,7 @@ test "Config reload preserves current mode" {
     const allocator = testing.allocator;
 
     // Create temporary config file
-    const test_id = std.crypto.random.int(u32);
+    const test_id = std.testing.random_seed;
     const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_mode_{d}.skhdrc", .{test_id});
     defer allocator.free(config_path);
 
@@ -440,15 +434,13 @@ test "Config reload preserves current mode" {
             \\special < escape ; default
         ;
 
-        const file = try std.fs.createFileAbsolute(config_path, .{});
-        defer file.close();
-        try file.writeAll(config);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config_path, .data = config });
     }
 
-    defer std.fs.deleteFileAbsolute(config_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, config_path) catch {};
 
     // Initialize skhd
-    var skhd = try Skhd.init(allocator, config_path, false, false);
+    var skhd = try Skhd.init(allocator, std.testing.io, config_path, false, false);
     defer skhd.deinit();
 
     // Switch to special mode
@@ -467,10 +459,10 @@ test "Config reload preserves current mode" {
 test "Parser error messages" {
     const allocator = testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Test missing '<' after mode
@@ -546,13 +538,13 @@ test "Parser error message formatting" {
     var err1 = try ParseError.fromPosition(testing.allocator, 5, 10, "Test error message", null);
     defer err1.deinit();
     var buf: [256]u8 = undefined;
-    const result1 = try std.fmt.bufPrint(&buf, "{}", .{err1});
+    const result1 = try std.fmt.bufPrint(&buf, "{f}", .{err1});
     try testing.expectEqualStrings("5:10: error: Test error message", result1);
 
     // Test error formatting with file path
     var err2 = try ParseError.fromPosition(testing.allocator, 3, 7, "Another error", "test.skhdrc");
     defer err2.deinit();
-    const result2 = try std.fmt.bufPrint(&buf, "{}", .{err2});
+    const result2 = try std.fmt.bufPrint(&buf, "{f}", .{err2});
     try testing.expectEqualStrings("test.skhdrc:3:7: error: Another error", result2);
 
     // Test error with token text
@@ -564,17 +556,17 @@ test "Parser error message formatting" {
     };
     var err3 = try ParseError.fromToken(testing.allocator, token, "Unknown key", "config.skhdrc");
     defer err3.deinit();
-    const result3 = try std.fmt.bufPrint(&buf, "{}", .{err3});
+    const result3 = try std.fmt.bufPrint(&buf, "{f}", .{err3});
     try testing.expectEqualStrings("config.skhdrc:2:15: error: Unknown key near 'badkey'", result3);
 }
 
 test "Parser error with multiline input" {
     const allocator = testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Test error on line 3
@@ -599,22 +591,20 @@ test "Hot reload enable/disable" {
     const allocator = testing.allocator;
 
     // Create temporary config file
-    const test_id = std.crypto.random.int(u32);
+    const test_id = std.testing.random_seed;
     const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_{d}.skhdrc", .{test_id});
     defer allocator.free(config_path);
 
     // Write initial config
     {
         const config = "cmd - a : echo \"test A\"";
-        const file = try std.fs.createFileAbsolute(config_path, .{});
-        defer file.close();
-        try file.writeAll(config);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config_path, .data = config });
     }
 
-    defer std.fs.deleteFileAbsolute(config_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, config_path) catch {};
 
     // Initialize skhd
-    var skhd = try Skhd.init(allocator, config_path, false, false);
+    var skhd = try Skhd.init(allocator, std.testing.io, config_path, false, false);
     defer skhd.deinit();
 
     // Test enabling hot reload
@@ -650,13 +640,11 @@ test "modifier matching - general modifiers match specific ones" {
             \\cmd + shift - c : echo "cmd + shift - c"
             \\lcmd + lshift - d : echo "lcmd + lshift - d"
         ;
-        const file = try std.fs.createFileAbsolute(config_path, .{});
-        defer file.close();
-        try file.writeAll(config);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config_path, .data = config });
     }
-    defer std.fs.deleteFileAbsolute(config_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, config_path) catch {};
 
-    var skhd = try Skhd.init(allocator, config_path, false, false);
+    var skhd = try Skhd.init(allocator, std.testing.io, config_path, false, false);
     defer skhd.deinit();
 
     // Get default mode
@@ -713,13 +701,11 @@ test "keyboard lalt should match config alt" {
     const config_path = "/tmp/skhd_test_lalt_matches_alt.txt";
     {
         const config = "alt - a : echo \"alt - a pressed\"";
-        const file = try std.fs.createFileAbsolute(config_path, .{});
-        defer file.close();
-        try file.writeAll(config);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config_path, .data = config });
     }
-    defer std.fs.deleteFileAbsolute(config_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, config_path) catch {};
 
-    var skhd = try Skhd.init(allocator, config_path, false, false);
+    var skhd = try Skhd.init(allocator, std.testing.io, config_path, false, false);
     defer skhd.deinit();
 
     // Get default mode
@@ -809,10 +795,10 @@ test "find_command_for_process function with process matching" {
 
 test "multiple process groups and reuse" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Test multiple groups and reusing them
@@ -884,10 +870,10 @@ test "multiple process groups and reuse" {
 
 test "Command definitions - single placeholder" {
     const allocator = testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -931,10 +917,10 @@ test "Command definitions - single placeholder" {
 
 test "Command definitions - multiple placeholders" {
     const allocator = testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -959,10 +945,10 @@ test "Command definitions - multiple placeholders" {
 
 test "Command definitions - repeated placeholder" {
     const allocator = testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -983,10 +969,10 @@ test "Command definitions - repeated placeholder" {
 
 test "Command definitions - in process list" {
     const allocator = testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1020,10 +1006,10 @@ test "Command definitions - in process list" {
 
 test "Command definitions - mode declaration" {
     const allocator = testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1040,10 +1026,10 @@ test "Command definitions - mode declaration" {
 
 test "Command definitions - with escaped quotes" {
     const allocator = testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1065,10 +1051,10 @@ test "Command definitions - with escaped quotes" {
 test "Duplicate hotkey detection - same mode same hotkey" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Define the same hotkey twice in default mode
@@ -1091,10 +1077,10 @@ test "Duplicate hotkey detection - same mode same hotkey" {
 test "Duplicate hotkey detection - specific modifiers" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Test exact duplicates with specific modifiers
@@ -1114,10 +1100,10 @@ test "Duplicate hotkey detection - specific modifiers" {
 test "Duplicate hotkey detection - different modes allowed" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Same hotkey in different modes should be allowed
@@ -1140,10 +1126,10 @@ test "Duplicate hotkey detection - different modes allowed" {
 test "Duplicate hotkey detection - left/right modifiers are different" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Different left/right modifiers should be allowed (not duplicates)
@@ -1161,10 +1147,10 @@ test "Duplicate hotkey detection - left/right modifiers are different" {
 test "Duplicate hotkey detection - general modifier conflicts with specific modifiers" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1180,10 +1166,10 @@ test "Duplicate hotkey detection - general modifier conflicts with specific modi
 test "Duplicate hotkey detection - specific modifier conflicts with later general modifier" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1199,10 +1185,10 @@ test "Duplicate hotkey detection - specific modifier conflicts with later genera
 test "Duplicate hotkey detection - multi mode assignment" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     // Test duplicate detection with multi-mode hotkey
@@ -1224,10 +1210,10 @@ test "Duplicate hotkey detection - multi mode assignment" {
 
 test "Unbound action - simple syntax" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1261,10 +1247,10 @@ test "Unbound action - simple syntax" {
 
 test "Unbound action - with modes" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1309,10 +1295,10 @@ test "Unbound action - with modes" {
 
 test "Unbound action - with passthrough" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1335,10 +1321,10 @@ test "Unbound action - with passthrough" {
 
 test "Unbound action - mixed with process lists" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
     const config =
@@ -1389,10 +1375,10 @@ test "mode activation uses activation variant" {
         \\cmd - w ; window
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1430,10 +1416,10 @@ test "mode activation with command" {
         \\escape ; default : echo "Back to default"
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1487,10 +1473,10 @@ test "mode activation with command reference" {
         \\cmd - w ; window : @notify("Window mode active")
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1533,10 +1519,10 @@ test "mode activation in process list" {
         \\]
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1618,10 +1604,10 @@ test "process group command reference parsing" {
         \\]
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1660,10 +1646,10 @@ test "empty command token with reference" {
         \\cmd - b : echo @not_a_reference
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1707,10 +1693,10 @@ test "mode declaration command references" {
         \\:: mode2 : echo @not_a_reference
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1738,10 +1724,10 @@ test "empty command followed by process group" {
         \\]
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     // This should produce an error because "firefox" : with nothing after colon is invalid
@@ -1769,10 +1755,10 @@ test "mode activation with process groups" {
         \\]
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");
@@ -1836,10 +1822,10 @@ test "NX media key forwarding" {
         \\cmd - p | play
     ;
 
-    var mappings = try Mappings.init(allocator);
+    var mappings = try Mappings.init(allocator, std.testing.io);
     defer mappings.deinit();
 
-    var parser = try Parser.init(allocator);
+    var parser = try Parser.init(allocator, std.testing.io);
     defer parser.deinit();
 
     try parser.parseWithPath(&mappings, config, "test.conf");

@@ -5,6 +5,7 @@ const utils = @import("utils.zig");
 const log = std.log.scoped(.mappings);
 
 allocator: std.mem.Allocator,
+io: std.Io,
 mode_map: std.StringHashMapUnmanaged(Mode) = .empty,
 blacklist: std.StringHashMapUnmanaged(void) = .empty,
 shell: [:0]const u8,
@@ -74,9 +75,9 @@ pub const TapHoldDecl = struct {
     retro_tap: bool = false,
 };
 
-pub fn init(alloc: std.mem.Allocator) !Mappings {
+pub fn init(alloc: std.mem.Allocator, io: std.Io) !Mappings {
     const default_shell = "/bin/bash";
-    const shell = if (std.posix.getenv("SHELL")) |env|
+    const shell = if (@import("utils.zig").getenv("SHELL")) |env|
         try alloc.dupeZ(u8, env)
     else
         try alloc.dupeZ(u8, default_shell);
@@ -84,6 +85,7 @@ pub fn init(alloc: std.mem.Allocator) !Mappings {
     return Mappings{
         .shell = shell,
         .allocator = alloc,
+        .io = io,
     };
 }
 
@@ -224,29 +226,25 @@ pub fn add_path(self: *Mappings, path: []const u8) !void {
 }
 
 
-pub fn format(self: *const Mappings, comptime fmt: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-    // if (fmt.len != 0) {
-    //     std.fmt.invalidFmtError(fmt, self);
-    // }
-    _ = fmt;
-    try writer.print("Mappings {{", .{});
-    try writer.print("\n  mode_map: {{", .{});
+pub fn format(self: Mappings, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.writeAll("Mappings {");
+    try writer.writeAll("\n  mode_map: {");
     {
         var it = self.mode_map.iterator();
         while (it.next()) |kv| {
-            try utils.indentPrint(self.allocator, writer, "    ", "\n{}", kv.value_ptr.*);
+            utils.indentPrint(self.allocator, writer, "    ", "\n{f}", kv.value_ptr.*) catch return error.WriteFailed;
         }
     }
-    try writer.print("\n  }}", .{});
-    try writer.print("\n  blacklist: {{", .{});
+    try writer.writeAll("\n  }");
+    try writer.writeAll("\n  blacklist: {");
     {
         var it = self.blacklist.keyIterator();
         while (it.next()) |key| {
             try writer.print("\n    {s}", .{key.*});
         }
     }
-    try writer.print("\n  }}", .{});
-    try writer.print("\n}}", .{});
+    try writer.writeAll("\n  }");
+    try writer.writeAll("\n}");
 }
 
 pub fn get_mode_or_create_default(self: *Mappings, mode_name: []const u8) !?*Mode {
@@ -288,7 +286,7 @@ pub fn put_mode(self: *Mappings, mode: Mode) !void {
 
 test "get_mode default" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     _ = try mappings.get_mode_or_create_default("default");
     _ = try mappings.get_mode_or_create_default("default");
     _ = try mappings.get_mode_or_create_default("xxx");
@@ -299,7 +297,7 @@ test "get_mode default" {
 
 test "format" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
     const mode = try mappings.get_mode_or_create_default("default");
     // Just verify the formatting doesn't crash
@@ -311,7 +309,7 @@ test "format" {
 
 test "add_taphold rejects collision with prior .remap on same src+device" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try mappings.add_remap(0x39, 0xE0, "builtin");
@@ -326,7 +324,7 @@ test "add_taphold rejects collision with prior .remap on same src+device" {
 
 test "add_taphold accepts distinct src or distinct device" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try mappings.add_taphold(.{
@@ -359,7 +357,7 @@ test "add_taphold accepts distinct src or distinct device" {
 
 test "add_remap returns error on duplicate src+device" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try mappings.add_remap(0x39, 0xE0, "builtin"); // caps_lock -> lctrl on builtin
@@ -374,7 +372,7 @@ test "add_remap returns error on duplicate src+device" {
 
 test "add_device_alias returns error on duplicate" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     try mappings.add_device_alias("builtin", 0x05AC, 0x0342);
@@ -390,7 +388,7 @@ test "add_device_alias returns error on duplicate" {
 
 test "add_blacklist returns error on duplicate" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // First add should succeed
@@ -407,7 +405,7 @@ test "add_blacklist returns error on duplicate" {
 
 test "put_mode returns error on duplicate" {
     const alloc = std.testing.allocator;
-    var mappings = try Mappings.init(alloc);
+    var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
     // Create and add a mode

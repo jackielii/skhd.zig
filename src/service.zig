@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c.zig");
+const c_mod = c;
 const sm = @import("sm_app_service.zig");
 const grabber_cli = @import("grabber_cli.zig");
 const log = std.log.scoped(.service);
@@ -39,9 +40,9 @@ pub const InputMonitoringAccess = enum { granted, denied, unknown };
 /// dropped before reaching the callback. This catches the cdHash-mismatch
 /// case that the existing Accessibility / log-tail signals miss entirely.
 pub fn checkInputMonitoringAccess() InputMonitoringAccess {
-    return switch (c.IOHIDCheckAccess(c.kIOHIDRequestTypeListenEvent)) {
-        c.kIOHIDAccessTypeGranted => .granted,
-        c.kIOHIDAccessTypeDenied => .denied,
+    return switch (c_mod.IOHIDCheckAccess(c_mod.kIOHIDRequestTypeListenEvent)) {
+        c_mod.kIOHIDAccessTypeGranted => .granted,
+        c_mod.kIOHIDAccessTypeDenied => .denied,
         else => .unknown,
     };
 }
@@ -53,7 +54,7 @@ pub fn checkInputMonitoringAccess() InputMonitoringAccess {
 /// the agent are both signed with `com.jackielii.skhd` and the daemon
 /// runs from inside skhd.app, granting the dialog covers both processes.
 pub fn promptForInputMonitoring() bool {
-    return c.IOHIDRequestAccess(c.kIOHIDRequestTypeListenEvent) != 0;
+    return c_mod.IOHIDRequestAccess(c_mod.kIOHIDRequestTypeListenEvent) != 0;
 }
 
 /// Like hasAccessibilityPermissions() but uses the prompting variant. The
@@ -78,8 +79,8 @@ pub fn promptForAccessibility() bool {
 }
 
 /// PID file management
-pub fn writePidFile(allocator: std.mem.Allocator) !void {
-    const username = std.posix.getenv("USER") orelse "unknown";
+pub fn writePidFile(allocator: std.mem.Allocator, io: std.Io) !void {
+    const username = @import("utils.zig").getenv("USER") orelse "unknown";
     const pid_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_{s}.pid", .{username});
     defer allocator.free(pid_path);
 
@@ -87,46 +88,40 @@ pub fn writePidFile(allocator: std.mem.Allocator) !void {
     const pid_str = try std.fmt.allocPrint(allocator, "{d}\n", .{pid});
     defer allocator.free(pid_str);
 
-    const file = try std.fs.createFileAbsolute(pid_path, .{ .truncate = true });
-    defer file.close();
-
-    try file.writeAll(pid_str);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = pid_path, .data = pid_str });
 }
 
-pub fn removePidFile(allocator: std.mem.Allocator) void {
-    const username = std.posix.getenv("USER") orelse "unknown";
+pub fn removePidFile(allocator: std.mem.Allocator, io: std.Io) void {
+    const username = @import("utils.zig").getenv("USER") orelse "unknown";
     const pid_path = std.fmt.allocPrint(allocator, "/tmp/skhd_{s}.pid", .{username}) catch return;
     defer allocator.free(pid_path);
-
-    std.fs.deleteFileAbsolute(pid_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(io, pid_path) catch {};
 }
 
-pub fn readPidFile(allocator: std.mem.Allocator) !?i32 {
-    const username = std.posix.getenv("USER") orelse "unknown";
+pub fn readPidFile(allocator: std.mem.Allocator, io: std.Io) !?i32 {
+    const username = @import("utils.zig").getenv("USER") orelse "unknown";
     const pid_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_{s}.pid", .{username});
     defer allocator.free(pid_path);
 
-    const file = std.fs.openFileAbsolute(pid_path, .{}) catch |err| {
-        if (err == error.FileNotFound) return null;
-        return err;
+    var content_buf: [256]u8 = undefined;
+    const slice = std.Io.Dir.cwd().readFile(io, pid_path, &content_buf) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return error.ReadFailed,
     };
-    defer file.close();
-
-    const content = try file.readToEndAlloc(allocator, 256);
-    defer allocator.free(content);
-
-    const trimmed = std.mem.trim(u8, content, " \n\r\t");
+    const trimmed = std.mem.trim(u8, slice, " \n\r\t");
     return std.fmt.parseInt(i32, trimmed, 10) catch null;
 }
 
 /// Check if a process with given PID is running
 pub fn isProcessRunning(pid: i32) bool {
-    // On macOS/Unix, we can check if a process exists by sending signal 0
-    std.posix.kill(pid, 0) catch |err| {
-        // If we get permission denied, the process exists but we can't signal it
-        return err == error.PermissionDenied;
-    };
-    return true;
+    // On macOS/Unix, sending signal 0 probes existence: returns 0 on
+    // success, -1 with EPERM if the process exists but we can't signal,
+    // -1 with ESRCH if it doesn't exist.
+    // signal 0 is the "test for existence" probe; cast through the
+    // SIG enum which has no zero variant.
+    const rc = std.c.kill(pid, @enumFromInt(0));
+    if (rc == 0) return true;
+    return std.c.errno(rc) == .PERM;
 }
 
 /// Pick a path to recommend in error messages for the System Settings →
@@ -136,14 +131,14 @@ pub fn isProcessRunning(pid: i32) bool {
 /// would apply to. Only fall back to `/Applications/skhd.app` when the running
 /// process is bare (e.g. cellar binary), in which case adding the prod bundle
 /// is the right pointer for the install.
-pub fn resolveBundlePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]const u8 {
+pub fn resolveBundlePath(allocator: std.mem.Allocator, io: std.Io, exe_path: []const u8) ![]const u8 {
     const marker = ".app/Contents/MacOS/";
     if (std.mem.indexOf(u8, exe_path, marker)) |idx| {
         return allocator.dupe(u8, exe_path[0 .. idx + 4]); // keep ".app"
     }
 
     const apps_path = "/Applications/skhd.app";
-    if (std.fs.accessAbsolute(apps_path, .{})) |_| {
+    if (std.Io.Dir.accessAbsolute(io, apps_path, .{})) |_| {
         return allocator.dupe(u8, apps_path);
     } else |_| {}
 
@@ -154,7 +149,7 @@ pub fn resolveBundlePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]
 /// to its stable opt symlink (/opt/homebrew/opt/skhd-zig/bin/skhd) so the plist
 /// keeps working across `brew upgrade` + `brew cleanup`. Returns the input
 /// unchanged when no stable equivalent exists.
-pub fn resolveStableExePath(allocator: std.mem.Allocator, exe_path: []const u8) ![]const u8 {
+pub fn resolveStableExePath(allocator: std.mem.Allocator, io: std.Io, exe_path: []const u8) ![]const u8 {
     const cellar_marker = "/Cellar/";
     const idx = std.mem.indexOf(u8, exe_path, cellar_marker) orelse {
         return allocator.dupe(u8, exe_path);
@@ -177,7 +172,7 @@ pub fn resolveStableExePath(allocator: std.mem.Allocator, exe_path: []const u8) 
     const candidate = try std.fmt.allocPrint(allocator, "{s}/opt/{s}/{s}", .{ prefix, formula, rest });
     errdefer allocator.free(candidate);
 
-    std.fs.accessAbsolute(candidate, .{}) catch {
+    std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
         allocator.free(candidate);
         return allocator.dupe(u8, exe_path);
     };
@@ -185,7 +180,7 @@ pub fn resolveStableExePath(allocator: std.mem.Allocator, exe_path: []const u8) 
 }
 
 pub fn getServicePath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
+    const home = @import("utils.zig").getenv("HOME") orelse return error.NoHomeDirectory;
     return std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents/com.jackielii.skhd.plist", .{home});
 }
 
@@ -196,13 +191,13 @@ pub fn getServicePath(allocator: std.mem.Allocator) ![]const u8 {
 /// agent so it actually auto-starts at login (the legacy hand-installed
 /// plist is silently disallowed by BTM on Sequoia/Tahoe — that's the
 /// "skhd doesn't always start after reboot" bug at its root).
-pub fn installService(allocator: std.mem.Allocator) !void {
-    cleanupLegacyInstall(allocator);
+pub fn installService(allocator: std.mem.Allocator, io: std.Io) !void {
+    cleanupLegacyInstall(allocator, io);
     try registerWithBTM();
 }
 
-pub fn uninstallService(allocator: std.mem.Allocator) !void {
-    cleanupLegacyInstall(allocator);
+pub fn uninstallService(allocator: std.mem.Allocator, io: std.Io) !void {
+    cleanupLegacyInstall(allocator, io);
 
     const service = sm.agentService(LAUNCH_AGENT_PLIST_NAME) orelse {
         std.debug.print("SMAppService unavailable; nothing to unregister.\n", .{});
@@ -219,7 +214,7 @@ pub fn uninstallService(allocator: std.mem.Allocator) !void {
     // they're root-owned and need a separate sudo step. Surface them
     // here so a user reading the terminal output knows what's still on
     // disk and how to finish the cleanup.
-    printPostUninstallHints();
+    printPostUninstallHints(io);
 }
 
 /// Print follow-up cleanup instructions if the grabber or VHIDD daemon
@@ -227,14 +222,14 @@ pub fn uninstallService(allocator: std.mem.Allocator) !void {
 /// when nothing else is installed (the agent-only path doesn't need
 /// extra noise). Mirrors the tail message from `--uninstall-grabber` but
 /// scoped to whatever's actually present.
-fn printPostUninstallHints() void {
+fn printPostUninstallHints(io: std.Io) void {
     const grabber_plist = "/Library/LaunchDaemons/com.jackielii.skhd.grabber.plist";
     const vhidd_plist = "/Library/LaunchDaemons/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist";
     const pqrs_payload = "/Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice";
 
-    const has_grabber = fileExistsAbsolute(grabber_plist);
-    const has_vhidd = fileExistsAbsolute(vhidd_plist);
-    const has_pqrs = fileExistsAbsolute(pqrs_payload);
+    const has_grabber = fileExistsAbsolute(io, grabber_plist);
+    const has_vhidd = fileExistsAbsolute(io, vhidd_plist);
+    const has_pqrs = fileExistsAbsolute(io, pqrs_payload);
 
     if (!has_grabber and !has_vhidd and !has_pqrs) return;
 
@@ -268,13 +263,14 @@ fn printPostUninstallHints() void {
     }
 }
 
-fn fileExistsAbsolute(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
+fn fileExistsAbsolute(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
     return true;
 }
 
-pub fn startService(allocator: std.mem.Allocator) !void {
+pub fn startService(allocator: std.mem.Allocator, io: std.Io) !void {
     _ = allocator;
+    _ = io;
     try registerWithBTM();
 }
 
@@ -300,7 +296,7 @@ fn registerWithBTM() !void {
     const st = sm.status(service);
     std.debug.print("Service registered with macOS.\n", .{});
     std.debug.print("Status: {s}\n", .{st.describe()});
-    std.debug.print("Logs: {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
+    std.debug.print("Logs: {s}/Library/Logs/skhd.log\n", .{@import("utils.zig").getenv("HOME") orelse "~"});
 
     if (st == .requires_approval) {
         std.debug.print("\nMacOS requires approval before the agent can run:\n", .{});
@@ -316,11 +312,11 @@ fn registerWithBTM() !void {
 /// state isn't present. Run on every install/uninstall to make sure we
 /// never have both a legacy agent and a BTM-registered agent racing for
 /// the event tap.
-fn cleanupLegacyInstall(allocator: std.mem.Allocator) void {
+fn cleanupLegacyInstall(allocator: std.mem.Allocator, io: std.Io) void {
     const service_path = getServicePath(allocator) catch return;
     defer allocator.free(service_path);
 
-    std.fs.accessAbsolute(service_path, .{}) catch return;
+    if (!fileExistsAbsolute(io, service_path)) return;
 
     log.info("Found legacy plist at {s}, cleaning up.", .{service_path});
 
@@ -328,62 +324,37 @@ fn cleanupLegacyInstall(allocator: std.mem.Allocator) void {
     const uid = getuid();
     const target = std.fmt.allocPrint(allocator, "gui/{d}/{s}", .{ uid, BUNDLE_ID }) catch return;
     defer allocator.free(target);
-    {
-        const argv = [_][]const u8{ "launchctl", "bootout", target };
-        var child = std.process.Child.init(&argv, allocator);
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch {};
-        _ = child.wait() catch {};
-    }
+    _ = runQuiet(allocator, io, &.{ "launchctl", "bootout", target }) catch 0;
 
     // Older code wrote a persistent `disable` flag via `unload -w` — clear
     // it so a future register isn't silently blocked.
-    {
-        const argv = [_][]const u8{ "launchctl", "enable", target };
-        var child = std.process.Child.init(&argv, allocator);
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch {};
-        _ = child.wait() catch {};
-    }
+    _ = runQuiet(allocator, io, &.{ "launchctl", "enable", target }) catch 0;
 
-    std.fs.deleteFileAbsolute(service_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(io, service_path) catch {};
 }
 
-pub fn stopService(allocator: std.mem.Allocator) !void {
+pub fn stopService(allocator: std.mem.Allocator, io: std.Io) !void {
     const uid = getuid();
     const target = try std.fmt.allocPrint(allocator, "gui/{d}/com.jackielii.skhd", .{uid});
     defer allocator.free(target);
 
     // bootout unloads the agent without touching the disable list, so the
     // agent can still auto-load on next login (unlike legacy `unload -w`).
-    const argv = [_][]const u8{ "launchctl", "bootout", target };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-    const term = try child.wait();
-
-    if (term != .Exited or term.Exited != 0) {
-        // Service might not be running, which is okay
-        return;
-    }
-
+    const status = runQuiet(allocator, io, &.{ "launchctl", "bootout", target }) catch return error.SpawnFailed;
+    if (status != 0) return; // not running is fine
     std.debug.print("Service stopped\n", .{});
 }
 
-pub fn restartService(allocator: std.mem.Allocator) !void {
-    try stopService(allocator);
-    // Small delay to ensure service is fully stopped
-    std.time.sleep(1 * std.time.ns_per_s);
-    try startService(allocator);
+pub fn restartService(allocator: std.mem.Allocator, io: std.Io) !void {
+    try stopService(allocator, io);
+    // 1s pause so launchd fully tears down before re-register.
+    std.Io.sleep(io, .fromSeconds(1), .awake) catch {};
+    try startService(allocator, io);
 }
 
-pub fn reloadConfig(allocator: std.mem.Allocator) !void {
+pub fn reloadConfig(allocator: std.mem.Allocator, io: std.Io) !void {
     // Read PID file to find running instance
-    const pid = try readPidFile(allocator) orelse {
+    const pid = try readPidFile(allocator, io) orelse {
         std.debug.print("skhd is not running (no PID file found)\n", .{});
         return error.NotRunning;
     };
@@ -391,7 +362,7 @@ pub fn reloadConfig(allocator: std.mem.Allocator) !void {
     // Check if process is actually running
     if (!isProcessRunning(pid)) {
         std.debug.print("skhd is not running (PID {d} not found)\n", .{pid});
-        removePidFile(allocator);
+        removePidFile(allocator, io);
         return error.NotRunning;
     }
 
@@ -416,21 +387,14 @@ const DaemonState = union(enum) {
     running: i32,
 };
 
-fn getDaemonState(allocator: std.mem.Allocator) DaemonState {
-    const argv = [_][]const u8{ "launchctl", "list" };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return .not_loaded;
+fn getDaemonState(allocator: std.mem.Allocator, io: std.Io) DaemonState {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "launchctl", "list" },
+    }) catch return .not_loaded;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    var stdout_data = std.ArrayList(u8).init(allocator);
-    defer stdout_data.deinit();
-    if (child.stdout) |stdout| {
-        stdout.reader().readAllArrayList(&stdout_data, 1 << 20) catch return .not_loaded;
-    }
-    _ = child.wait() catch return .not_loaded;
-
-    var lines = std.mem.splitScalar(u8, stdout_data.items, '\n');
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     while (lines.next()) |line| {
         if (!std.mem.endsWith(u8, line, "\tcom.jackielii.skhd")) continue;
         // Format: "<PID-or-->\t<exit>\t<label>"
@@ -457,7 +421,7 @@ const KERN_PROC_PID: c_int = 1;
 /// kinfo_proc` are `kp_proc.p_un.__p_starttime.tv_sec` (this layout has
 /// been stable across macOS versions). Avoids spawning `ps`. Returns
 /// null if the process isn't reachable or the call fails.
-fn getProcessUptimeSeconds(pid: i32) ?u64 {
+fn getProcessUptimeSeconds(io: std.Io, pid: i32) ?u64 {
     var mib = [_]c_int{ CTL_KERN, KERN_PROC, KERN_PROC_PID, @intCast(pid) };
 
     // kinfo_proc is ~656 bytes on macOS — 1 KiB stack buffer is plenty.
@@ -469,7 +433,8 @@ fn getProcessUptimeSeconds(pid: i32) ?u64 {
     const tv_sec = std.mem.readInt(i64, buf[0..@sizeOf(i64)], .little);
     if (tv_sec <= 0) return null;
 
-    const now = std.time.timestamp();
+    const now_ns = std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds;
+    const now: i64 = @intCast(@divTrunc(now_ns, std.time.ns_per_s));
     if (now < tv_sec) return null;
     return @intCast(now - tv_sec);
 }
@@ -492,33 +457,32 @@ fn getProcessUptimeSeconds(pid: i32) ?u64 {
 ///    PERMISSIONS REQUIRED" / "Event tap creation failed" entries after
 ///    that marker point to denial; success-side patterns are matched for
 ///    Debug / ReleaseSafe builds where `log.info` reaches the file.
-fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) EventTapHealth {
+fn getEventTapHealth(allocator: std.mem.Allocator, io: std.Io, daemon_state: DaemonState) EventTapHealth {
     if (daemon_state == .running) {
-        if (getProcessUptimeSeconds(daemon_state.running)) |uptime| {
+        if (getProcessUptimeSeconds(io, daemon_state.running)) |uptime| {
             if (uptime >= 30) return .working;
         }
     }
 
-    const home = std.posix.getenv("HOME") orelse return .unknown;
+    const home = @import("utils.zig").getenv("HOME") orelse return .unknown;
     const log_path = std.fmt.allocPrint(allocator, "{s}/Library/Logs/skhd.log", .{home}) catch return .unknown;
     defer allocator.free(log_path);
 
-    const file = std.fs.openFileAbsolute(log_path, .{}) catch return .unknown;
-    defer file.close();
+    var file = std.Io.Dir.openFileAbsolute(io, log_path, .{}) catch return .unknown;
+    defer file.close(io);
 
-    const stat = file.stat() catch return .unknown;
-    if (stat.size == 0) return .unknown;
+    const stat_size = file.length(io) catch return .unknown;
+    if (stat_size == 0) return .unknown;
 
-    // Read enough of the tail to almost certainly contain the current
-    // daemon's startup marker. 64 KiB covers tens of restart cycles even
-    // with PATH dumps; if the daemon is so young its marker isn't here
-    // yet, we'll just bail out as unknown rather than risk a stale read.
     const tail_size: u64 = 64 * 1024;
-    const start: u64 = if (stat.size > tail_size) stat.size - tail_size else 0;
-    file.seekTo(start) catch return .unknown;
+    const start: u64 = if (stat_size > tail_size) stat_size - tail_size else 0;
+    const want_u64 = @min(tail_size, stat_size - start);
+    const want: usize = @intCast(want_u64);
 
-    const content = file.readToEndAlloc(allocator, tail_size) catch return .unknown;
+    const content = allocator.alloc(u8, want) catch return .unknown;
     defer allocator.free(content);
+    const read_total = file.readPositionalAll(io, content, start) catch return .unknown;
+    const content_slice = content[0..read_total];
 
     // Find the last `=== skhd … (PID <daemon_pid>) ===` start marker.
     // Without anchoring on the current daemon's PID, log entries from a
@@ -529,7 +493,7 @@ fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) Ev
         if (daemon_state == .running) {
             var pid_buf: [32]u8 = undefined;
             const pid_marker = std.fmt.bufPrint(&pid_buf, "(PID {d})", .{daemon_state.running}) catch break :scan_start 0;
-            if (std.mem.lastIndexOf(u8, content, pid_marker)) |idx| break :scan_start idx;
+            if (std.mem.lastIndexOf(u8, content_slice, pid_marker)) |idx| break :scan_start idx;
         }
         // No running daemon to anchor on, or its marker isn't in the tail
         // window — caller hasn't established whether *this* run is broken,
@@ -537,7 +501,7 @@ fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) Ev
         return .unknown;
     };
 
-    var lines = std.mem.splitScalar(u8, content[scan_start..], '\n');
+    var lines = std.mem.splitScalar(u8, content_slice[scan_start..], '\n');
     var last: EventTapHealth = .unknown;
     while (lines.next()) |line| {
         if (std.mem.indexOf(u8, line, "Event tap created successfully") != null or
@@ -553,9 +517,9 @@ fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) Ev
     return last;
 }
 
-pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
-    const daemon_state = getDaemonState(allocator);
-    const tap_health = getEventTapHealth(allocator, daemon_state);
+pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
+    const daemon_state = getDaemonState(allocator, io);
+    const tap_health = getEventTapHealth(allocator, io, daemon_state);
 
     // Determine SMAppService registration status. Don't use the legacy
     // ~/Library/LaunchAgents/<id>.plist file as a marker any more — that
@@ -598,9 +562,9 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
     // skhd-grabber for .remap / .taphold rules. printHidDaemonStatus
     // emits its own line (and a Karabiner-Elements conflict warning when
     // detected) and returns the state so we can print remediation below.
-    const hid_state = grabber_cli.printHidDaemonStatus(allocator);
+    const hid_state = grabber_cli.printHidDaemonStatus(allocator, io);
 
-    std.debug.print("  Log file:             {s}/Library/Logs/skhd.log\n", .{std.posix.getenv("HOME") orelse "~"});
+    std.debug.print("  Log file:             {s}/Library/Logs/skhd.log\n", .{@import("utils.zig").getenv("HOME") orelse "~"});
 
     if (!installed) {
         std.debug.print("\nTo install the service, run: skhd --install-service\n", .{});
@@ -663,14 +627,28 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator) !void {
     // first. Only print it when the grabber is actually installed —
     // for users who never set up `.remap` / `.taphold`, "Not installed"
     // is an informational line, not an actionable problem.
-    if (grabber_cli.isGrabberInstalled()) {
+    if (grabber_cli.isGrabberInstalled(io)) {
         if (hid_state != .running) {
             grabber_cli.printHidDaemonRemediation(hid_state);
-        } else if (grabber_cli.readHidDaemonVersion(allocator)) |installed_dext| {
+        } else if (grabber_cli.readHidDaemonVersion(allocator, io)) |installed_dext| {
             defer allocator.free(installed_dext);
             const compat = grabber_cli.compareVersions(installed_dext, grabber_cli.pinned_dext_version);
             grabber_cli.printVersionMismatchRemediation(installed_dext, compat);
         }
     }
+}
+
+/// Run `argv` with stdio captured (to avoid noise in the terminal) and
+/// return the exit code. Returns `-1` for signal-terminated or otherwise
+/// non-`.exited` children; callers treat both negative and unknown terms
+/// as failure.
+fn runQuiet(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) !i32 {
+    const result = try std.process.run(allocator, io, .{ .argv = argv });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    return switch (result.term) {
+        .exited => |code| @intCast(code),
+        else => -1,
+    };
 }
 

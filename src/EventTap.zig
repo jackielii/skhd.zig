@@ -14,14 +14,13 @@ pub fn enabled(self: *EventTap) bool {
 
 // pub const CGEventTapCallBack = ?*const fn (CGEventTapProxy, CGEventType, CGEventRef, ?*anyopaque) callconv(.c) CGEventRef;
 
-pub fn begin(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyopaque) !void {
+pub fn begin(self: *EventTap, io: std.Io, callback: c.CGEventTapCallBack, user_info: ?*anyopaque) !void {
     // CGEventTapCreate can transiently return NULL during early login on macOS
     // (Tahoe especially) when WindowServer/TCC haven't finished coming up, even
     // though accessibility permissions are granted. Retry briefly before giving
     // up; a real permissions denial will fail every attempt and surface the
     // same error after the retry budget is spent.
     const max_attempts: u8 = 10;
-    const retry_delay_ns: u64 = 500 * std.time.ns_per_ms;
 
     var attempt: u8 = 0;
     while (attempt < max_attempts) : (attempt += 1) {
@@ -35,7 +34,7 @@ pub fn begin(self: *EventTap, callback: c.CGEventTapCallBack, user_info: ?*anyop
         }
         if (attempt + 1 < max_attempts) {
             log.warn("Event tap creation failed (attempt {d}/{d}), retrying in 500ms...", .{ attempt + 1, max_attempts });
-            std.time.sleep(retry_delay_ns);
+            std.Io.sleep(io, .fromMilliseconds(500), .awake) catch return error.Cancelled;
         }
     }
     return error.AccessibilityPermissionDenied;

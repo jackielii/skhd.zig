@@ -113,7 +113,13 @@ pub fn main(init: std.process.Init) !void {
             try service.uninstallService(gpa, io);
             return;
         } else if (std.mem.eql(u8, args[i], "--start-service")) {
-            try service.startService(gpa, io);
+            // Idempotent "make sure skhd is set up and running" entry point.
+            // Mirrors --install-service: register the agent with BTM, then
+            // smart-prompt for the system grabber if the user's config
+            // needs it. Safe to re-run anytime; this is the single command
+            // we point users at when something seems off.
+            try service.installService(gpa, io);
+            try maybeInstallGrabber(gpa, io);
             return;
         } else if (std.mem.eql(u8, args[i], "--stop-service")) {
             try service.stopService(gpa, io);
@@ -132,21 +138,21 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "-P") or std.mem.eql(u8, args[i], "--profile")) {
             profile = true;
         } else if (std.mem.eql(u8, args[i], "--install-grabber")) {
-            grabber_cli.installGrabber(gpa, io) catch std.process.exit(1);
+            grabber_cli.installGrabber(gpa, io) catch |err| exitWithError("--install-grabber", err);
             return;
         } else if (std.mem.eql(u8, args[i], "--install-dext")) {
-            grabber_cli.installDext(gpa, io) catch std.process.exit(1);
+            grabber_cli.installDext(gpa, io) catch |err| exitWithError("--install-dext", err);
             return;
         } else if (std.mem.eql(u8, args[i], "--uninstall-grabber")) {
-            grabber_cli.uninstallGrabber(gpa, io) catch std.process.exit(1);
+            grabber_cli.uninstallGrabber(gpa, io) catch |err| exitWithError("--uninstall-grabber", err);
             return;
         } else if (std.mem.eql(u8, args[i], "--grabber-status")) {
             const path = consumeOptionalPath(args, &i) orelse grabber_protocol.default_socket_path;
-            grabber_cli.grabberStatus(gpa, io, path) catch std.process.exit(1);
+            grabber_cli.grabberStatus(gpa, io, path) catch |err| exitWithError("--grabber-status", err);
             return;
         } else if (std.mem.eql(u8, args[i], "--grabber-test-rule")) {
             const path = consumeOptionalPath(args, &i) orelse grabber_protocol.default_socket_path;
-            grabber_cli.grabberTestRule(gpa, io, path) catch std.process.exit(1);
+            grabber_cli.grabberTestRule(gpa, io, path) catch |err| exitWithError("--grabber-test-rule", err);
             return;
         }
     }
@@ -211,6 +217,16 @@ pub fn main(init: std.process.Init) !void {
 
     // Pass the hotload flag to run
     skhd.run(!no_hotload) catch {};
+}
+
+/// Print the error name and exit non-zero. Used by grabber CLI commands
+/// so the user sees *what* failed instead of a silent exit-1 — the bare
+/// `catch std.process.exit(1)` form leaves users staring at a half-finished
+/// install with no diagnostic, which is exactly how the v0.1.0
+/// install-grabber bootstrap-race bug went undetected.
+fn exitWithError(flag: []const u8, err: anyerror) noreturn {
+    std.debug.print("{s} failed: {s}\n", .{ flag, @errorName(err) });
+    std.process.exit(1);
 }
 
 /// Consume the next CLI arg as an optional value if it doesn't look
@@ -612,9 +628,14 @@ fn printHelp() void {
         \\Service Management:
         \\      --install-service   Register the bundled LaunchAgent with macOS
         \\                          via SMAppService (BTM-tracked, auto-starts
-        \\                          at login)
+        \\                          at login). Smart-prompts to install
+        \\                          skhd-grabber via sudo if your config needs
+        \\                          it. Same as --start-service.
+        \\      --start-service     One-shot "make sure skhd is set up and
+        \\                          running" — register the agent and prompt
+        \\                          to install the grabber if your config
+        \\                          needs it. Idempotent; safe to re-run.
         \\      --uninstall-service Unregister and remove
-        \\      --start-service     Start the service
         \\      --stop-service      Stop the service (transient — relaunches
         \\                          on next login)
         \\      --restart-service   Restart the service

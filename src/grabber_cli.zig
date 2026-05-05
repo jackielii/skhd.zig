@@ -120,7 +120,10 @@ fn fileExists(io: std.Io, path: []const u8) bool {
     return true;
 }
 
-/// Run `/bin/launchctl <args...>`. Returns error on non-zero exit.
+/// Run `/bin/launchctl <args...>`. Returns error on non-zero exit and
+/// surfaces launchctl's stderr/stdout so the user can see *why* — without
+/// this the caller's `catch {}` (or main.zig's `std.process.exit(1)`) leaves
+/// the user staring at a half-finished install with no diagnostic at all.
 fn runLaunchctl(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -129,10 +132,21 @@ fn runLaunchctl(allocator: std.mem.Allocator, io: std.Io, args: []const []const 
     const result = std.process.run(allocator, io, .{ .argv = argv.items }) catch return error.LaunchctlFailed;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
-    switch (result.term) {
-        .exited => |code| if (code != 0) return error.LaunchctlFailed,
-        else => return error.LaunchctlFailed,
-    }
+
+    const exit_code: u32 = switch (result.term) {
+        .exited => |code| code,
+        else => 255,
+    };
+    if (exit_code == 0) return;
+
+    std.debug.print("launchctl", .{});
+    for (args) |a| std.debug.print(" {s}", .{a});
+    std.debug.print(" failed (exit {d})\n", .{exit_code});
+    const out = std.mem.trim(u8, result.stdout, " \t\n\r");
+    const err = std.mem.trim(u8, result.stderr, " \t\n\r");
+    if (out.len > 0) std.debug.print("  stdout: {s}\n", .{out});
+    if (err.len > 0) std.debug.print("  stderr: {s}\n", .{err});
+    return error.LaunchctlFailed;
 }
 
 /// Create or overwrite an absolute path with `content`, mode 0644. Used
@@ -252,14 +266,24 @@ pub fn installGrabber(allocator: std.mem.Allocator, io: std.Io) !void {
     std.debug.print("Installing plist → {s} (program={s})\n", .{ grabber_plist_path, grabber_path_for_plist });
     try writePlistAbsolute(io, grabber_plist_path, rendered_plist);
 
-    // 3. bootout-then-bootstrap so re-runs are idempotent. enable +
-    //    kickstart in case launchd has the service disabled or stopped
-    //    (e.g. after a previous uninstall).
+    // 3. bootout-then-bootstrap so re-runs are idempotent.
     const target = "system/" ++ grabber_launchd_label;
-    runLaunchctl(allocator, io, &.{ "bootout", target }) catch {};
-    try runLaunchctl(allocator, io, &.{ "bootstrap", "system", grabber_plist_path });
-    runLaunchctl(allocator, io, &.{ "enable", target }) catch {};
-    runLaunchctl(allocator, io, &.{ "kickstart", "-k", target }) catch {};
+    try bootstrapService(allocator, io, target, grabber_plist_path);
+
+    // 4. Verify launchd actually has it registered. Catches the silent
+    //    failure mode where bootstrap fails but the plist is on disk —
+    //    `--grabber-status` would later report "[OK] plist installed"
+    //    while `kickstart` fails with "Could not find service".
+    if (!try launchdServiceRegistered(allocator, io, target)) {
+        std.debug.print(
+            \\
+            \\error: skhd-grabber LaunchDaemon not registered with launchd
+            \\despite the plist install. See launchctl errors above. Retry:
+            \\  sudo skhd --install-grabber
+            \\
+        , .{});
+        return error.GrabberRegistrationFailed;
+    }
 
     // Brief pause for the daemon to bind its socket so a follow-up
     // --grabber-status reports "running" instead of "socket absent".
@@ -593,7 +617,7 @@ pub fn checkHidDaemonState(allocator: std.mem.Allocator, io: std.Io) !HidDaemonS
     // knows about it, just not running right now" (stopped, kickstart
     // works). `launchctl print system/<label>` returns non-zero with
     // "Could not find service" for the former.
-    const registered = try launchdServiceRegistered(allocator, io);
+    const registered = try launchdServiceRegistered(allocator, io, "system/" ++ vhidd_launchd_label);
     return if (registered) .stopped else .plist_unregistered;
 }
 
@@ -631,8 +655,7 @@ fn isDextEnabled(allocator: std.mem.Allocator, io: std.Io) ?bool {
 }
 
 
-fn launchdServiceRegistered(allocator: std.mem.Allocator, io: std.Io) !bool {
-    const target = "system/" ++ vhidd_launchd_label;
+fn launchdServiceRegistered(allocator: std.mem.Allocator, io: std.Io, target: []const u8) !bool {
     const result = std.process.run(allocator, io, .{
         .argv = &.{ "/bin/launchctl", "print", target },
     }) catch return error.SpawnFailed;
@@ -642,6 +665,33 @@ fn launchdServiceRegistered(allocator: std.mem.Allocator, io: std.Io) !bool {
         .exited => |code| code == 0,
         else => false,
     };
+}
+
+/// Atomically replace whatever launchd has registered at `target` with the
+/// service in `plist_path`. macOS's `bootout` is asynchronous — the request
+/// returns before teardown completes — so a follow-up `bootstrap` issued
+/// immediately can fail with "Bootstrap failed: 5: Input/output error"
+/// while the kernel is still releasing the prior registration. A short sleep
+/// + one retry is the established workaround. After bootstrap we also
+/// `enable` (clears any stale `disable` flag from a prior `unload -w`) and
+/// `kickstart` (in case launchd opted to defer spawn). Caller is expected
+/// to verify with `launchdServiceRegistered` after — bootstrap can still
+/// fail in ways that warrant aborting the install.
+fn bootstrapService(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target: []const u8,
+    plist_path: []const u8,
+) !void {
+    runLaunchctl(allocator, io, &.{ "bootout", target }) catch {};
+    std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
+    runLaunchctl(allocator, io, &.{ "bootstrap", "system", plist_path }) catch {
+        log.warn("bootstrap failed; retrying after 800ms (likely racing bootout teardown)", .{});
+        std.Io.sleep(io, .fromMilliseconds(800), .awake) catch {};
+        try runLaunchctl(allocator, io, &.{ "bootstrap", "system", plist_path });
+    };
+    runLaunchctl(allocator, io, &.{ "enable", target }) catch {};
+    runLaunchctl(allocator, io, &.{ "kickstart", "-k", target }) catch {};
 }
 
 /// Read CFBundleShortVersionString from the daemon's Info.plist (which
@@ -833,7 +883,7 @@ fn runInherit(
 fn installVhiddDaemon(allocator: std.mem.Allocator, io: std.Io) !void {
     const target = "system/" ++ vhidd_launchd_label;
 
-    if (try launchdServiceRegistered(allocator, io)) {
+    if (try launchdServiceRegistered(allocator, io, target)) {
         std.debug.print(
             \\VHIDD launchd entry already registered (Karabiner-Elements or a
             \\prior --install-dext run). Skipping plist install to avoid a
@@ -845,18 +895,12 @@ fn installVhiddDaemon(allocator: std.mem.Allocator, io: std.Io) !void {
         return;
     }
 
-    // Stale plist on disk but launchd doesn't know about it: bootout is a
-    // no-op (will fail silently), then bootstrap from the path on disk.
-    if (fileExists(io, vhidd_plist_path)) {
-        runLaunchctl(allocator, io, &.{ "bootout", target }) catch {};
-    } else {
+    if (!fileExists(io, vhidd_plist_path)) {
         std.debug.print("Installing VHIDD launchd plist → {s}\n", .{vhidd_plist_path});
         try writePlistAbsolute(io, vhidd_plist_path, vhidd_plist_template);
     }
 
-    try runLaunchctl(allocator, io, &.{ "bootstrap", "system", vhidd_plist_path });
-    runLaunchctl(allocator, io, &.{ "enable", target }) catch {};
-    runLaunchctl(allocator, io, &.{ "kickstart", "-k", target }) catch {};
+    try bootstrapService(allocator, io, target, vhidd_plist_path);
 
     // Pause so checkHidDaemonState() right after this reports running
     // instead of the in-flight bootstrapped-but-not-yet-spawned state.

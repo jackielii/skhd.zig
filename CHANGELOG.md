@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-05
+
+### Added
+- **`--start-service` is now the canonical "make sure skhd is set up and running" entry point.** Idempotent and safe to re-run; same flow as `--install-service` — registers the agent with BTM, then smart-prompts to install skhd-grabber via sudo if your config has `.remap` / `.taphold` / `fn_layer` rules and a target device is connected. Single command users reach for whether installing fresh, recovering from a stopped agent, or re-running after a `brew upgrade`.
+
+### Fixed
+- **`--install-grabber` could leave the system in a half-broken state with no diagnostic.** Three layered issues conspired: `runLaunchctl` discarded launchctl's stderr/stdout so the actual error was never seen; `main.zig` swallowed grabber CLI errors with `catch std.process.exit(1)`, dropping the error name; and the `bootout`-then-`bootstrap` sequence had no delay between calls — macOS's `bootout` is async, so a follow-up `bootstrap` issued immediately can race the prior teardown and fail with EIO. Fixes:
+  - `runLaunchctl` prints stderr/stdout when launchctl exits non-zero.
+  - Grabber CLI commands (`--install-grabber`, `--install-dext`, `--uninstall-grabber`, `--grabber-status`, `--grabber-test-rule`) print the error name before exit-1.
+  - New `bootstrapService` helper: bootout → 300ms sleep → bootstrap (with one 800ms-delayed retry on failure) → enable → kickstart. Shared between `installGrabber` and `installVhiddDaemon`.
+  - After the launchctl chain, `installGrabber` verifies `launchctl print system/<label>` succeeds and aborts with `error.GrabberRegistrationFailed` if not — catches the silent-failure mode where the plist is on disk but the service isn't registered.
+
 ## [0.1.0] - 2026-05-04
 
 > Major release introducing **skhd-grabber** — a system daemon that handles caps_lock-class tap-hold rules through HID seize, enabling QMK-style keyboard remapping that the user-session-level event tap can't reach. The wire format between agent and grabber and the new `.remap` / `.taphold` / `.device` directives are now considered stable.

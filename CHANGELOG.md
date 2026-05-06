@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.1...HEAD)
 
-## [0.1.1] - 2026-05-05
+## [0.1.1](https://github.com/jackielii/skhd.zig/compare/v0.1.0...v0.1.1) - 2026-05-05
 
 ### Added
 - **`--start-service` is now the canonical "make sure skhd is set up and running" entry point.** Idempotent and safe to re-run; same flow as `--install-service` — registers the agent with BTM, then smart-prompts to install skhd-grabber via sudo if your config has `.remap` / `.taphold` / `fn_layer` rules and a target device is connected. Single command users reach for whether installing fresh, recovering from a stopped agent, or re-running after a `brew upgrade`.
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `bootstrapService` helper: bootout → 300ms sleep → bootstrap (with one 800ms-delayed retry on failure) → enable → kickstart. Shared between `installGrabber` and `installVhiddDaemon`.
   - After the launchctl chain, `installGrabber` verifies `launchctl print system/<label>` succeeds and aborts with `error.GrabberRegistrationFailed` if not — catches the silent-failure mode where the plist is on disk but the service isn't registered.
 
-## [0.1.0] - 2026-05-04
+## [0.1.0](https://github.com/jackielii/skhd.zig/compare/v0.0.24...v0.1.0) - 2026-05-04
 
 > Major release introducing **skhd-grabber** — a system daemon that handles caps_lock-class tap-hold rules through HID seize, enabling QMK-style keyboard remapping that the user-session-level event tap can't reach. The wire format between agent and grabber and the new `.remap` / `.taphold` / `.device` directives are now considered stable.
 
@@ -61,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Hidutil.zig`** — parses + merges existing `UserKeyMapping` so colon-form `.remap` doesn't clobber whatever System Settings → Modifier Keys (or other tooling) already set. Restores on shutdown.
 - **Test surface expanded** to cover `RuleSet` parsing, the IPC framing, `KbState` / `TapHold` state machines, and the new HID-daemon version compat helpers.
 
-## [0.0.24] - 2026-04-28
+## [0.0.24](https://github.com/jackielii/skhd.zig/compare/v0.0.23...v0.0.24) - 2026-04-28
 
 ### Fixed
 - **v0.0.23 binaries refused to launch on macOS 15.x** with `You can't use this version of the application 'skhd' with this version of macOS.` (#35). Without an explicit `os_version_min`, Zig stamps the Mach-O's `LC_BUILD_VERSION minos` with the build host's OS version, and the `macos-latest` CI runner is now Tahoe 26 — so the binary's minimum-OS field jumped past Sequoia. `build.zig` now pins `os_version_min` to 13.0 (matching `Info.plist`'s `LSMinimumSystemVersion` and the SMAppService floor); setting `os_version_min` flips Zig out of native-SDK mode, so the build also probes `xcrun` once and threads the SDK's framework / include / lib paths into every artifact.
@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 - **Portable `BOOL` marshalling in `sm_app_service.zig` for x86_64.** Apple's `objc.h` gates `BOOL` on `__OBJC_BOOL_IS_BOOL`, which Clang only sets for arm64-darwin — so `c.BOOL` translates to Zig `bool` on arm64 but to `i8` on x86_64, and the existing `if (!ok)` only typechecked on arm64. The `objc_msgSend` return is now declared `u8` (both archs return `BOOL` in the low byte regardless of C-level typedef) with explicit `!= 0` comparisons. Unblocks the cross-compile.
 
-## [0.0.23] - 2026-04-26
+## [0.0.23](https://github.com/jackielii/skhd.zig/compare/v0.0.22...v0.0.23) - 2026-04-26
 
 ### Fixed
 - **Event tap now actually detaches on Accessibility revoke.** v0.0.22 relied on `kCGEventTapDisabledByUserInput` firing when Accessibility was toggled off at runtime, but the callback isn't actually fired in that case — the OS just stops delivering events to the tap, leaving the keyboard captured with no signal `keyHandler` could react to. The one-shot recovery timer is replaced with an always-on 1 s `CFRunLoopTimer` that reconciles the tap with `AXIsProcessTrusted` in both directions: detach proactively on revoke, recreate on re-grant. `AXIsProcessTrusted` is cached at the OS level and runs in ~µs, so the poll has no measurable overhead and the keydown / `NX_SYSDEFINED` hot path is untouched.
@@ -97,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 - **`zig build alloc` is routed through the dev `.app` + sign chain** so the alloc binary inherits the dev TCC slot. A bare Mach-O can't be granted Accessibility on Tahoe, so the previous setup couldn't actually run end-to-end.
 
-## [0.0.22] - 2026-04-26
+## [0.0.22](https://github.com/jackielii/skhd.zig/compare/v0.0.21...v0.0.22) - 2026-04-26
 
 ### Fixed
 - **Event tap survives runtime Accessibility revoke.** When Accessibility was toggled off while skhd was running, macOS sent `kCGEventTapDisabledByUserInput` and the in-place `CGEventTapEnable` retry silently failed — the tap stayed in the event chain as an active filter that couldn't forward events, leaving the keyboard unresponsive until skhd was killed. The tap is now detached on the disabled callback, and a 1 s `CFRunLoopTimer` watches for `AXIsProcessTrusted` to flip back and recreates the tap on re-grant. `EventTap.deinit` also cleans up when the tap is system-disabled, not just when `enabled()`.
@@ -109,7 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 - **`zig build install-local`** stages the local build into `/Applications/skhd.app` (the slot a brew install would occupy), re-signs with `skhd-cert`, and restarts the SMAppService daemon — for testing the packaged path without cutting a release.
 
-## [0.0.21] - 2026-04-26
+## [0.0.21](https://github.com/jackielii/skhd.zig/compare/v0.0.20...v0.0.21) - 2026-04-26
 
 ### Fixed
 - **The actual root cause of "skhd doesn't always start after reboot" on macOS Tahoe.** Hand-installed LaunchAgents under `~/Library/LaunchAgents/` get registered with macOS's Background Tasks Manager (BTM, introduced in Sequoia, enforced in Tahoe) as `Type: legacy agent` with `Disposition: [enabled, disallowed, not notified]` — and BTM silently refuses to auto-load them at login until the user manually approves the agent in System Settings → General → Login Items & Extensions. The previous fixes (launchctl bootstrap migration, retry loops, plist paths) addressed real but secondary issues; BTM was the gatekeeper all along.
@@ -122,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Migration
 On upgrade from 0.0.20 or earlier, run `skhd --install-service` once (preferably from `/Applications/skhd.app/Contents/MacOS/skhd` so SMAppService treats `/Applications/skhd.app` as the registering bundle). The legacy `disallowed` BTM entry from previous versions is harmless after the new managed entry is in place but can be removed via System Settings → General → Login Items & Extensions if desired. See [docs/UPGRADING.md](docs/UPGRADING.md) for the full walkthrough.
 
-## [0.0.20] - 2026-04-26
+## [0.0.20](https://github.com/jackielii/skhd.zig/compare/v0.0.19...v0.0.20) - 2026-04-26
 
 Local-development quality-of-life release. No runtime changes.
 
@@ -133,7 +133,7 @@ Local-development quality-of-life release. No runtime changes.
 - **`scripts/codesign.sh`** reads `SKHD_BUNDLE_ID` env var (defaults to `com.jackielii.skhd`).
 - **`scripts/make-app.sh`** accepts an optional bundle ID as the third argument.
 
-## [0.0.19] - 2026-04-26
+## [0.0.19](https://github.com/jackielii/skhd.zig/compare/v0.0.18...v0.0.19) - 2026-04-26
 
 Small follow-up to v0.0.18 fixing a reporting bug.
 
@@ -144,7 +144,7 @@ Small follow-up to v0.0.18 fixing a reporting bug.
 ### Internal
 - **Release pipeline robustness.** Validate that the git tag is annotated before reading its message; force-fetch tag objects post-checkout; fall back to `CHANGELOG.md` if the tag annotation is missing. v0.0.18 initially shipped with a release body containing a random commit message because `actions/checkout@v4`'s `fetch-tags: true` doesn't reliably fetch annotated tag objects.
 
-## [0.0.18] - 2026-04-26
+## [0.0.18](https://github.com/jackielii/skhd.zig/compare/v0.0.17...v0.0.18) - 2026-04-26
 
 ### macOS Tahoe (26) compatibility
 
@@ -172,21 +172,21 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - **`scripts/codesign.sh` cert auto-creation** — fixed empty-password p12 import rejection on macOS Tahoe + OpenSSL 3.6, and the missing `extendedKeyUsage = codeSigning` that hid the cert from `find-identity -p codesigning`.
 - **Homebrew formula auto-bump regex** — replaced the buggy `[0-9.(-preview)]\+` character class with `v[0-9.]+(-[A-Za-z0-9]+)?` so pre-release tags (`v0.0.18-preview`, `v0.0.19-rc1`) update correctly.
 
-## [0.0.17] - 2025-12-08
+## [0.0.17](https://github.com/jackielii/skhd.zig/compare/v0.0.16...v0.0.17) - 2025-12-08
 
 ### Added
 - **Media key support** - Added support for media keys as forward/remap targets (#28)
   - Supported media keys: `play`, `pause`, `next`, `previous`, `fast`, `rewind`, `brightness_up`, `brightness_down`, `illumination_up`, `illumination_down`, `sound_up`, `sound_down`, `mute`
   - Example: `cmd - p | play` forwards Cmd+P to the play/pause media key
 
-## [0.0.16] - 2025-11-30
+## [0.0.16](https://github.com/jackielii/skhd.zig/compare/v0.0.15...v0.0.16) - 2025-11-30
 
 ### Fixed
 - **CFString null pointer crash** - Fixed crash during keyboard layout initialization on certain keyboard layouts (#19, #20)
   - Added null check for `CFStringCreateWithCharacters` which can return NULL for some keycodes
   - skhd now gracefully skips problematic keycodes and continues initialization
 
-## [0.0.15] - 2025-10-17
+## [0.0.15](https://github.com/jackielii/skhd.zig/compare/v0.0.13...v0.0.15) - 2025-10-17
 
 ### Added
 - **Code signing support for macOS 15+** - Accessibility permissions now persist across builds (#15)
@@ -205,7 +205,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 ### Changed
 - Removed unused `Info.plist` file from assets directory
 
-## [0.0.13] - 2025-08-27
+## [0.0.13](https://github.com/jackielii/skhd.zig/compare/v0.0.12...v0.0.13) - 2025-08-27
 
 ### Added
 - **Support for backtick (`) special character** - Added backtick to the list of recognized special characters in the tokenizer
@@ -231,7 +231,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
   - Use Zig field syntax for cleaner code
   - Added error sets for type safety in Hotkey methods
 
-## [0.0.12] - 2025-07-15
+## [0.0.12](https://github.com/jackielii/skhd.zig/compare/v0.0.11...v0.0.12) - 2025-07-15
 
 ### Added
 - **Mode activation with optional command execution** - Enhanced mode switching with command execution support
@@ -250,7 +250,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Fixed mode activation implementation to use dedicated enum variant instead of borrowing command enum
 - Improved error handling for empty commands followed by references
 
-## [0.0.11] - 2025-07-13
+## [0.0.11](https://github.com/jackielii/skhd.zig/compare/v0.0.10...v0.0.11) - 2025-07-13
 
 ### Changed
 - Optimized command execution by using null-terminated strings throughout, eliminating runtime allocations in exec.zig
@@ -259,7 +259,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 ### Fixed
 - Fixed benchmark to use new Hotkey API methods
 
-## [0.0.10] - 2025-07-08
+## [0.0.10](https://github.com/jackielii/skhd.zig/compare/v0.0.9...v0.0.10) - 2025-07-08
 
 ### Fixed
 - **Critical bug fix**: Capture mode now respects passthrough and unbound actions
@@ -282,7 +282,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Extracted common hotkey result handling into `handleHotkeyResult` helper function
 - Updated SYNTAX.md documentation to include unbound action syntax
 
-## [0.0.9] - 2025-07-07
+## [0.0.9](https://github.com/jackielii/skhd.zig/compare/v0.0.8...v0.0.9) - 2025-07-07
 
 ### Fixed
 
@@ -296,7 +296,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Updated CI workflow configuration
 - Include build mode in version string output
 
-## [0.0.8] - 2025-07-06
+## [0.0.8](https://github.com/jackielii/skhd.zig/compare/v0.0.7...v0.0.8) - 2025-07-06
 
 ### Changed
 - **Major performance improvement**: Achieved allocation-free event loop
@@ -322,7 +322,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Created new exec.zig module for command execution
 - Improved error handling in Parser, Mappings, and Keycodes modules
 
-## [0.0.7] - 2025-07-05
+## [0.0.7](https://github.com/jackielii/skhd.zig/compare/v0.0.6...v0.0.7) - 2025-07-05
 
 ### Fixed
 - **Accessibility permission check reliability** - Replaced unreliable event tap creation with `AXIsProcessTrusted()` API
@@ -332,7 +332,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 ### Changed
 - Permission checking now uses the official macOS API for more accurate results
 
-## [0.0.6] - 2025-07-04
+## [0.0.6](https://github.com/jackielii/skhd.zig/compare/v0.0.5...v0.0.6) - 2025-07-04
 
 ### Added
 - **Command definitions feature** with `.define` directive for reusable command templates
@@ -350,7 +350,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Command definition parsing now properly handles escaped characters in templates
 - Improved error reporting for invalid placeholder syntax
 
-## [0.0.5] - 2025-07-02
+## [0.0.5](https://github.com/jackielii/skhd.zig/compare/v0.0.4...v0.0.5) - 2025-07-02
 
 ### Changed
 - Improved service mode execution to always use fork/exec for better reliability
@@ -365,7 +365,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Import statement cleanup for better code organization
 - GitHub Actions workflow now directly triggers Homebrew tap updates
 
-## [0.0.4] - 2025-07-02
+## [0.0.4](https://github.com/jackielii/skhd.zig/compare/v0.0.3...v0.0.4) - 2025-07-02
 
 ### Added
 - Comprehensive execution tracer with `-P/--profile` flag for performance analysis
@@ -381,7 +381,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - High CPU usage compared to original skhd implementation
 - Unnecessary system calls in hot path
 
-## [0.0.3] - 2025-07-01
+## [0.0.3](https://github.com/jackielii/skhd.zig/compare/v0.0.2...v0.0.3) - 2025-07-01
 
 ### Added
 - `--start-service` now automatically installs/updates the service plist to ensure it uses the current binary
@@ -397,7 +397,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Service management commands now provide better error messages and guidance
 - Homebrew service integration now works more reliably with proper binary path updates
 
-## [0.0.2] - 2025-07-01
+## [0.0.2](https://github.com/jackielii/skhd.zig/compare/v0.0.1...v0.0.2) - 2025-07-01
 
 ### Fixed
 - Support for uppercase option names (.SHELL, .BLACKLIST) in configuration files
@@ -407,7 +407,7 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Fixed release workflow permissions for uploading artifacts
 - Simplified release workflow to build natively for each architecture
 
-## [0.0.1] - 2025-07-01
+## [0.0.1](https://github.com/jackielii/skhd.zig/releases/tag/v0.0.1) - 2025-07-01
 
 ### Added
 - Initial release of skhd.zig - a complete Zig port of skhd
@@ -456,30 +456,3 @@ This release reworks distribution and service management for macOS 26 (Tahoe). S
 - Optimized hot path to minimize allocations during key events
 - Efficient HashMap-based hotkey lookup
 - Stack-based buffers for process name retrieval
-
-[Unreleased]: https://github.com/jackielii/skhd.zig/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/jackielii/skhd.zig/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/jackielii/skhd.zig/compare/v0.0.24...v0.1.0
-[0.0.24]: https://github.com/jackielii/skhd.zig/compare/v0.0.23...v0.0.24
-[0.0.23]: https://github.com/jackielii/skhd.zig/compare/v0.0.22...v0.0.23
-[0.0.22]: https://github.com/jackielii/skhd.zig/compare/v0.0.21...v0.0.22
-[0.0.21]: https://github.com/jackielii/skhd.zig/compare/v0.0.20...v0.0.21
-[0.0.20]: https://github.com/jackielii/skhd.zig/compare/v0.0.19...v0.0.20
-[0.0.19]: https://github.com/jackielii/skhd.zig/compare/v0.0.18...v0.0.19
-[0.0.18]: https://github.com/jackielii/skhd.zig/compare/v0.0.17...v0.0.18
-[0.0.17]: https://github.com/jackielii/skhd.zig/compare/v0.0.16...v0.0.17
-[0.0.16]: https://github.com/jackielii/skhd.zig/compare/v0.0.15...v0.0.16
-[0.0.15]: https://github.com/jackielii/skhd.zig/compare/v0.0.13...v0.0.15
-[0.0.13]: https://github.com/jackielii/skhd.zig/compare/v0.0.12...v0.0.13
-[0.0.12]: https://github.com/jackielii/skhd.zig/compare/v0.0.11...v0.0.12
-[0.0.11]: https://github.com/jackielii/skhd.zig/compare/v0.0.10...v0.0.11
-[0.0.10]: https://github.com/jackielii/skhd.zig/compare/v0.0.9...v0.0.10
-[0.0.9]: https://github.com/jackielii/skhd.zig/compare/v0.0.8...v0.0.9
-[0.0.8]: https://github.com/jackielii/skhd.zig/compare/v0.0.7...v0.0.8
-[0.0.7]: https://github.com/jackielii/skhd.zig/compare/v0.0.6...v0.0.7
-[0.0.6]: https://github.com/jackielii/skhd.zig/compare/v0.0.5...v0.0.6
-[0.0.5]: https://github.com/jackielii/skhd.zig/compare/v0.0.4...v0.0.5
-[0.0.4]: https://github.com/jackielii/skhd.zig/compare/v0.0.3...v0.0.4
-[0.0.3]: https://github.com/jackielii/skhd.zig/compare/v0.0.2...v0.0.3
-[0.0.2]: https://github.com/jackielii/skhd.zig/compare/v0.0.1...v0.0.2
-[0.0.1]: https://github.com/jackielii/skhd.zig/releases/tag/v0.0.1

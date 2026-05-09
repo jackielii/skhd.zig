@@ -149,12 +149,11 @@ The first run of `zig build sign-app` creates a self-signed `skhd-cert` certific
 
 ### Granting Accessibility
 
-skhd captures keyboard events via macOS Core Graphics, which requires Accessibility permission:
+skhd captures keyboard events via macOS Core Graphics, which requires Accessibility permission. On first launch, macOS pops up the Accessibility dialog with a deep-link to System Settings:
 
-1. Open **System Settings → Privacy & Security → Accessibility**
-2. Click **`+`**, navigate to `/Applications/skhd.app`, add it
-3. Toggle the entry on
-4. Run `skhd --restart-service` (or `skhd --start-service` if not yet running)
+1. In the dialog, click **Open System Settings**
+2. Toggle the **skhd** entry on
+3. Run `skhd --restart-service` (or `skhd --start-service` if not yet running)
 
 You only need to do this once. The bundle's stable identifier (`com.jackielii.skhd`) means TCC entries persist across rebuilds and `brew upgrade`.
 

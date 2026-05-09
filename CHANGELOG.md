@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.1...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.2...HEAD)
+
+## [0.1.2](https://github.com/jackielii/skhd.zig/compare/v0.1.1...v0.1.2) - 2026-05-09
 
 ### Fixed
 - **`brew upgrade` now actually restarts the service.** The Homebrew formula gained a `post_install` hook that runs `skhd --start-service` after every install/upgrade. Without this, an upgrade left the user-level legacy plist at `~/Library/LaunchAgents/com.jackielii.skhd.plist` (from any pre-0.0.21 install) shadowing the SMAppService registration on Tahoe — same `Label`, two definitions, and launchd refused to spawn either with `EX_CONFIG` (`108: Invalid path: Contents/MacOS/skhd`). The post_install hook chains through `installService → cleanupLegacyInstall → registerWithBTM`, so the orphan plist gets booted out and removed and BTM rebinds to the current Cellar bundle path automatically.

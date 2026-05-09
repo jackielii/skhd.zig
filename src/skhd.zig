@@ -614,6 +614,46 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     log.info("Starting event tap", .{});
     self.event_tap.begin(self.io, keyHandler, self) catch |err| {
         if (err == error.AccessibilityPermissionDenied) {
+            // Self-heal path: the most common failure mode after `brew
+            // upgrade` on macOS Tahoe is the cdHash-anchored TCC grant
+            // silently invalidating (System Settings still shows the
+            // entry as granted, but IOHIDCheckAccess returns denied
+            // and key events never reach the tap). Without this, the
+            // daemon would re-emit the giant ACCESSIBILITY block every
+            // 10s for 30+ launchd respawns before throttling. Try to
+            // drop the stale grant ourselves and replace the wall of
+            // text with a single short, actionable line.
+            switch (service.tryAutoResetStaleTcc(self.allocator, self.io, is_daemon)) {
+                .reset_now => {
+                    log.err(
+                        \\
+                        \\Stale TCC grant detected (binary cdHash changed since last grant — typical after `brew upgrade`).
+                        \\Auto-reset Accessibility and Input Monitoring for com.jackielii.skhd.
+                        \\
+                        \\Action required (one time per upgrade):
+                        \\  1. Open System Settings → Privacy & Security → Accessibility
+                        \\  2. Re-toggle the skhd entry on (re-add /Applications/skhd.app if it disappeared)
+                        \\  3. The first hotkey press will trigger the Input Monitoring prompt — approve it
+                        \\
+                        \\No need to run anything else — launchd will respawn the daemon and it will recover.
+                        \\
+                    , .{});
+                    return err;
+                },
+                .skipped_recent => {
+                    log.err(
+                        "Stale TCC grant already auto-reset within the last 10 minutes — still waiting for re-grant in System Settings → Privacy & Security → Accessibility for com.jackielii.skhd.",
+                        .{},
+                    );
+                    return err;
+                },
+                .skipped_access_ok, .skipped_not_daemon, .failed => {
+                    // Fall through to the manual-fix block below — this is
+                    // either a foreground run, a first-time install (IM
+                    // never prompted), or tccutil itself failed.
+                },
+            }
+
             const raw_path: ?[:0]u8 = std.process.executablePathAlloc(self.io, self.allocator) catch null;
             defer if (raw_path) |p| self.allocator.free(p);
             const stable_path: ?[]const u8 = if (raw_path) |p|

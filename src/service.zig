@@ -78,6 +78,140 @@ pub fn promptForAccessibility() bool {
     return c.AXIsProcessTrustedWithOptions(opts) != 0;
 }
 
+/// Outcome of `tryAutoResetStaleTcc` — drives the wording the daemon
+/// shows to the user (and whether it speaks at all). Distinct
+/// `skipped_*` reasons exist so the caller can print the right next-step
+/// instructions instead of a generic "something went wrong".
+pub const TccAutoResetResult = enum {
+    /// We just dropped the stale grants. User must re-toggle the entry
+    /// in System Settings; launchd will recover on the next respawn.
+    reset_now,
+    /// We already auto-reset within `tcc_auto_reset_window_secs`. Don't
+    /// reset again — the previous reset's "go re-grant" instruction is
+    /// still the actionable step.
+    skipped_recent,
+    /// Not reached for "real" denials. Returned when IOHIDCheckAccess
+    /// reports access is granted or unknown — i.e. the cdHash-mismatch
+    /// signature isn't present, so we shouldn't touch the grant.
+    skipped_access_ok,
+    /// Foreground / non-daemon invocation. Auto-resetting from a
+    /// foreground run would surprise users running `zig build run` to
+    /// debug something unrelated.
+    skipped_not_daemon,
+    /// `/usr/bin/tccutil` errored or the marker write failed. Caller
+    /// falls back to the long manual-fix block.
+    failed,
+};
+
+/// 10-minute cooldown between auto-resets. Long enough that the user
+/// has time to navigate to System Settings → Privacy & Security and
+/// re-toggle the entry without us nuking the grant out from under them
+/// on the next launchd respawn (10s `ThrottleInterval`); short enough
+/// that a *second* binary swap (e.g. the next brew upgrade) can heal
+/// itself without the user clearing any state.
+const tcc_auto_reset_window_secs: i64 = 10 * 60;
+
+/// `tccutil reset Accessibility` + `reset ListenEvent` for our bundle,
+/// with a marker file gate to prevent reset loops on every respawn.
+///
+/// The cdHash-anchored TCC bug (every brew upgrade / rebuild silently
+/// invalidates the Input Monitoring grant on macOS Tahoe — System
+/// Settings still shows it as on, but key events are dropped before
+/// reaching the tap) used to manifest as launchd respawning the daemon
+/// every 10s in a loop, each spawn producing the same "ACCESSIBILITY
+/// PERMISSIONS REQUIRED" wall of text. The user is supposed to read
+/// that text and run two `tccutil` commands by hand. Most don't —
+/// they just see "skhd stopped working after `brew upgrade`".
+///
+/// This helper closes the loop: when `IOHIDCheckAccess` says
+/// `denied` *and* we're a daemon (so the user isn't manually iterating
+/// in foreground), we run the two `tccutil reset` commands ourselves
+/// and write a marker file. Subsequent respawns within the window see
+/// the marker and skip — they just print a short "still waiting for
+/// you to re-grant" line and exit, instead of resetting again.
+pub fn tryAutoResetStaleTcc(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    is_daemon: bool,
+) TccAutoResetResult {
+    if (!is_daemon) return .skipped_not_daemon;
+    if (checkInputMonitoringAccess() != .denied) return .skipped_access_ok;
+
+    const home = @import("utils.zig").getenv("HOME") orelse return .failed;
+    const cache_dir = std.fmt.allocPrint(
+        allocator,
+        "{s}/Library/Caches/" ++ BUNDLE_ID,
+        .{home},
+    ) catch return .failed;
+    defer allocator.free(cache_dir);
+    const marker_path = std.fmt.allocPrint(
+        allocator,
+        "{s}/tcc_auto_reset_at",
+        .{cache_dir},
+    ) catch return .failed;
+    defer allocator.free(marker_path);
+
+    const now_ns = std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds;
+    const now_secs: i64 = @intCast(@divTrunc(now_ns, std.time.ns_per_s));
+
+    // Marker present + within cooldown → don't reset again. The
+    // previous reset's instruction ("go re-grant in Settings") is
+    // still the actionable step.
+    var marker_buf: [32]u8 = undefined;
+    if (std.Io.Dir.cwd().readFile(io, marker_path, &marker_buf)) |slice| {
+        const trimmed = std.mem.trim(u8, slice, " \t\n\r");
+        if (std.fmt.parseInt(i64, trimmed, 10)) |last_reset| {
+            if (now_secs - last_reset < tcc_auto_reset_window_secs) {
+                return .skipped_recent;
+            }
+        } else |_| {}
+    } else |_| {}
+
+    std.Io.Dir.createDirAbsolute(io, cache_dir, .fromMode(0o755)) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return .failed,
+    };
+
+    // Order matters: ListenEvent first so the IM prompt is what fires
+    // on the next respawn (the one users miss most often, because
+    // Accessibility's prompt is more familiar). Both must succeed for
+    // the heal to be meaningful — if only one resets, the daemon
+    // still can't capture events.
+    if (!runTccutilReset(allocator, io, "ListenEvent")) return .failed;
+    if (!runTccutilReset(allocator, io, "Accessibility")) return .failed;
+
+    var ts_buf: [32]u8 = undefined;
+    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}\n", .{now_secs}) catch return .failed;
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker_path, .data = ts_str }) catch return .failed;
+
+    return .reset_now;
+}
+
+/// `/usr/bin/tccutil reset <service> com.jackielii.skhd`. Returns true
+/// on exit code 0. Logs a warning on failure but doesn't propagate the
+/// error — partial success is still a meaningful state for the caller
+/// (e.g. service typo, system tccutil missing, sandboxed environment).
+fn runTccutilReset(allocator: std.mem.Allocator, io: std.Io, service: []const u8) bool {
+    const argv = [_][]const u8{ "/usr/bin/tccutil", "reset", service, BUNDLE_ID };
+    const result = std.process.run(allocator, io, .{ .argv = &argv }) catch |err| {
+        log.warn("tccutil reset {s} {s} failed to spawn: {s}", .{ service, BUNDLE_ID, @errorName(err) });
+        return false;
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const exit_code: u32 = switch (result.term) {
+        .exited => |code| code,
+        else => 255,
+    };
+    if (exit_code != 0) {
+        const err_msg = std.mem.trim(u8, result.stderr, " \t\n\r");
+        log.warn("tccutil reset {s} {s} exited {d}: {s}", .{ service, BUNDLE_ID, exit_code, err_msg });
+        return false;
+    }
+    return true;
+}
+
 /// PID file management
 pub fn writePidFile(allocator: std.mem.Allocator, io: std.Io) !void {
     const username = @import("utils.zig").getenv("USER") orelse "unknown";

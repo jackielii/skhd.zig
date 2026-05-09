@@ -9,10 +9,10 @@
 ```bash
 brew upgrade skhd-zig
 
-# Re-register via SMAppService. Run this from inside the .app — SMAppService
-# binds to the calling bundle path, and /Applications/skhd.app is what BTM
-# accepts cleanly:
-/Applications/skhd.app/Contents/MacOS/skhd --install-service
+# Re-register via SMAppService. The `skhd` shim brew puts on PATH is a
+# symlink into the bundle's inner binary, so SMAppService still sees the
+# correct calling bundle and BTM gets a clean managed entry:
+skhd --install-service
 
 # Verify
 skhd --status
@@ -25,6 +25,21 @@ That's it. Your accessibility grant carries over (TCC entry is bundle-ID-keyed, 
 
 The old `disallowed` legacy BTM entry from previous versions is harmless once the new managed entry is in place — but you can clean it up via System Settings → General → Login Items & Extensions if you like.
 
+## What `brew upgrade` does for you (post-0.1.1)
+
+The formula's `post_install` hook now runs `skhd --start-service` automatically after every install and upgrade. That means:
+
+- **Legacy `~/Library/LaunchAgents/com.jackielii.skhd.plist` gets booted out and deleted.** If you ever installed a pre-0.0.21 version, this orphan plist shadowed the SMAppService registration on Tahoe — same `Label`, two definitions, launchd refused to spawn either (`EX_CONFIG`, `108: Invalid path: Contents/MacOS/skhd`). It's now cleaned up on every upgrade.
+- **SMAppService rebinds to the current Cellar bundle path.** The previous version's binding pointed at the now-deleted `Cellar/<old-version>/skhd.app`; the post_install re-registration picks up the new path.
+- **The daemon still self-heals the cdHash/TCC mismatch** on the first event-tap attempt after the new binary spawns (see the section below). You may still need to re-toggle the Accessibility entry in System Settings once per upgrade — the daemon will print a single short instruction line in the log when this happens, instead of the previous wall of text repeated every 10 seconds.
+
+If something looks wrong after a `brew upgrade`, the canonical recovery is still one command:
+
+```bash
+skhd --start-service   # idempotent — same as what post_install just ran
+skhd --status          # verify
+```
+
 ## If keys stop working after `brew upgrade` (macOS Tahoe)
 
 On macOS 15+ (Tahoe), TCC stores Input Monitoring grants with a **csreq anchored to the binary's cdHash** rather than the signing cert root. Every rebuild produces a new cdHash, so a brew upgrade silently invalidates the grant — the System Settings entry still shows as **granted**, but no events flow into the daemon.
@@ -34,15 +49,22 @@ Symptoms:
 - System Settings → Privacy & Security → Accessibility (and/or Input Monitoring) shows skhd as enabled.
 - `~/Library/Logs/skhd.log` shows the event tap was created but no key activity.
 
-Fix — drop the stale grant so macOS re-prompts and stores a fresh, cert-root-anchored csreq:
+**Since 0.1.2 the daemon does this automatically** when it's launchd-managed: on the first event-tap creation failure it calls `tccutil reset` itself, writes a marker at `~/Library/Caches/com.jackielii.skhd/tcc_auto_reset_at` to avoid reset loops on subsequent respawns, and emits a single short "go re-toggle in Settings" line in the log. You only need to perform step 2 below.
+
+If you're on an older release or the auto-reset failed, the manual fix is:
 
 ```bash
+# 1. Drop the stale grants so macOS will store a fresh, cert-root-anchored csreq
 tccutil reset ListenEvent com.jackielii.skhd
 tccutil reset Accessibility com.jackielii.skhd
 skhd --restart-service
+
+# 2. Re-toggle the entry in System Settings → Privacy & Security → Accessibility
+#    (or accept the prompt if one appears). The first hotkey press triggers the
+#    Input Monitoring prompt — approve it.
 ```
 
-Then re-toggle the entry in System Settings (or accept the prompt if one appears). This issue recurs on every brew upgrade until Apple loosens the anchor policy; `skhd --status` includes the same fix in its remediation output when the tap is detected as denied.
+This issue recurs on every brew upgrade until Apple loosens the anchor policy; `skhd --status` includes the same fix in its remediation output when the tap is detected as denied.
 
 ## Migrating from 0.0.17 or earlier (the original Tahoe rework)
 
@@ -78,7 +100,7 @@ skhd --stop-service
 brew upgrade jackielii/tap/skhd-zig
 ```
 
-The new formula installs `skhd.app` to `<prefix>/skhd.app`, symlinks the CLI into `bin/skhd`, and creates `/Applications/skhd.app` so macOS Settings can find it.
+The new formula installs `skhd.app` to `<prefix>/skhd.app` (e.g. `/opt/homebrew/opt/skhd-zig/skhd.app`) and symlinks the CLI into `bin/skhd`. macOS will prompt for Accessibility on first launch via the popup deep-link — no manual `+`/navigate step in System Settings.
 
 ### 3. Clear the legacy disable flag (if you ever ran the old `--stop-service`)
 
@@ -115,9 +137,7 @@ The plist now points at `/opt/homebrew/opt/skhd-zig/skhd.app/Contents/MacOS/skhd
 
 ### 6. Grant Accessibility for `skhd.app`
 
-1. Open **System Settings → Privacy & Security → Accessibility**
-2. Click `+`, navigate to `/Applications/skhd.app`, add it
-3. Toggle the entry on
+`skhd --install-service` triggers the macOS Accessibility prompt with a deep-link to the right pane. In the dialog, click **Open System Settings** and toggle the **skhd** entry on — no manual `+`/navigate step needed.
 
 You will only need to do this once. The bundle-ID-keyed TCC entry now persists across rebuilds and Homebrew upgrades.
 

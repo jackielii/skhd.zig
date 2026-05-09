@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.1...HEAD)
 
+### Fixed
+- **`brew upgrade` now actually restarts the service.** The Homebrew formula gained a `post_install` hook that runs `skhd --start-service` after every install/upgrade. Without this, an upgrade left the user-level legacy plist at `~/Library/LaunchAgents/com.jackielii.skhd.plist` (from any pre-0.0.21 install) shadowing the SMAppService registration on Tahoe — same `Label`, two definitions, and launchd refused to spawn either with `EX_CONFIG` (`108: Invalid path: Contents/MacOS/skhd`). The post_install hook chains through `installService → cleanupLegacyInstall → registerWithBTM`, so the orphan plist gets booted out and removed and BTM rebinds to the current Cellar bundle path automatically.
+- **Daemon self-heals stale TCC grants after binary swaps.** Every `brew upgrade` rebuilds the binary, the cdHash changes, and TCC silently invalidates the Input Monitoring grant — System Settings still shows the entry as granted, `IOHIDCheckAccess` returns denied, and key events never reach the tap. Previously launchd respawned the agent every 10s with the giant "ACCESSIBILITY PERMISSIONS REQUIRED" wall of text in the log on every cycle until the user noticed and ran the two `tccutil reset` commands by hand. The agent now detects this case (event tap creation fails AND `IOHIDCheckAccess == denied` AND we're launchd-managed) and runs `tccutil reset ListenEvent / Accessibility com.jackielii.skhd` itself, then logs a single short "go re-toggle in Settings" message and exits. A marker file at `~/Library/Caches/com.jackielii.skhd/tcc_auto_reset_at` rate-limits this to once per 10 minutes so subsequent throttled respawns don't keep wiping the grant out from under the user before they get a chance to re-grant.
+
 ## [0.1.1](https://github.com/jackielii/skhd.zig/compare/v0.1.0...v0.1.1) - 2026-05-05
 
 ### Added
@@ -107,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Daemon sources `PATH` from `$SHELL -ilc` at startup.** Hotkeys that exec `/opt/homebrew/bin/yabai`, `/opt/homebrew/bin/aerospace`, etc. previously failed under launchd's minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`). The interactive-login shell is queried once at startup so command lookups match what the user sees in their terminal.
 
 ### Internal
-- **`zig build install-local`** stages the local build into `/Applications/skhd.app` (the slot a brew install would occupy), re-signs with `skhd-cert`, and restarts the SMAppService daemon — for testing the packaged path without cutting a release.
+- **`zig build install-local`** stages the local build into the brew-installed bundle in place (preferring `/Applications/skhd.app` if you've manually symlinked it there, otherwise `/opt/homebrew/opt/skhd-zig/skhd.app`), re-signs with `skhd-cert`, and restarts the SMAppService daemon — for testing the packaged path without cutting a release.
 
 ## [0.0.21](https://github.com/jackielii/skhd.zig/compare/v0.0.20...v0.0.21) - 2026-04-26
 
@@ -120,7 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--status`** reads SMAppService registration state directly. Reports `Registration status: enabled` / `requires approval` / `not registered` so the user knows what BTM thinks.
 
 ### Migration
-On upgrade from 0.0.20 or earlier, run `skhd --install-service` once (preferably from `/Applications/skhd.app/Contents/MacOS/skhd` so SMAppService treats `/Applications/skhd.app` as the registering bundle). The legacy `disallowed` BTM entry from previous versions is harmless after the new managed entry is in place but can be removed via System Settings → General → Login Items & Extensions if desired. See [docs/UPGRADING.md](docs/UPGRADING.md) for the full walkthrough.
+On upgrade from 0.0.20 or earlier, run `skhd --install-service` once. The brew-installed `skhd` shim is a symlink into the bundle, so SMAppService gets the right calling bundle automatically; if you're running a source build, invoke the inner binary directly (`<path-to>/skhd.app/Contents/MacOS/skhd --install-service`). The legacy `disallowed` BTM entry from previous versions is harmless after the new managed entry is in place but can be removed via System Settings → General → Login Items & Extensions if desired. See [docs/UPGRADING.md](docs/UPGRADING.md) for the full walkthrough.
 
 ## [0.0.20](https://github.com/jackielii/skhd.zig/compare/v0.0.19...v0.0.20) - 2026-04-26
 

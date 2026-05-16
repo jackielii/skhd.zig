@@ -251,6 +251,16 @@ const Daemon = struct {
     /// subscription should be active.
     console_user_timer: c.CFRunLoopTimerRef = null,
 
+    /// Pending vhidd recovery timer, non-null while the daemon is in
+    /// the "vhidd is broken, retrying" state. One-shot — the callback
+    /// releases it and either schedules a new one (on failure) or
+    /// clears the flag (on success).
+    vhidd_recovery_timer: c.CFRunLoopTimerRef = null,
+    /// Backoff for the *next* recovery attempt, in ms. 0 means "this
+    /// is the first attempt, fire immediately". Doubles each failure,
+    /// capped at vhidd_recovery_backoff_max_ms.
+    vhidd_recovery_backoff_ms: u32 = 0,
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, profile: bool) !Daemon {
         try ensureSocketParentDir(socket_path);
         // Stale socket from a crashed previous run: bind() would EADDRINUSE.
@@ -311,6 +321,7 @@ const Daemon = struct {
 
     pub fn deinit(self: *Daemon) void {
         self.stopConsoleUserTimer();
+        self.cancelVhiddRecoveryTimer();
         self.teardownSeize();
         if (self.vhidd) |v| {
             v.close();
@@ -356,6 +367,11 @@ const Daemon = struct {
     }
 
     pub fn run(self: *Daemon) void {
+        // Set the back-pointer now, before any seize callback can fire.
+        // Daemon lives on main()'s stack so &self is stable for the
+        // process lifetime.
+        self.seize_ctx.daemon = self;
+
         self.startListenerSource() catch |err| {
             log.err("failed to start IPC listener: {s}", .{@errorName(err)});
             return;
@@ -738,7 +754,92 @@ const Daemon = struct {
             self.console_user_timer = null;
         }
     }
+
+    /// Entry point from the seize callback when a vhidd send fails.
+    /// Latches `vhidd_broken` and queues a recovery pass for the next
+    /// runloop iteration. Idempotent — concurrent failures collapse
+    /// onto a single recovery pass.
+    ///
+    /// Why not release seize here? markVhiddBroken runs inside the
+    /// IOHIDManager value callback, and teardownSeize calls
+    /// IOHIDManagerClose / IOHIDManagerUnscheduleFromRunLoop on the
+    /// same manager that's mid-dispatch — Apple's docs don't promise
+    /// that's safe. Defer the teardown to the timer callback, which
+    /// fires *between* runloop sources. The vhidd_broken flag
+    /// short-circuits further posts in the meantime so we don't spam
+    /// the log on any events delivered in the same runloop pass.
+    fn markVhiddBroken(self: *Daemon) void {
+        if (self.seize_ctx.vhidd_broken) return;
+        self.seize_ctx.vhidd_broken = true;
+        log.warn("vhidd transport broken — releasing seize, will retry connect", .{});
+        self.scheduleVhiddRecovery(0);
+    }
+
+    fn scheduleVhiddRecovery(self: *Daemon, delay_ms: u32) void {
+        self.cancelVhiddRecoveryTimer();
+        var ctx: c.CFRunLoopTimerContext = .{
+            .version = 0,
+            .info = self,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+        const fire_at = c.CFAbsoluteTimeGetCurrent() + @as(f64, @floatFromInt(delay_ms)) / 1000.0;
+        const timer = c.CFRunLoopTimerCreate(
+            c.kCFAllocatorDefault,
+            fire_at,
+            0, // one-shot
+            0,
+            0,
+            vhiddRecoveryTimerCallback,
+            &ctx,
+        );
+        if (timer == null) {
+            log.err("vhidd recovery timer create failed — manual restart required", .{});
+            return;
+        }
+        self.vhidd_recovery_timer = timer;
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopDefaultMode);
+    }
+
+    fn cancelVhiddRecoveryTimer(self: *Daemon) void {
+        if (self.vhidd_recovery_timer) |t| {
+            c.CFRunLoopTimerInvalidate(t);
+            c.CFRelease(t);
+            self.vhidd_recovery_timer = null;
+        }
+    }
+
+    /// Body of the recovery timer callback. Release seize (so real
+    /// keystrokes flow to the OS), close the dead client, then run
+    /// applyLatestRules (which lazy-connects vhidd and re-seizes).
+    /// On failure, reschedule with backoff.
+    fn attemptVhiddRecovery(self: *Daemon) void {
+        // Safe to tear down here — the timer callback is invoked
+        // between runloop sources, not from inside a seize callback.
+        self.teardownSeize();
+        if (self.vhidd) |v| {
+            v.close();
+            self.allocator.destroy(v);
+            self.vhidd = null;
+            // Leave seize_ctx.vhidd alone — applyLatestRules will
+            // overwrite it on successful reconnect. Reading it before
+            // then would be unsafe, but the seize is torn down so no
+            // callback can do that.
+        }
+        self.applyLatestRules() catch |err| {
+            const next = Vhidd.nextBackoffMs(self.vhidd_recovery_backoff_ms);
+            log.warn("vhidd reconnect failed: {s} — retrying in {d}ms", .{ @errorName(err), next });
+            self.vhidd_recovery_backoff_ms = next;
+            self.scheduleVhiddRecovery(next);
+            return;
+        };
+        log.info("vhidd reconnected — seize reactivated", .{});
+        self.seize_ctx.vhidd_broken = false;
+        self.vhidd_recovery_backoff_ms = 0;
+    }
 };
+
 
 fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const d: *Daemon = @ptrCast(@alignCast(info orelse return));
@@ -754,6 +855,18 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
     d.applyLatestRules() catch |err| {
         log.warn("rebuild after console user change failed: {s}", .{@errorName(err)});
     };
+}
+
+fn vhiddRecoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    // The timer is one-shot — release its ref before doing work so a
+    // re-schedule from attemptVhiddRecovery doesn't fight with it.
+    if (d.vhidd_recovery_timer) |t| {
+        c.CFRunLoopTimerInvalidate(t);
+        c.CFRelease(t);
+        d.vhidd_recovery_timer = null;
+    }
+    d.attemptVhiddRecovery();
 }
 
 fn listenerCallback(
@@ -995,6 +1108,18 @@ const SeizeCtx = struct {
     /// `profile` is true; left undefined otherwise so the no-profile
     /// path doesn't pay for the syscall.
     profile_timer: ProfileTimer = undefined,
+    /// Back-pointer for the seize callback to reach Daemon helpers
+    /// (specifically markVhiddBroken on a vhidd send failure). Set
+    /// once in Daemon.run() before any callback can fire — Daemon
+    /// lives on main()'s stack so its address is stable for the
+    /// process lifetime.
+    daemon: ?*Daemon = null,
+    /// Latched once vhidd post fails, cleared when recovery succeeds.
+    /// Reads in the seize callback short-circuit further post attempts
+    /// while a recovery is pending, so we don't burn cycles + log
+    /// noise on every event between the first failure and the timer
+    /// firing on the next runloop tick.
+    vhidd_broken: bool = false,
 };
 
 /// std.time.Timer was removed in Zig 0.16. `std.Io.Clock.Timestamp.now(io,
@@ -1072,10 +1197,18 @@ fn emitToVhidd(ctx_ptr: ?*anyopaque, ev: TapHold.Event) void {
 
     log.info("emit: usage=0x{X:0>2} pressed={}", .{ usage16, ev.pressed });
 
+    // Short-circuit if a previous post already triggered recovery —
+    // the seize tear-down is scheduled on the runloop and any events
+    // already in flight would otherwise spam the log.
+    if (cx.vhidd_broken) return;
+
     const held = cx.state.compactedKeys();
     const t_pre: u64 = if (comptime profile_supported) (if (cx.profile) cx.profile_timer.read() else 0) else 0;
     cx.vhidd.postKeyboardReport(cx.state.modifiers, held) catch |err| {
         log.warn("vhidd post failed: {s}", .{@errorName(err)});
+        if (Vhidd.isTransportError(err)) {
+            if (cx.daemon) |d| d.markVhiddBroken();
+        }
         return;
     };
     if (comptime profile_supported) {

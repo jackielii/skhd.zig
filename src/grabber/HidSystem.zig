@@ -21,6 +21,13 @@ const c = @import("c.zig");
 const log = std.log.scoped(.hid_system);
 
 connect: c.io_connect_t,
+/// Latch once IOHIDSetModifierLockState fails so we don't log on
+/// every subsequent call. The failure is permanent in practice —
+/// kIOReturnNotPermitted (0xE00002C2) means the binary isn't signed
+/// with a real Apple Developer ID, which won't change at runtime.
+/// Looping the call would just burn syscalls and spam the log
+/// (a single broken-vhidd session produced ~5500 of these lines).
+set_failed_once: bool = false,
 
 const Self = @This();
 
@@ -48,9 +55,14 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn setCapsLockState(self: *Self, state: bool) void {
+    if (self.set_failed_once) return;
     const r = c.IOHIDSetModifierLockState(self.connect, c.NX_MODIFIERKEY_ALPHALOCK, @intFromBool(state));
     if (r != c.kIOReturnSuccess) {
-        log.warn("IOHIDSetModifierLockState failed: 0x{X:0>8}", .{@as(u32, @bitCast(r))});
+        log.warn(
+            "IOHIDSetModifierLockState failed: 0x{X:0>8} — suppressing further attempts (likely unsigned binary)",
+            .{@as(u32, @bitCast(r))},
+        );
+        self.set_failed_once = true;
     }
 }
 

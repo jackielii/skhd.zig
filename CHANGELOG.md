@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.3...HEAD)
 
+### Added
+- **`--list-devices` prints connected HID keyboards as paste-ready `.device` blocks.** Authors of `.remap` / `.taphold` rules previously had to grep `hidutil list` (hundreds of SMC sensor rows alongside the actual keyboards) and copy VendorID/ProductID by hand. The new flag enumerates devices via `IOHIDManager` with a `DeviceUsagePage:1 / DeviceUsage:6` match dict, dedupes on `(vendor, product)` since IOKit returns one entry per HID interface (e.g. HHKB exposing both Keyboard and Consumer Control), slugifies the product name into a default alias, and prints a copy-paste-ready `.device` block per device. A footnote flags that mouse receivers advertising a keyboard usage (Logitech Unifying et al.) will also show up — they really do present that usage, so filtering them would be a heuristic that hides legitimate config targets.
+
 ## [0.1.3](https://github.com/jackielii/skhd.zig/compare/v0.1.2...v0.1.3) - 2026-05-16
 
 ### Fixed

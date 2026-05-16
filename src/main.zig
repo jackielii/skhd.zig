@@ -102,6 +102,9 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("Error: --text requires a text string\n", .{});
                 return;
             }
+        } else if (std.mem.eql(u8, args[i], "--list-devices")) {
+            try DeviceCheck.printKeyboardList(gpa);
+            return;
         } else if (std.mem.eql(u8, args[i], "--help")) {
             printHelp();
             return;
@@ -623,6 +626,8 @@ fn printHelp() void {
         \\  -t, --text <text>      Synthesize text input
         \\  -r, --reload           Reload config on running instance
         \\  -v, --version          Print version
+        \\      --list-devices     List connected HID keyboards as paste-ready
+        \\                         .device blocks for skhdrc
         \\      --help             Show this help message
         \\
         \\Service Management:

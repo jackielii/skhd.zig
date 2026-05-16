@@ -38,6 +38,32 @@ const posix = std.posix;
 
 const log = std.log.scoped(.vhidd);
 
+/// Vhidd recovery backoff bounds. After a transport failure, the
+/// grabber retries reconnect on this schedule: first attempt fires
+/// immediately, then each failed attempt doubles the wait until it
+/// caps at `recovery_backoff_max_ms`. Matches Karabiner's 1s
+/// reconnect baseline.
+pub const recovery_backoff_initial_ms: u32 = 1000;
+pub const recovery_backoff_max_ms: u32 = 10_000;
+
+/// Progress the backoff one step. Pure helper so the recovery state
+/// machine is testable without spinning up CFRunLoop timers.
+pub fn nextBackoffMs(current: u32) u32 {
+    const next = if (current == 0) recovery_backoff_initial_ms else current * 2;
+    return @min(next, recovery_backoff_max_ms);
+}
+
+/// Errors from `Client.postKeyboardReport` and siblings that indicate
+/// the transport is dead and we should reconnect. Distinct from
+/// `error.PayloadTooLarge` / `error.TooManyKeys`, which are our-side
+/// bugs and would loop forever if treated as transport errors.
+pub fn isTransportError(err: anyerror) bool {
+    return switch (err) {
+        error.SendFailed, error.ShortWrite => true,
+        else => false,
+    };
+}
+
 const protocol_version: u16 = 5;
 const magic = [_]u8{ 'c', 'p' };
 
@@ -415,6 +441,22 @@ fn setRecvTimeout(fd: posix.fd_t, ms: u32) !void {
     if (std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, std.mem.asBytes(&tv).ptr, @sizeOf(@TypeOf(tv))) != 0) {
         return error.SetSockOptFailed;
     }
+}
+
+test "nextBackoffMs grows from 0 → initial → 2× → cap" {
+    try std.testing.expectEqual(@as(u32, 1000), nextBackoffMs(0));
+    try std.testing.expectEqual(@as(u32, 2000), nextBackoffMs(1000));
+    try std.testing.expectEqual(@as(u32, 4000), nextBackoffMs(2000));
+    try std.testing.expectEqual(@as(u32, 8000), nextBackoffMs(4000));
+    try std.testing.expectEqual(@as(u32, 10_000), nextBackoffMs(8000));
+    try std.testing.expectEqual(@as(u32, 10_000), nextBackoffMs(10_000));
+}
+
+test "isTransportError selects only transport errors" {
+    try std.testing.expect(isTransportError(error.SendFailed));
+    try std.testing.expect(isTransportError(error.ShortWrite));
+    try std.testing.expect(!isTransportError(error.PayloadTooLarge));
+    try std.testing.expect(!isTransportError(error.TooManyKeys));
 }
 
 test "encodeHeader writes magic + version + request" {

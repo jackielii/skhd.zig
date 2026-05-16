@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.2...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.3...HEAD)
+
+## [0.1.3](https://github.com/jackielii/skhd.zig/compare/v0.1.2...v0.1.3) - 2026-05-16
+
+### Fixed
+- **skhd-grabber no longer dead-keys the keyboard when the Karabiner vhidd_server connection breaks.** Before: the grabber kept the keyboard `IOHIDDeviceOpen(seize)`-d while every `postKeyboardReport` returned `SendFailed`, so real keystrokes were silently dropped — keyboard appeared dead until reboot. Now: on transport failure, the grabber latches a `vhidd_broken` flag, schedules a one-shot `CFRunLoopTimer`, and from that callback (running between runloop sources, not inside the IOHIDManager value callback) tears down seize so keys fall through to the OS, closes the dead client, and reconnects via the existing `applyLatestRules` lazy-connect path. Backoff progresses 1s → 2s → 5s → 10s capped, matching Karabiner-Elements' 1s reconnect baseline. Triggered by Karabiner daemon restart, dext deactivation, or vhidd server crash.
+- **`IOHIDSetModifierLockState failed: 0xE00002C2` log spam.** This call fails permanently (`kIOReturnNotPermitted`) when the binary isn't signed with a real Apple Developer ID. One broken-grabber session produced ~5500 of these lines in `/var/log/skhd-grabber.log`. Now latched after the first failure with a "suppressing further attempts" hint, then becomes a no-op.
 
 ## [0.1.2](https://github.com/jackielii/skhd.zig/compare/v0.1.1...v0.1.2) - 2026-05-09
 

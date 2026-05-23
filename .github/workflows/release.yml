@@ -246,30 +246,26 @@ jobs:
         X86_64_SHA=$(shasum -a 256 skhd-x86_64-macos.tar.gz | awk '{print $1}')
         echo "x86_64_sha=${X86_64_SHA}" >> $GITHUB_OUTPUT
 
-    - name: Update Formula
+    - name: Update Cask
       env:
         VERSION: ${{ steps.release.outputs.version }}
         ARM64_SHA: ${{ steps.release.outputs.arm64_sha }}
-        X86_64_SHA: ${{ steps.release.outputs.x86_64_sha }}
       run: |
         cd homebrew-tap
 
-        # Update version line if present (the formula may scan version from
-        # URL instead). No-op when missing.
-        sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/skhd-zig.rb
-
-        sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-arm64|download/v${VERSION}/skhd-arm64|" Formula/skhd-zig.rb
-        sed -i "/arm64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${ARM64_SHA}\"/" Formula/skhd-zig.rb
-
-        sed -i -E "s|download/v[0-9.]+(-[A-Za-z0-9]+)?/skhd-x86_64|download/v${VERSION}/skhd-x86_64|" Formula/skhd-zig.rb
-        sed -i "/x86_64-macos.tar.gz/,/sha256/ s/sha256 \".*\"/sha256 \"${X86_64_SHA}\"/" Formula/skhd-zig.rb
+        # The cask's `url` interpolates `#{version}`, so bumping the version
+        # line automatically rewrites the download URL — no separate URL
+        # rewrite needed. Only one `sha256` line (arm64-only cask), so a plain
+        # substitution is unambiguous.
+        sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/skhd-zig.rb
+        sed -i "s/sha256 \".*\"/sha256 \"${ARM64_SHA}\"/" Casks/skhd-zig.rb
 
     - name: Commit and push
       run: |
         cd homebrew-tap
         git config user.name "GitHub Actions"
         git config user.email "actions@github.com"
-        git add Formula/skhd-zig.rb
+        git add Casks/skhd-zig.rb
         git commit -m "Update skhd-zig to v${{ steps.release.outputs.version }}"
         git push
 

@@ -53,14 +53,22 @@ pub fn nextBackoffMs(current: u32) u32 {
     return @min(next, recovery_backoff_max_ms);
 }
 
-/// Errors from `Client.postKeyboardReport` and siblings that indicate
-/// the transport is dead and we should reconnect. Distinct from
-/// `error.PayloadTooLarge` / `error.TooManyKeys`, which are our-side
-/// bugs and would loop forever if treated as transport errors.
+/// Whether a failed `Client.postKeyboardReport` (or sibling) means the
+/// transport is dead and we should tear down the seize + reconnect.
+///
+/// Default-true: a post that didn't go through leaves the pipe in an
+/// unknown state, so we treat *any* error as transport-fatal — the
+/// exact errno the OS surfaces varies (`SendFailed`, `ShortWrite`,
+/// `ConnectionResetByPeer` when the Karabiner daemon closes the socket,
+/// `BrokenPipe`, `Unexpected`, …) and an over-narrow allowlist is what
+/// let the grabber keep the keyboard seized while every replay was
+/// silently dropped. The only exclusions are our-side logic bugs that a
+/// reconnect cannot fix: a malformed/oversized report would otherwise
+/// drive an endless recover loop.
 pub fn isTransportError(err: anyerror) bool {
     return switch (err) {
-        error.SendFailed, error.ShortWrite => true,
-        else => false,
+        error.PayloadTooLarge, error.TooManyKeys => false,
+        else => true,
     };
 }
 
@@ -452,9 +460,20 @@ test "nextBackoffMs grows from 0 → initial → 2× → cap" {
     try std.testing.expectEqual(@as(u32, 10_000), nextBackoffMs(10_000));
 }
 
-test "isTransportError selects only transport errors" {
+test "isTransportError treats any post error as transport-fatal except our-side logic bugs" {
+    // A failed post means the pipe is unusable — reconnect, regardless
+    // of which errno the OS surfaced. The original list was too narrow:
+    // `ConnectionResetByPeer` (Karabiner daemon closed the socket) and
+    // friends slipped through, so `markVhiddBroken` never fired and the
+    // grabber kept the keyboard seized while every replay was dropped.
     try std.testing.expect(isTransportError(error.SendFailed));
     try std.testing.expect(isTransportError(error.ShortWrite));
+    try std.testing.expect(isTransportError(error.ConnectionResetByPeer));
+    try std.testing.expect(isTransportError(error.BrokenPipe));
+    try std.testing.expect(isTransportError(error.Unexpected));
+
+    // Our-side logic bugs: a reconnect can't fix a malformed report, so
+    // these must NOT trigger an endless recover loop.
     try std.testing.expect(!isTransportError(error.PayloadTooLarge));
     try std.testing.expect(!isTransportError(error.TooManyKeys));
 }

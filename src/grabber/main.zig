@@ -587,7 +587,17 @@ const Daemon = struct {
             log.info("  remap[{d}]: src=0x{X:0>2} → dst=0x{X:0>2}", .{ i, rm.src_usage, rm.dst_usage });
         }
 
-        // Lazy vhidd init on first apply.
+        // Release the physical keyboard FIRST. The seize must never be
+        // held across the (potentially blocking, up-to-5s) vhidd connect
+        // below: a stale or dead vhidd would otherwise leave every
+        // keystroke captured-but-undeliverable — a dead keyboard. With
+        // the seize torn down the keyboard falls back to the real HID
+        // path until we re-seize at the end of this function. HidSeize is
+        // also a one-process singleton, so it must be released before the
+        // HidSeize.init below runs again.
+        self.teardownSeize();
+
+        // Lazy vhidd init on first apply (or after a recovery nulled it).
         if (self.vhidd == null) {
             log.info("connecting to vhidd_server", .{});
             const v = try self.allocator.create(Vhidd.Client);
@@ -608,10 +618,7 @@ const Daemon = struct {
         // owners any more).
         self.layer_ctx.stream = if (has_layer_rule) sub.stream else null;
 
-        // Tear down old seize + slots before allocating new ones.
-        // HidSeize is the singleton (one-process IOHIDManager); we
-        // must release it before calling HidSeize.init again.
-        self.teardownSeize();
+        // (Seize already torn down above, before the vhidd connect.)
 
         // Build slots and seize as locals first. Don't expose to
         // `self` until everything's wired up — otherwise a failure

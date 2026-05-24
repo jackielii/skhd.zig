@@ -5,9 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.5...HEAD)
-
-## [0.1.5](https://github.com/jackielii/skhd.zig/compare/v0.1.4...v0.1.5) - 2026-05-24
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.4...HEAD)
 
 ### Added
 - **`NSMicrophoneUsageDescription` in the app bundle Info.plist.** Lets hotkeys that shell out to audio-recording tools (voice-transcription commands, etc.) trigger the microphone TCC prompt instead of being silently denied. The string surfaces in System Settings → Privacy & Security → Microphone as "Allow skhd to launch hotkeys that record audio, such as voice transcription commands."

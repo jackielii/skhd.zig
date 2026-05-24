@@ -192,12 +192,7 @@ jobs:
     
     - name: Upload Release Asset
       env:
-        # Prefer HOMEBREW_TAP_TOKEN (PAT) over the auto-generated
-        # GITHUB_TOKEN. Both v0.1.4 runs failed here with HTTP 401 "Bad
-        # credentials" against GITHUB_TOKEN despite workflow-scoped
-        # `permissions: contents: write`; the cross-repo PAT used by
-        # update-homebrew has worked every release.
-        GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         gh release upload ${{ github.ref_name }} \
           ./skhd-${{ matrix.arch }}-macos.tar.gz \
@@ -210,9 +205,7 @@ jobs:
     steps:
     - name: Publish Release
       env:
-        # Same 401 mitigation as Upload Release Asset above — v0.1.4
-        # re-run failed here on `gh release edit --draft=false`.
-        GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         gh release edit ${{ github.ref_name }} \
           --repo ${{ github.repository }} \

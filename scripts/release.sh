@@ -128,25 +128,25 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Verify homebrew-tap is bundle-aware. The release.yml auto-bump rewrites
-# the formula's URL + sha256, but does NOT touch the install block. With
-# 0.0.18+ the tarball contains skhd.app/ instead of a bare binary, so a
-# pre-bundle install block (`bin.install "skhd-arm64-macos" => "skhd"`)
-# would silently produce broken installs after the auto-bump runs. Block
-# the release until the formula has the bundle-aware install logic.
-echo "Checking homebrew-tap formula is bundle-aware..."
-HEAD_FORMULA=$(curl -fsSL https://raw.githubusercontent.com/jackielii/homebrew-tap/main/Formula/skhd-zig.rb 2>/dev/null || true)
-if [ -z "$HEAD_FORMULA" ]; then
-    echo -e "${YELLOW}Warning: could not fetch homebrew-tap formula${NC}"
+# Verify homebrew-tap ships the cask (not the legacy formula). As of
+# v0.1.4 distribution switched from Formula/skhd-zig.rb to
+# Casks/skhd-zig.rb; release.yml's update-homebrew job seds the cask's
+# `version` + `sha256` lines. If the cask is missing or lacks
+# `app "skhd.app"`, the auto-bump either silently no-ops or mangles an
+# unrelated line and brew users stay pinned to the previous tag.
+echo "Checking homebrew-tap cask is present and bundle-aware..."
+HEAD_CASK=$(curl -fsSL https://raw.githubusercontent.com/jackielii/homebrew-tap/main/Casks/skhd-zig.rb 2>/dev/null || true)
+if [ -z "$HEAD_CASK" ]; then
+    echo -e "${YELLOW}Warning: could not fetch homebrew-tap cask${NC}"
     if ! confirm_yn "Continue anyway?"; then
         exit 1
     fi
-elif ! echo "$HEAD_FORMULA" | grep -q 'File.directory?("skhd.app")'; then
-    echo -e "${RED}Error: homebrew-tap/main formula is NOT bundle-aware.${NC}"
+elif ! echo "$HEAD_CASK" | grep -q 'app "skhd.app"'; then
+    echo -e "${RED}Error: homebrew-tap/main cask is NOT bundle-aware.${NC}"
     echo "Releasing v$CURRENT_VERSION now will break 'brew install jackielii/tap/skhd-zig'"
-    echo "for everyone, because the auto-bump rewrites a stale install block."
+    echo "because the cask auto-bump rewrites a cask that doesn't install skhd.app."
     echo ""
-    echo "Merge the bundle-aware formula PR first, then re-run this script."
+    echo "Fix Casks/skhd-zig.rb in homebrew-tap first, then re-run this script."
     exit 1
 fi
 

@@ -5,10 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.3...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.5...HEAD)
+
+## [0.1.5](https://github.com/jackielii/skhd.zig/compare/v0.1.4...v0.1.5) - 2026-05-24
+
+### Added
+- **`NSMicrophoneUsageDescription` in the app bundle Info.plist.** Lets hotkeys that shell out to audio-recording tools (voice-transcription commands, etc.) trigger the microphone TCC prompt instead of being silently denied. The string surfaces in System Settings → Privacy & Security → Microphone as "Allow skhd to launch hotkeys that record audio, such as voice transcription commands."
+
+## [0.1.4](https://github.com/jackielii/skhd.zig/compare/v0.1.3...v0.1.4) - 2026-05-23
+
+> First release distributed as a Homebrew **cask** (replacing the formula). `brew install jackielii/tap/skhd-zig` now installs `skhd.app` directly into `/Applications`, which the formula required users to do manually via `ln -sfn`.
 
 ### Added
 - **`--list-devices` prints connected HID keyboards as paste-ready `.device` blocks.** Authors of `.remap` / `.taphold` rules previously had to grep `hidutil list` (hundreds of SMC sensor rows alongside the actual keyboards) and copy VendorID/ProductID by hand. The new flag enumerates devices via `IOHIDManager` with a `DeviceUsagePage:1 / DeviceUsage:6` match dict, dedupes on `(vendor, product)` since IOKit returns one entry per HID interface (e.g. HHKB exposing both Keyboard and Consumer Control), slugifies the product name into a default alias, and prints a copy-paste-ready `.device` block per device. A footnote flags that mouse receivers advertising a keyboard usage (Logitech Unifying et al.) will also show up — they really do present that usage, so filtering them would be a heuristic that hides legitimate config targets.
+
+### Changed
+- **Homebrew distribution switched from formula to cask.** The cask installs the signed `skhd.app` bundle into `/Applications`, runs `xattr -dr com.apple.quarantine` in `postflight` to clear Gatekeeper's quarantine flag on the self-signed binary, and surfaces the CLI on `PATH` via the cask's `binary` stanza pointing at `skhd.app/Contents/MacOS/skhd`. Uninstall stops the user LaunchAgent via `launchctl`. release.yml's `update-homebrew` job seds `Casks/skhd-zig.rb`'s `version` + `sha256` lines (the cask's `url` interpolates `#{version}` so no URL rewrite is needed); the arm64-only cask drops the x86_64 sed steps from the previous formula bump.
+
+### Fixed
+- **skhd-grabber no longer dead-keys the keyboard when the Karabiner vhidd transport drops.** Two compounding gaps were leaving the keyboard seized while every re-injection failed:
+  1. `isTransportError`'s allowlist was too narrow (`SendFailed` / `ShortWrite` only). `ConnectionResetByPeer`, `BrokenPipe`, `Unexpected` — exactly the errors the OS surfaces when the Karabiner daemon resets the socket — fell through to the "no-op" branch, so `markVhiddBroken` was never called and the seize was never released. Classification is now flipped: any post error means the pipe is dead. Only our-side logic bugs (`PayloadTooLarge`, `TooManyKeys`) are excluded — a reconnect can't fix a malformed report.
+  2. `applyLatestRules`'s `teardownSeize` ran AFTER the (blocking, up-to-5s) vhidd lazy-connect. On a fresh apply with a stale seize and a dead vhidd, the old seize was held for the full 5s timeout. `teardownSeize` now runs before the vhidd connect so the physical keyboard is never seized while we're blocked (re)connecting.
+
+  Net effect: any vhidd failure now reliably triggers fail-open + reconnect (matching v0.1.3's recovery contract for the case where the socket simply resets rather than the daemon process exiting).
 
 ## [0.1.3](https://github.com/jackielii/skhd.zig/compare/v0.1.2...v0.1.3) - 2026-05-16
 

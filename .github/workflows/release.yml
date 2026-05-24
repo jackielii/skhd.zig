@@ -192,7 +192,15 @@ jobs:
     
     - name: Upload Release Asset
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # RELEASE_UPLOAD_TOKEN: fine-grained PAT scoped to
+        # jackielii/skhd.zig with `contents: write` (covers releases).
+        # Workaround for auto-generated GITHUB_TOKEN intermittently
+        # returning HTTP 401 on this step — both v0.1.4 runs failed
+        # here despite workflow-scoped `permissions: contents: write`.
+        # No fallback to GITHUB_TOKEN: if the PAT auth fails (e.g.
+        # expired), surface that error cleanly rather than silently
+        # falling back to the path we know is unreliable.
+        GH_TOKEN: ${{ secrets.RELEASE_UPLOAD_TOKEN }}
       run: |
         gh release upload ${{ github.ref_name }} \
           ./skhd-${{ matrix.arch }}-macos.tar.gz \
@@ -205,7 +213,10 @@ jobs:
     steps:
     - name: Publish Release
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Same RELEASE_UPLOAD_TOKEN mitigation as Upload Release Asset
+        # above — v0.1.4's re-run failed here with 401 on
+        # `gh release edit --draft=false`.
+        GH_TOKEN: ${{ secrets.RELEASE_UPLOAD_TOKEN }}
       run: |
         gh release edit ${{ github.ref_name }} \
           --repo ${{ github.repository }} \

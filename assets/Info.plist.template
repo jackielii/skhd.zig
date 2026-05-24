@@ -24,6 +24,8 @@
     <true/>
     <key>LSUIElement</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Allow skhd to launch hotkeys that record audio, such as voice transcription commands.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Released under the MIT License.</string>
 </dict>

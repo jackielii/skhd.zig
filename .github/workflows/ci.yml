@@ -90,6 +90,7 @@ jobs:
         test -f skhd.app/Contents/MacOS/skhd-grabber
         test -f skhd.app/Contents/Info.plist
         grep -q "<string>com.jackielii.skhd</string>" skhd.app/Contents/Info.plist
+        grep -q "<key>NSMicrophoneUsageDescription</key>" skhd.app/Contents/Info.plist
         plutil -lint skhd.app/Contents/Info.plist
 
     - name: Create tarball

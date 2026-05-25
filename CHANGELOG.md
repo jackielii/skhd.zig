@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.6...HEAD)
 
+### Fixed
+- **Layer-hold + modifier-hold chord no longer occasionally drops the layer.** Holding space (→ `fn_layer`, layer rule) and caps_lock (→ `lctrl`, modifier rule with `permissive_hold`) and tapping a nested key — e.g. `space + caps - h` expected to resolve through the agent's `fn_layer < ctrl - h | ctrl - left` mapping — would intermittently land bare `ctrl-h` at the OS instead. The two rules ran as independent FSMs in the grabber; caps's `permissive_hold` fires on `h↑` and emitted `ctrl + h` to vhidd before space's 200ms timer ever pushed the layer, so the agent saw the chord without the layer context. The fix adds a dispatch-level arbitration hook (`TapHold.arbitration_hook`) invoked from `doHoldCommit`. When a non-layer slot is about to commit, dispatch forces any peer slot still pending on a layer rule to push its layer first; the layer's buffered events are split so the committing slot's own buffer flush covers shared nested keys without double-emitting them, while any prefix the layer alone witnessed (events that arrived before the modifier started pending) is replayed under the layer before the modifier-down lands. The tap path and single-rule timer-fire paths are untouched; modifier-tap roll-over behavior is unchanged.
+
 ## [0.1.6](https://github.com/jackielii/skhd.zig/compare/v0.1.4...v0.1.6) - 2026-05-24
 
 ### Added

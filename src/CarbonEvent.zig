@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c.zig");
 
 const CarbonEvent = @This();
@@ -26,6 +27,13 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !*CarbonEvent {
         },
     };
 
+    // GetFrontProcess + InstallApplicationEventHandler trip TCC's
+    // Accessibility prompt on Tahoe for unsigned binaries — every test
+    // binary that pulls Skhd.init in transitively would pop the dialog
+    // on each rebuild. Skip both under tests; getProcessName() falls back
+    // to "unknown", which test configs don't assert against.
+    if (builtin.is_test) return self;
+
     // Get initial process name from the OS — no event payload yet.
     var initial_psn: c.ProcessSerialNumber = undefined;
     if (c.GetFrontProcess(&initial_psn) == c.noErr) {
@@ -49,8 +57,12 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !*CarbonEvent {
 }
 
 pub fn deinit(self: *CarbonEvent) void {
-    // Remove event handler
-    _ = c.RemoveEventHandler(self.handler_ref);
+    // Mirror the test-mode short-circuit in init() — handler was never
+    // installed, so handler_ref is undefined and RemoveEventHandler
+    // would dereference garbage.
+    if (!builtin.is_test) {
+        _ = c.RemoveEventHandler(self.handler_ref);
+    }
 
     // Free self
     self.allocator.destroy(self);

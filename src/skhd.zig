@@ -991,6 +991,11 @@ inline fn interceptSystemKey(event: c.CGEventRef, eventkey: *Hotkey.KeyPress) bo
 const SKHD_EVENT_MARKER: i64 = 0x736B6864; // "skhd" in hex
 
 inline fn forwardKey(target_key: Hotkey.KeyPress, _: c.CGEventRef) !void {
+    // CGEventPost on kCGSessionEventTap trips TCC's Accessibility prompt
+    // for unsigned binaries. The processHotkey tests cover the dispatch
+    // path with mock events and don't assert that real OS events fire.
+    if (builtin.is_test) return;
+
     // Mouse buttons live in a separate keycode space (≥ 0x10000) and need
     // CGEventCreateMouseEvent rather than CGEventCreateKeyboardEvent.
     if (Keycodes.isMouseButton(target_key.key)) {

@@ -652,6 +652,8 @@ const Daemon = struct {
                     &self.layer_ctx,
                 ),
             };
+            slots[i].engine.arbitration_hook = arbitrateHoldCommit;
+            slots[i].engine.arbitration_ctx = &self.seize_ctx;
         }
 
         const seize = try HidSeize.init(self.allocator, seizeInputCallback, &self.seize_ctx);
@@ -1191,6 +1193,37 @@ fn layerPushSink(ctx_ptr: ?*anyopaque, layer: []const u8, entering: bool) void {
     sw.interface.flush() catch |err| {
         log.warn("mode_change flush failed: {s}", .{@errorName(err)});
     };
+}
+
+/// TapHold arbitration hook. Invoked from a slot's
+/// `doHoldCommit` (permissive_hold / hold_on_other_key_press /
+/// timer-fire). Repro: holding space (→ fn_layer, layer rule) AND
+/// caps_lock (→ lctrl, permissive_hold) and tapping h would
+/// occasionally land a bare ctrl-h at the OS — caps's
+/// permissive_hold fires on h-up while space is still in pending
+/// and pushes the modifier replay before the layer ever gets
+/// pushed. Here we look for any other slot that is in pending and
+/// is a layer rule, and force it to push its layer first. The
+/// layer slot's buffered events are split: events that the
+/// committing slot also has are dropped (its flushBuffer will
+/// replay them under the modifier), and any unique prefix
+/// (events that arrived before the committing slot started
+/// pending) is replayed now under the layer.
+fn arbitrateHoldCommit(ctx_ptr: ?*anyopaque, committing: *TapHold) void {
+    const cx: *SeizeCtx = @ptrCast(@alignCast(ctx_ptr orelse return));
+    const committing_buf = committing.bufferedCount();
+    for (cx.slots) |*slot| {
+        if (&slot.engine == committing) continue;
+        if (slot.engine.state != .pending) continue;
+        if (!slot.engine.isLayer()) continue;
+
+        const layer_len = slot.engine.bufferedCount();
+        const unique_prefix = if (layer_len > committing_buf) layer_len - committing_buf else 0;
+
+        slot.engine.forceLayerEnter();
+        cancelTapHoldTimer(slot);
+        slot.engine.flushPrefixAndDiscardRest(unique_prefix);
+    }
 }
 
 /// Sink for both real HID events and TapHold-synthesized events.

@@ -106,6 +106,16 @@ sink_ctx: ?*anyopaque,
 /// otherwise. Owner's responsibility.
 layer_sink: ?LayerSink = null,
 layer_sink_ctx: ?*anyopaque = null,
+/// Optional arbitration hook. Invoked just before this rule's
+/// hold commit lands at the sink (permissive_hold or
+/// hold_on_other_key_press triggers, and timer fire). Gives the
+/// owning dispatcher a chance to coordinate with other still-
+/// pending slots — e.g. force a pending layer slot to push its
+/// layer first, so the agent sees the layer transition before
+/// this slot's modifier-down arrives at the OS. The hook is not
+/// called on the tap path.
+arbitration_hook: ?*const fn (ctx: ?*anyopaque, committing: *@This()) void = null,
+arbitration_ctx: ?*anyopaque = null,
 // std.BoundedArray was removed in 0.16. We hold the storage inline
 // and track the live length separately so the data is address-stable
 // across struct moves (an ArrayList view's `.items.ptr` would point at
@@ -204,9 +214,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
             if (self.rule.hold_on_other_key_press and ev.pressed) {
                 // Eager commit: the moment another key is pressed,
                 // we know the user is using the source as a hold.
-                self.emitHoldDown();
-                self.state = .decided_hold;
-                self.flushBuffer();
+                self.doHoldCommit();
                 return .{ .disposition = .pass, .timer = .cancel };
             }
 
@@ -257,9 +265,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                     // misclassifies natural typing roll-overs (where
                     // user presses next letter before releasing the
                     // layer key) as deliberate layer use.
-                    self.emitHoldDown();
-                    self.state = .decided_hold;
-                    self.flushBuffer();
+                    self.doHoldCommit();
                     return .{ .disposition = .consumed, .timer = .cancel };
                 }
                 return .{ .disposition = .consumed, .timer = .none };
@@ -302,14 +308,58 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
 
 pub fn timerFired(self: *Self) TimerAction {
     if (self.state != .pending) return .none;
-    self.emitHoldDown();
-    self.state = .decided_hold;
-    self.flushBuffer();
+    self.doHoldCommit();
     return .none;
 }
 
-fn isLayer(self: *const Self) bool {
+pub fn isLayer(self: *const Self) bool {
     return std.meta.activeTag(self.rule.hold) == .layer;
+}
+
+/// Internal: emit the hold action and flush the buffer, with
+/// arbitration hook called first so dispatchers can reorder
+/// other slots' state before this slot's emit lands at the sink.
+fn doHoldCommit(self: *Self) void {
+    if (self.arbitration_hook) |h| h(self.arbitration_ctx, self);
+    self.emitHoldDown();
+    self.state = .decided_hold;
+    self.flushBuffer();
+}
+
+/// Number of events currently buffered (used by arbitration
+/// to compute the "unique prefix" shared with a peer slot).
+pub fn bufferedCount(self: *const Self) usize {
+    return self.buffer_len;
+}
+
+/// Force a pending layer rule to push its layer immediately and
+/// transition to decided_hold. The buffer is left untouched —
+/// the caller is expected to follow up with
+/// `flushPrefixAndDiscardRest` so that events already covered by
+/// a peer slot's buffer are not double-replayed. No-op if not
+/// pending or not a layer rule.
+pub fn forceLayerEnter(self: *Self) void {
+    if (self.state != .pending) return;
+    if (!self.isLayer()) return;
+    self.emitHoldDown(); // routes through layer_sink for layer rules
+    self.state = .decided_hold;
+}
+
+/// Emit the first `prefix_len` buffered events through the sink,
+/// then drop the entire buffer (including any suffix). Used by
+/// arbitration after `forceLayerEnter` to replay events that only
+/// this slot saw — the suffix is the peer's responsibility.
+pub fn flushPrefixAndDiscardRest(self: *Self, prefix_len: usize) void {
+    const items = self.bufferItems();
+    const n = @min(prefix_len, items.len);
+    if (n > 0) {
+        log.info("arbitration flush: src=0x{X:0>2} replaying {d} unique-prefix event(s) (discarding {d} shared suffix)", .{ self.rule.src_usage, n, items.len - n });
+    }
+    for (items[0..n]) |ev| {
+        self.sink(self.sink_ctx, ev);
+    }
+    self.buffer_len = 0;
+    self.buffered_downs_len = 0;
 }
 
 fn commitTap(self: *Self) void {
@@ -915,4 +965,242 @@ test "key pressed AND released during pending: both buffered, replayed in order"
     try std.testing.expect(sink.out.items[2].pressed);
     try std.testing.expectEqual(@as(u32, 0x16), sink.out.items[3].usage);
     try std.testing.expect(!sink.out.items[3].pressed);
+}
+
+test "multi-slot race: arbitration pushes layer before peer's permissive_hold commit" {
+    // Repro for a user-reported bug from builtin.skhdrc: holding
+    // space (→ fn_layer) AND caps (→ lctrl, permissive_hold) and
+    // then tapping h would occasionally land a bare ctrl-h at the
+    // OS — caps's permissive_hold fires on h-up while space is
+    // still pending, and pushed the modifier replay before the
+    // layer ever got pushed. With the arbitration hook wired in,
+    // caps's commit calls back into the owning dispatcher, which
+    // forces the pending layer slot to push its layer first; the
+    // shared h-down/h-up are then emitted exactly once via caps's
+    // own buffer (under the layer).
+    const LayerEvent = struct { layer: []const u8, entering: bool };
+    const LayerLog = struct {
+        events: std.ArrayList(LayerEvent),
+
+        fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
+            const s: *@This() = @ptrCast(@alignCast(ctx.?));
+            s.events.append(std.testing.allocator, .{ .layer = layer, .entering = entering }) catch unreachable;
+        }
+    };
+
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var ll = LayerLog{ .events = .empty };
+    defer ll.events.deinit(std.testing.allocator);
+
+    // Slot 0: space → fn_layer (layer hold).
+    var space_slot = initWithLayerSink(.{
+        .src_usage = 0x2C, // space
+        .tap_usage = 0x2C,
+        .hold = .{ .layer = "fn_layer" },
+        .timeout_ms = 200,
+        .permissive_hold = true, // ignored for layer (by design)
+        .retro_tap = true,
+    }, TestSink.callback, &sink, LayerLog.cb, &ll);
+
+    // Slot 1: caps_lock → lctrl (modifier hold, permissive_hold on).
+    var caps_slot = init(.{
+        .src_usage = 0x39, // caps_lock
+        .tap_usage = 0x29, // escape
+        .hold = .{ .hid_usage = 0xE0 }, // lctrl
+        .timeout_ms = 120,
+        .permissive_hold = true,
+    }, TestSink.callback, &sink);
+
+    // Stand-in for SeizeCtx's slots[]: just an array the
+    // arbitration hook can iterate. We carry it through a local
+    // struct so the hook ctx is type-stable.
+    const Slots = struct {
+        list: []*Self,
+
+        fn hook(ctx: ?*anyopaque, committing: *Self) void {
+            const sl: *@This() = @ptrCast(@alignCast(ctx.?));
+            const committing_buf = committing.bufferedCount();
+            for (sl.list) |peer| {
+                if (peer == committing) continue;
+                if (peer.state != .pending) continue;
+                if (!peer.isLayer()) continue;
+                const layer_len = peer.bufferedCount();
+                const unique_prefix = if (layer_len > committing_buf) layer_len - committing_buf else 0;
+                peer.forceLayerEnter();
+                peer.flushPrefixAndDiscardRest(unique_prefix);
+            }
+        }
+    };
+    var slot_list = [_]*Self{ &space_slot, &caps_slot };
+    var slots = Slots{ .list = &slot_list };
+    space_slot.arbitration_hook = Slots.hook;
+    space_slot.arbitration_ctx = &slots;
+    caps_slot.arbitration_hook = Slots.hook;
+    caps_slot.arbitration_ctx = &slots;
+
+    // Simulate seizeInputCallback's dispatch: source events go only
+    // to the owning slot; other events fan out to all slots.
+    const dispatch = struct {
+        fn feed(all: []*Self, ev: Event) void {
+            const u: u16 = std.math.cast(u16, ev.usage) orelse 0;
+            var is_source = false;
+            for (all) |s| {
+                if (s.rule.src_usage == u) {
+                    is_source = true;
+                    break;
+                }
+            }
+            for (all) |s| {
+                if (is_source and s.rule.src_usage != u) continue;
+                _ = s.feed(ev);
+            }
+        }
+    }.feed;
+
+    // Fast user keystroke order: space ↓, caps ↓, h ↓, h ↑, caps ↑,
+    // space ↑ — all inside space's 200ms timeout window (timers
+    // never fire in this test).
+    dispatch(&slot_list, kbev(0x2C, true));  // space down
+    dispatch(&slot_list, kbev(0x39, true));  // caps down
+    dispatch(&slot_list, kbev(0x0B, true));  // h down
+    dispatch(&slot_list, kbev(0x0B, false)); // h up   ← caps fires, arbitration kicks in
+    dispatch(&slot_list, kbev(0x39, false)); // caps up
+    dispatch(&slot_list, kbev(0x2C, false)); // space up
+
+    // Fixed expectations:
+    //   layer events: enter fn_layer (from arbitration on h-up),
+    //                 exit fn_layer (from space-up while in decided_hold).
+    //   sink events:  caps's flushBuffer happens AFTER layer push.
+    //     0: lctrl    down  ← caps emitHoldDown (after arbitration pushed layer)
+    //     1: h        down  ← caps flushBuffer (only replay)
+    //     2: h        up
+    //     3: lctrl    up    ← caps source-up
+    //   space-up no longer triggers commitTap because space was
+    //   forced to decided_hold; it emits layer-pop and no HID.
+    try std.testing.expectEqual(@as(usize, 2), ll.events.items.len);
+    try std.testing.expectEqualStrings("fn_layer", ll.events.items[0].layer);
+    try std.testing.expect(ll.events.items[0].entering);
+    try std.testing.expectEqualStrings("fn_layer", ll.events.items[1].layer);
+    try std.testing.expect(!ll.events.items[1].entering);
+
+    try std.testing.expectEqual(@as(usize, 4), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[0].usage);
+    try std.testing.expect(sink.out.items[0].pressed);
+    try std.testing.expectEqual(@as(u32, 0x0B), sink.out.items[1].usage);
+    try std.testing.expect(sink.out.items[1].pressed);
+    try std.testing.expectEqual(@as(u32, 0x0B), sink.out.items[2].usage);
+    try std.testing.expect(!sink.out.items[2].pressed);
+    try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[3].usage);
+    try std.testing.expect(!sink.out.items[3].pressed);
+}
+
+test "multi-slot race: arbitration replays layer-unique prefix before peer commit" {
+    // Variant of the previous test where the user typed an extra
+    // key during the space-only pending window (before caps was
+    // pressed). That key is in space's buffer but NOT in caps's
+    // buffer — so arbitration's "unique prefix" path replays just
+    // the layer-only events under the layer, before caps's
+    // modifier-down lands.
+    const LayerEvent = struct { layer: []const u8, entering: bool };
+    const LayerLog = struct {
+        events: std.ArrayList(LayerEvent),
+
+        fn cb(ctx: ?*anyopaque, layer: []const u8, entering: bool) void {
+            const s: *@This() = @ptrCast(@alignCast(ctx.?));
+            s.events.append(std.testing.allocator, .{ .layer = layer, .entering = entering }) catch unreachable;
+        }
+    };
+
+    var sink = TestSink.init(std.testing.allocator);
+    defer sink.deinit();
+    var ll = LayerLog{ .events = .empty };
+    defer ll.events.deinit(std.testing.allocator);
+
+    var space_slot = initWithLayerSink(.{
+        .src_usage = 0x2C,
+        .tap_usage = 0x2C,
+        .hold = .{ .layer = "fn_layer" },
+        .timeout_ms = 200,
+        .permissive_hold = true,
+        .retro_tap = true,
+    }, TestSink.callback, &sink, LayerLog.cb, &ll);
+
+    var caps_slot = init(.{
+        .src_usage = 0x39,
+        .tap_usage = 0x29,
+        .hold = .{ .hid_usage = 0xE0 },
+        .timeout_ms = 120,
+        .permissive_hold = true,
+    }, TestSink.callback, &sink);
+
+    const Slots = struct {
+        list: []*Self,
+        fn hook(ctx: ?*anyopaque, committing: *Self) void {
+            const sl: *@This() = @ptrCast(@alignCast(ctx.?));
+            const committing_buf = committing.bufferedCount();
+            for (sl.list) |peer| {
+                if (peer == committing) continue;
+                if (peer.state != .pending) continue;
+                if (!peer.isLayer()) continue;
+                const layer_len = peer.bufferedCount();
+                const unique_prefix = if (layer_len > committing_buf) layer_len - committing_buf else 0;
+                peer.forceLayerEnter();
+                peer.flushPrefixAndDiscardRest(unique_prefix);
+            }
+        }
+    };
+    var slot_list = [_]*Self{ &space_slot, &caps_slot };
+    var slots = Slots{ .list = &slot_list };
+    space_slot.arbitration_hook = Slots.hook;
+    space_slot.arbitration_ctx = &slots;
+    caps_slot.arbitration_hook = Slots.hook;
+    caps_slot.arbitration_ctx = &slots;
+
+    const dispatch = struct {
+        fn feed(all: []*Self, ev: Event) void {
+            const u: u16 = std.math.cast(u16, ev.usage) orelse 0;
+            var is_source = false;
+            for (all) |s| {
+                if (s.rule.src_usage == u) {
+                    is_source = true;
+                    break;
+                }
+            }
+            for (all) |s| {
+                if (is_source and s.rule.src_usage != u) continue;
+                _ = s.feed(ev);
+            }
+        }
+    }.feed;
+
+    // space ↓, a ↓, a ↑   ← these only land in space's buffer
+    // caps ↓                ← caps now pending
+    // h ↓, h ↑              ← both buffer these
+    dispatch(&slot_list, kbev(0x2C, true));
+    dispatch(&slot_list, kbev(0x04, true));  // 'a' down — space-only
+    dispatch(&slot_list, kbev(0x04, false)); // 'a' up   — space-only
+    dispatch(&slot_list, kbev(0x39, true));
+    dispatch(&slot_list, kbev(0x0B, true));
+    dispatch(&slot_list, kbev(0x0B, false)); // h up — caps's permissive_hold fires
+
+    // Expected sink sequence on the h-up commit:
+    //   layer enter (via layer_sink)
+    //   a-down, a-up      (space's unique prefix — replayed under fn_layer)
+    //   lctrl-down        (caps emitHoldDown)
+    //   h-down, h-up      (caps flushBuffer — under fn_layer + ctrl)
+    try std.testing.expectEqual(@as(usize, 1), ll.events.items.len);
+    try std.testing.expect(ll.events.items[0].entering);
+
+    try std.testing.expectEqual(@as(usize, 5), sink.out.items.len);
+    try std.testing.expectEqual(@as(u32, 0x04), sink.out.items[0].usage);
+    try std.testing.expect(sink.out.items[0].pressed);
+    try std.testing.expectEqual(@as(u32, 0x04), sink.out.items[1].usage);
+    try std.testing.expect(!sink.out.items[1].pressed);
+    try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[2].usage);
+    try std.testing.expect(sink.out.items[2].pressed);
+    try std.testing.expectEqual(@as(u32, 0x0B), sink.out.items[3].usage);
+    try std.testing.expect(sink.out.items[3].pressed);
+    try std.testing.expectEqual(@as(u32, 0x0B), sink.out.items[4].usage);
+    try std.testing.expect(!sink.out.items[4].pressed);
 }

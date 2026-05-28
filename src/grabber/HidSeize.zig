@@ -113,6 +113,14 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
     defer c.CFRelease(dicts);
 
     for (matches) |m| {
+        // Partial-zero (one of vendor/product is 0, the other isn't) takes
+        // the non-broad branch with a literal VendorID=0 or ProductID=0 in
+        // the matching dict — which matches no real device. Warn loudly so
+        // misconfigured aliases don't fail silently.
+        if ((m.vendor == 0) != (m.product == 0)) {
+            log.warn("device alias with partial-zero VID/PID (vendor=0x{x}, product=0x{x}) will match nothing — use both zero for FIFO built-in keyboards, or both non-zero for an external device", .{ m.vendor, m.product });
+        }
+
         const dict = c.CFDictionaryCreateMutable(
             c.kCFAllocatorDefault,
             4,
@@ -122,31 +130,39 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         if (dict == null) return error.CFDictionaryCreateFailed;
         defer c.CFRelease(dict);
 
-        const vendor_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDVendorIDKey, c.kCFStringEncodingUTF8);
-        defer c.CFRelease(vendor_key);
-        const product_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDProductIDKey, c.kCFStringEncodingUTF8);
-        defer c.CFRelease(product_key);
+        // FIFO-transport built-in keyboards don't expose VendorID/ProductID
+        // in IOKit — including them with value 0 requires the property to
+        // *exist*, so 0 devices match. Omit when both are zero; the
+        // usage filter keeps us to keyboards. Un-seize the VHIDD in start().
+        if (m.vendor != 0 or m.product != 0) {
+            const vendor_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDVendorIDKey, c.kCFStringEncodingUTF8);
+            defer c.CFRelease(vendor_key);
+            const product_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDProductIDKey, c.kCFStringEncodingUTF8);
+            defer c.CFRelease(product_key);
+
+            var vendor: i32 = @intCast(m.vendor);
+            var product: i32 = @intCast(m.product);
+            const vendor_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &vendor);
+            defer c.CFRelease(vendor_num);
+            const product_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &product);
+            defer c.CFRelease(product_num);
+
+            c.CFDictionarySetValue(dict, vendor_key, vendor_num);
+            c.CFDictionarySetValue(dict, product_key, product_num);
+        }
+
         const usage_page_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsagePageKey, c.kCFStringEncodingUTF8);
         defer c.CFRelease(usage_page_key);
         const usage_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsageKey, c.kCFStringEncodingUTF8);
         defer c.CFRelease(usage_key);
 
-        var vendor: i32 = @intCast(m.vendor);
-        var product: i32 = @intCast(m.product);
         var usage_page: i32 = c.kHIDPage_GenericDesktop;
         var usage: i32 = c.kHIDUsage_GD_Keyboard;
-
-        const vendor_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &vendor);
-        defer c.CFRelease(vendor_num);
-        const product_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &product);
-        defer c.CFRelease(product_num);
         const usage_page_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &usage_page);
         defer c.CFRelease(usage_page_num);
         const usage_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &usage);
         defer c.CFRelease(usage_num);
 
-        c.CFDictionarySetValue(dict, vendor_key, vendor_num);
-        c.CFDictionarySetValue(dict, product_key, product_num);
         c.CFDictionarySetValue(dict, usage_page_key, usage_page_num);
         c.CFDictionarySetValue(dict, usage_key, usage_num);
 
@@ -203,7 +219,44 @@ pub fn start(self: *Self, mode: Mode) !void {
     if (count == 0) {
         log.warn("matching dictionary captured 0 devices — vendor/product mismatch?", .{});
     }
-    if (matched) |s| c.CFRelease(s);
+
+    // Broad usage-only match (vendor/product both zero) also captures
+    // the Karabiner VHIDD. Un-seize any device with a non-zero VendorID
+    // to avoid a feedback loop — we inject *through* the VHIDD.
+    const has_broad_match = for (self.owned_matches) |m| {
+        if (m.vendor == 0 and m.product == 0) break true;
+    } else false;
+
+    if (matched) |s| {
+        if (has_broad_match) un_seize: {
+            const n: usize = @intCast(c.CFSetGetCount(s));
+            if (n == 0) break :un_seize;
+            const buf = self.allocator.alloc(?*const anyopaque, n) catch {
+                log.warn("un-seize buffer alloc failed; VHIDD may stay seized", .{});
+                break :un_seize;
+            };
+            defer self.allocator.free(buf);
+            c.CFSetGetValues(s, buf.ptr);
+
+            const vid_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDVendorIDKey, c.kCFStringEncodingUTF8);
+            defer if (vid_key) |k| c.CFRelease(k);
+
+            for (buf) |raw| {
+                const dev: c.IOHIDDeviceRef = @constCast(raw);
+                if (vid_key) |k| {
+                    const prop = c.IOHIDDeviceGetProperty(dev, k);
+                    if (prop != null) {
+                        var vid: i32 = 0;
+                        if (c.CFNumberGetValue(@ptrCast(prop), c.kCFNumberSInt32Type, @ptrCast(&vid)) != 0 and vid != 0) {
+                            log.debug("un-seizing device with VendorID=0x{x} (not the target)", .{@as(u32, @bitCast(vid))});
+                            _ = c.IOHIDDeviceClose(dev, self.open_options);
+                        }
+                    }
+                }
+            }
+        }
+        c.CFRelease(s);
+    }
 
     if (mode == .seize) {
         self.disableCapsLockDelayOnMatches(self.owned_matches);

@@ -67,11 +67,13 @@ extern fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) ?*any
 const kIOHIDVendorIDKey: [*:0]const u8 = "VendorID";
 const kIOHIDProductIDKey: [*:0]const u8 = "ProductID";
 const kIOHIDProductKey: [*:0]const u8 = "Product";
-/// IOKit device-level usage match keys. `Primary*` works too, but the
-/// `Device*` variants are what `IOHIDManagerSetDeviceMatching*` keys on
-/// per Apple's `IOHIDKeys.h` headers.
-const kIOHIDDeviceUsagePageKey: [*:0]const u8 = "DeviceUsagePage";
-const kIOHIDDeviceUsageKey: [*:0]const u8 = "DeviceUsage";
+/// IOKit usage match keys. We use the `Primary*` variants here for
+/// consistency with `HidSeize.setMatches` and `Hidutil.buildMatching`,
+/// so all three matching paths see the same set of devices for a given
+/// (vendor, product). `Device*` would also work for matching but can
+/// diverge on composite devices.
+const kIOHIDPrimaryUsagePageKey: [*:0]const u8 = "PrimaryUsagePage";
+const kIOHIDPrimaryUsageKey: [*:0]const u8 = "PrimaryUsage";
 
 /// HID usage page 0x01 (Generic Desktop), usage 0x06 (Keyboard) —
 /// the standard "this device is a keyboard" pair.
@@ -91,28 +93,56 @@ pub fn isPresent(vendor: u32, product: u32) bool {
     if (dicts == null) return false;
     defer CFRelease(dicts);
 
-    const dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     if (dict == null) return false;
     defer CFRelease(dict);
 
-    const v_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDVendorIDKey, kCFStringEncodingUTF8);
-    if (v_key == null) return false;
-    defer CFRelease(v_key);
-    const p_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDProductIDKey, kCFStringEncodingUTF8);
-    if (p_key == null) return false;
-    defer CFRelease(p_key);
+    // FIFO-transport built-in keyboards don't expose VendorID/ProductID
+    // in IOKit. Including them with value 0 requires the property to
+    // *exist* on the device, so 0 devices match. Match by usage only
+    // and confirm a VID-less keyboard exists.
+    if (vendor != 0 or product != 0) {
+        const v_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDVendorIDKey, kCFStringEncodingUTF8);
+        if (v_key == null) return false;
+        defer CFRelease(v_key);
+        const p_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDProductIDKey, kCFStringEncodingUTF8);
+        if (p_key == null) return false;
+        defer CFRelease(p_key);
 
-    var v: i32 = @intCast(vendor);
-    var p: i32 = @intCast(product);
-    const v_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &v);
-    if (v_num == null) return false;
-    defer CFRelease(v_num);
-    const p_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &p);
-    if (p_num == null) return false;
-    defer CFRelease(p_num);
+        var v: i32 = @intCast(vendor);
+        var p: i32 = @intCast(product);
+        const v_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &v);
+        if (v_num == null) return false;
+        defer CFRelease(v_num);
+        const p_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &p);
+        if (p_num == null) return false;
+        defer CFRelease(p_num);
 
-    CFDictionarySetValue(dict, v_key, v_num);
-    CFDictionarySetValue(dict, p_key, p_num);
+        CFDictionarySetValue(dict, v_key, v_num);
+        CFDictionarySetValue(dict, p_key, p_num);
+    }
+
+    // Match Primary* (not Device*) for consistency with HidSeize.setMatches
+    // and Hidutil.buildMatching — composite devices can disagree on the
+    // two key families.
+    const up_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDPrimaryUsagePageKey, kCFStringEncodingUTF8);
+    if (up_key == null) return false;
+    defer CFRelease(up_key);
+    const u_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDPrimaryUsageKey, kCFStringEncodingUTF8);
+    if (u_key == null) return false;
+    defer CFRelease(u_key);
+
+    var page_val: i32 = usage_page_generic_desktop;
+    var usage_val: i32 = usage_keyboard;
+    const page_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &page_val);
+    if (page_num == null) return false;
+    defer CFRelease(page_num);
+    const usage_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &usage_val);
+    if (usage_num == null) return false;
+    defer CFRelease(usage_num);
+
+    CFDictionarySetValue(dict, up_key, page_num);
+    CFDictionarySetValue(dict, u_key, usage_num);
     CFArrayAppendValue(dicts, dict);
 
     IOHIDManagerSetDeviceMatchingMultiple(manager, dicts);
@@ -121,7 +151,26 @@ pub fn isPresent(vendor: u32, product: u32) bool {
     defer CFRelease(matched);
     const count = CFSetGetCount(matched);
     log.debug("vendor=0x{X:0>4} product=0x{X:0>4} → {d} match(es)", .{ vendor, product, count });
-    return count > 0;
+
+    if (vendor != 0 or product != 0) return count > 0;
+
+    // For 0/0: broad match includes the VHIDD. Confirm at least one
+    // matched device lacks a VendorID property (FIFO built-in keyboard).
+    if (count <= 0) return false;
+    const n: usize = @intCast(count);
+    const buf = std.heap.c_allocator.alloc(?*const anyopaque, n) catch return false;
+    defer std.heap.c_allocator.free(buf);
+    CFSetGetValues(matched, buf.ptr);
+
+    const vid_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDVendorIDKey, kCFStringEncodingUTF8);
+    if (vid_key == null) return false;
+    defer CFRelease(vid_key);
+
+    for (buf) |ref_const| {
+        const dev: IOHIDDeviceRef = @constCast(ref_const);
+        if (IOHIDDeviceGetProperty(dev, vid_key) == null) return true;
+    }
+    return false;
 }
 
 /// Print every connected HID keyboard as a paste-ready `.device`
@@ -139,9 +188,9 @@ pub fn printKeyboardList(allocator: std.mem.Allocator) !void {
     const match = CFDictionaryCreateMutable(kCFAllocatorDefault, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) orelse return error.OutOfMemory;
     defer CFRelease(match);
 
-    const up_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDDeviceUsagePageKey, kCFStringEncodingUTF8) orelse return error.OutOfMemory;
+    const up_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDPrimaryUsagePageKey, kCFStringEncodingUTF8) orelse return error.OutOfMemory;
     defer CFRelease(up_key);
-    const u_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDDeviceUsageKey, kCFStringEncodingUTF8) orelse return error.OutOfMemory;
+    const u_key = CFStringCreateWithCString(kCFAllocatorDefault, kIOHIDPrimaryUsageKey, kCFStringEncodingUTF8) orelse return error.OutOfMemory;
     defer CFRelease(u_key);
 
     var page_val: i32 = usage_page_generic_desktop;
@@ -202,8 +251,8 @@ pub fn printKeyboardList(allocator: std.mem.Allocator) !void {
     var printed: usize = 0;
     for (refs) |ref_const| {
         const dev: IOHIDDeviceRef = @constCast(ref_const);
-        const vendor = readU32Prop(dev, v_prop) orelse continue;
-        const product = readU32Prop(dev, p_prop) orelse continue;
+        const vendor = readU32Prop(dev, v_prop) orelse 0;
+        const product = readU32Prop(dev, p_prop) orelse 0;
 
         if (containsVendorProduct(seen.items, vendor, product)) continue;
         try seen.append(allocator, .{ .vendor = vendor, .product = product });

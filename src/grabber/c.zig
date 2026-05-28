@@ -175,6 +175,8 @@ pub extern fn IOHIDManagerCopyDevices(manager: IOHIDManagerRef) ?*anyopaque; // 
 pub extern fn CFSetGetCount(theSet: ?*anyopaque) CFIndex;
 pub extern fn CFSetGetValues(theSet: ?*anyopaque, values: [*]?*const anyopaque) void;
 pub extern fn IOHIDDeviceSetProperty(device: IOHIDDeviceRef, key: CFStringRef, property: CFTypeRef) Boolean;
+pub extern fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) CFTypeRef;
+pub extern fn IOHIDDeviceClose(device: IOHIDDeviceRef, options: u32) IOReturn;
 
 // Private IOHIDEventSystemClient API. These symbols are in
 // IOKit.framework but live in the private header

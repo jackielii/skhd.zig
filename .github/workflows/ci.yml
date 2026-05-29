@@ -102,7 +102,7 @@ jobs:
         security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: skhd-${{ matrix.optimize }}
         path: skhd-arm64-macos.tar.gz

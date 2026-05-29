@@ -261,15 +261,19 @@ jobs:
       env:
         VERSION: ${{ steps.release.outputs.version }}
         ARM64_SHA: ${{ steps.release.outputs.arm64_sha }}
+        X86_64_SHA: ${{ steps.release.outputs.x86_64_sha }}
       run: |
         cd homebrew-tap
 
-        # The cask's `url` interpolates `#{version}`, so bumping the version
-        # line automatically rewrites the download URL — no separate URL
-        # rewrite needed. Only one `sha256` line (arm64-only cask), so a plain
-        # substitution is unambiguous.
+        # The cask's `url` interpolates `#{version}` and `#{arch}`, so bumping
+        # the version line automatically rewrites the download URL — no
+        # separate URL rewrite needed. The dual-arch cask has per-arch sha256
+        # lines (`arm:` / `intel:`); anchor on the 64-hex value so we only
+        # touch the checksums, not the `arch arm: "arm64", intel: "x86_64"`
+        # stanza which shares the `arm:` / `intel:` keys.
         sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/skhd-zig.rb
-        sed -i "s/sha256 \".*\"/sha256 \"${ARM64_SHA}\"/" Casks/skhd-zig.rb
+        sed -i -E "s/(arm:[[:space:]]*)\"[0-9a-f]{64}\"/\1\"${ARM64_SHA}\"/" Casks/skhd-zig.rb
+        sed -i -E "s/(intel:[[:space:]]*)\"[0-9a-f]{64}\"/\1\"${X86_64_SHA}\"/" Casks/skhd-zig.rb
 
     - name: Commit and push
       run: |

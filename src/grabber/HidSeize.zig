@@ -172,6 +172,13 @@ pub fn start(self: *Self, mode: Mode) !void {
     if (self.running) return;
 
     c.IOHIDManagerRegisterInputValueCallback(self.manager, valueCallback, self);
+    // Per-device add/remove notifications. Logging-only — re-seize on
+    // wake is driven by PowerNotify so we don't double-trigger here.
+    // These fire after manager open: matching for the initial
+    // population and again for any device that re-enumerates (e.g.
+    // unplug/replug, or post-sleep stale-ref replacement).
+    c.IOHIDManagerRegisterDeviceMatchingCallback(self.manager, deviceMatchedCallback, self);
+    c.IOHIDManagerRegisterDeviceRemovalCallback(self.manager, deviceRemovedCallback, self);
     c.IOHIDManagerScheduleWithRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
 
     self.open_options = switch (mode) {
@@ -270,6 +277,51 @@ pub fn stop(self: *Self) void {
     c.IOHIDManagerUnscheduleFromRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
     self.running = false;
     log.info("released seize", .{});
+}
+
+fn deviceIdsLog(prefix: []const u8, device: c.IOHIDDeviceRef) void {
+    const vendor = deviceI32Property(device, c.kIOHIDVendorIDKey);
+    const product = deviceI32Property(device, c.kIOHIDProductIDKey);
+    // info: fires on every apply_rules and device add/remove, so it's
+    // compiled out of the release build (ReleaseFast keeps only warn+)
+    // and won't accumulate on users' machines. Visible in a ReleaseSafe
+    // build for "did our seized device disappear?" tracing.
+    log.info("{s}: vendor=0x{X:0>4} product=0x{X:0>4}", .{ prefix, vendor, product });
+}
+
+fn deviceI32Property(device: c.IOHIDDeviceRef, key_cstr: [*:0]const u8) u32 {
+    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, key_cstr, c.kCFStringEncodingUTF8);
+    if (key == null) return 0;
+    defer c.CFRelease(key);
+    const value = c.IOHIDDeviceGetProperty(device, key);
+    if (value == null) return 0;
+    var out: i32 = 0;
+    _ = c.CFNumberGetValue(value, c.kCFNumberSInt32Type, &out);
+    return @bitCast(out);
+}
+
+fn deviceMatchedCallback(
+    ctx: ?*anyopaque,
+    result: c.IOReturn,
+    sender: ?*anyopaque,
+    device: c.IOHIDDeviceRef,
+) callconv(.c) void {
+    _ = ctx;
+    _ = sender;
+    if (result != c.kIOReturnSuccess) return;
+    deviceIdsLog("device matched", device);
+}
+
+fn deviceRemovedCallback(
+    ctx: ?*anyopaque,
+    result: c.IOReturn,
+    sender: ?*anyopaque,
+    device: c.IOHIDDeviceRef,
+) callconv(.c) void {
+    _ = ctx;
+    _ = sender;
+    if (result != c.kIOReturnSuccess) return;
+    deviceIdsLog("device removed", device);
 }
 
 fn valueCallback(

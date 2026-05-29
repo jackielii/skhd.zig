@@ -22,6 +22,7 @@ const HidSeize = @import("HidSeize.zig");
 const HidSystem = @import("HidSystem.zig");
 const Ipc = @import("Ipc.zig");
 const KbState = @import("KbState.zig");
+const PowerNotify = @import("PowerNotify.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -261,6 +262,13 @@ const Daemon = struct {
     /// capped at vhidd_recovery_backoff_max_ms.
     vhidd_recovery_backoff_ms: u32 = 0,
 
+    /// System sleep/wake hook. On wake the IOHIDManager's device refs
+    /// can be silently invalidated; without this the grabber sits in
+    /// CFRunLoop forever and the user's keyboard appears dead. The
+    /// wake handler re-runs applyLatestRules which tears down and
+    /// rebuilds vhidd + seize against the post-wake device set.
+    power_notify: ?*PowerNotify = null,
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, profile: bool) !Daemon {
         try ensureSocketParentDir(socket_path);
         // Stale socket from a crashed previous run: bind() would EADDRINUSE.
@@ -320,6 +328,10 @@ const Daemon = struct {
     }
 
     pub fn deinit(self: *Daemon) void {
+        if (self.power_notify) |pn| {
+            pn.deinit();
+            self.power_notify = null;
+        }
         self.stopConsoleUserTimer();
         self.cancelVhiddRecoveryTimer();
         self.teardownSeize();
@@ -377,6 +389,15 @@ const Daemon = struct {
             return;
         };
         self.startConsoleUserTimer();
+        // Best-effort: if power-notification registration fails the
+        // grabber still works in steady state — only the post-wake
+        // recovery path is unavailable. Kept at warn (fires once, only
+        // on failure) because a disarmed recovery path is worth knowing
+        // about even in a release build.
+        self.power_notify = PowerNotify.init(self.allocator, onSystemWake, self) catch |err| blk: {
+            log.warn("PowerNotify init failed ({s}); post-wake auto-reseize disabled", .{@errorName(err)});
+            break :blk null;
+        };
 
         log.info("listening on {s}", .{self.socket_path});
 
@@ -533,6 +554,23 @@ const Daemon = struct {
             if (s.uid == uid) return s;
         }
         return null;
+    }
+
+    /// Called from PowerNotify when the system finishes waking. The
+    /// IOHIDManager opened before sleep can be holding stale device
+    /// refs; re-running applyLatestRules tears down + rebuilds vhidd
+    /// + seize against the post-wake device set. Same code path as a
+    /// fresh agent apply_rules so we don't carry a parallel recovery
+    /// implementation.
+    fn onSystemWake(ctx: ?*anyopaque) void {
+        const self: *Daemon = @ptrCast(@alignCast(ctx orelse return));
+        // info: fires on every wake (several times/day), so it stays out
+        // of release logs (ReleaseFast compiles out < warn). Visible in
+        // a ReleaseSafe debug build if the post-wake path needs tracing.
+        log.info("post-wake: re-applying current rules to refresh IOHIDManager device refs", .{});
+        self.applyLatestRules() catch |err| {
+            log.warn("post-wake applyLatestRules failed: {s}", .{@errorName(err)});
+        };
     }
 
     /// (Re)build vhidd / seize / engine slots from the active

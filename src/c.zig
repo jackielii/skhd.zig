@@ -199,6 +199,8 @@ pub extern fn CFStringGetCString(theString: CFStringRef, buffer: [*]u8, bufferSi
 pub extern fn CFStringGetMaximumSizeForEncoding(length: CFIndex, encoding: CFStringEncoding) CFIndex;
 
 pub extern fn CFDataGetBytePtr(theData: CFDataRef) [*]const UInt8;
+pub extern fn CFDataGetLength(theData: CFDataRef) CFIndex;
+pub extern fn CFDataGetTypeID() CFTypeID;
 
 pub extern fn CFBooleanGetTypeID() CFTypeID;
 pub extern fn CFBooleanGetValue(boolean: CFBooleanRef) Boolean;

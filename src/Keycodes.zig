@@ -203,32 +203,63 @@ const Keycodes = @This();
 pub fn init(alloc: std.mem.Allocator) !Keycodes {
     var self =  Keycodes{ .alloc = alloc };
 
+    // === DIAGNOSTIC INSTRUMENTATION (issue #46 — Intel SIGBUS) ===
+    // Every log goes out at `warn` so it prints even in ReleaseFast, and
+    // each line is emitted BEFORE its operation so the last line that
+    // appears in the user's output names the call that faulted. Remove
+    // this block once the faulting step is identified.
+    log.warn("[#46] step1: TISCopyCurrentASCIICapableKeyboardLayoutInputSource()", .{});
     const keyboard = c.TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
-    const uchr: c.CFDataRef = @ptrCast(c.TISGetInputSourceProperty(keyboard, c.kTISPropertyUnicodeKeyLayoutData));
+    log.warn("[#46] step1 done: keyboard=0x{x}", .{@intFromPtr(keyboard)});
     defer c.CFRelease(keyboard);
 
-    const keyboard_layout: ?*c.UCKeyboardLayout = @constCast(@ptrCast(@alignCast(c.CFDataGetBytePtr(uchr))));
+    log.warn("[#46] step2: TISGetInputSourceProperty(kTISPropertyUnicodeKeyLayoutData)", .{});
+    const uchr_raw = c.TISGetInputSourceProperty(keyboard, c.kTISPropertyUnicodeKeyLayoutData);
+    log.warn("[#46] step2 done: uchr=0x{x}", .{@intFromPtr(uchr_raw)});
+    const uchr: c.CFDataRef = @ptrCast(uchr_raw);
+
+    if (uchr == null) {
+        log.err("[#46] uchr (UnicodeKeyLayoutData) is null", .{});
+        return error.@"Failed to get keyboard layout";
+    }
+
+    // Confirm `uchr` really is a CFData and inspect its size. If the
+    // type id doesn't match, the property gave us something other than
+    // 'uchr' layout bytes and UCKeyTranslate would walk off the end.
+    log.warn("[#46] step3: CFGetTypeID(uchr)={} (CFData typeid={})", .{ c.CFGetTypeID(uchr), c.CFDataGetTypeID() });
+    log.warn("[#46] step3b: CFDataGetLength(uchr)={}", .{c.CFDataGetLength(uchr)});
+
+    log.warn("[#46] step4: CFDataGetBytePtr(uchr)", .{});
+    const layout_bytes = c.CFDataGetBytePtr(uchr);
+    log.warn("[#46] step4 done: layout_bytes=0x{x}", .{@intFromPtr(layout_bytes)});
+
+    const keyboard_layout: ?*c.UCKeyboardLayout = @constCast(@ptrCast(@alignCast(layout_bytes)));
     if (keyboard_layout == null) {
         return error.@"Failed to get keyboard layout";
     }
+
+    const kbd_type = c.LMGetKbdType();
+    log.warn("[#46] step5: LMGetKbdType()={}", .{kbd_type});
 
     var len: c.UniCharCount = 0;
     var chars = [_]c.UniChar{0} ** 255;
     var state: c.UInt32 = 0;
 
-    for (layout_dependent_keycodes) |keycode| {
+    for (layout_dependent_keycodes, 0..) |keycode, idx| {
+        log.warn("[#46] step6: UCKeyTranslate idx={} keycode={}", .{ idx, keycode });
         const ret = c.UCKeyTranslate(
             keyboard_layout,
             @intCast(keycode),
             c.kUCKeyActionDisplay,
             0,
-            c.LMGetKbdType(),
+            kbd_type,
             c.kUCKeyTranslateNoDeadKeysMask,
             &state,
             chars.len,
             &len,
             &chars,
         );
+        log.warn("[#46] step6 done: idx={} ret={} len={}", .{ idx, ret, len });
         if (ret == c.noErr and len > 0) {
             const key_cfstring = c.CFStringCreateWithCharacters(c.kCFAllocatorDefault, &chars, @intCast(len));
             if (key_cfstring == null) {

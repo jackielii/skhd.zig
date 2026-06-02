@@ -26,6 +26,47 @@ pub const Match = struct {
     product: u32,
 };
 
+/// Internal-bus transports an Apple FIFO/SPI built-in keyboard reports.
+/// External keyboards are "USB" or "Bluetooth", so scoping the built-in
+/// match to these keeps externals out. macOS reports the built-in as
+/// "FIFO" on most Apple Silicon Macs and "SPI" on some — match both.
+const builtin_transports = [_][:0]const u8{ "FIFO", "SPI" };
+
+/// CoreFoundation-free description of an alias's device-matching, split
+/// out so the (vendor,product) → match-keys decision is unit-testable
+/// without a live IOHIDManager. `setMatches` turns this into the actual
+/// CFDictionaries (always with the keyboard-usage constraint).
+///
+/// A `null` vendor/product is omitted from the dict. When `transports`
+/// is non-empty, `setMatches` emits one dict per transport (the manager
+/// OR-matches them) instead of a VID/PID dict.
+const Predicate = struct {
+    vendor: ?u32,
+    product: ?u32,
+    /// Transport strings to match (e.g. {"FIFO","SPI"}). Empty for an
+    /// explicit external device, which matches on VID/PID instead.
+    transports: []const [:0]const u8,
+};
+
+/// Decide what an alias matches.
+///
+/// A FIFO/SPI built-in keyboard (vendor==0 and product==0) exposes no
+/// VendorID/ProductID in IOKit, so it can't be matched on VID/PID.
+/// IOHIDManager device-matching also ignores the `Built-In` key, so we
+/// scope the built-in to its internal-bus transports; external
+/// USB/Bluetooth keyboards then never enter the match.
+///
+/// A real (vendor,product) alias targets that exact external device, so
+/// it matches on VID/PID and sets no transport constraint.
+fn matchPredicate(m: Match) Predicate {
+    const is_fifo_builtin = m.vendor == 0 and m.product == 0;
+    return .{
+        .vendor = if (is_fifo_builtin) null else m.vendor,
+        .product = if (is_fifo_builtin) null else m.product,
+        .transports = if (is_fifo_builtin) &builtin_transports else &.{},
+    };
+}
+
 /// One HID input value, decoded from `IOHIDValueRef`. Only what the
 /// pass-through path actually needs.
 pub const Event = struct {
@@ -87,8 +128,63 @@ pub fn deinit(self: *Self) void {
     self.allocator.destroy(self);
 }
 
-/// Build a CFArray of dictionaries, one per match, and apply it as
-/// the manager's matching filter. Must be called before `start`.
+/// Set one i32-valued key on a matching dict, creating and releasing
+/// the transient CFString key and CFNumber value. No-ops if a CF
+/// allocation fails (not expected for these tiny objects).
+fn setMatchKey(dict: c.CFMutableDictionaryRef, key_cstr: [*:0]const u8, value: i32) void {
+    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, key_cstr, c.kCFStringEncodingUTF8);
+    if (key == null) return;
+    defer c.CFRelease(key);
+    var v: i32 = value;
+    const num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &v);
+    if (num == null) return;
+    defer c.CFRelease(num);
+    c.CFDictionarySetValue(dict, key, num);
+}
+
+/// Set one string-valued key on a matching dict (e.g. Transport="FIFO"),
+/// creating and releasing the transient CFString key and value. `value`
+/// must be a NUL-terminated UTF-8 literal.
+fn setMatchStrKey(dict: c.CFMutableDictionaryRef, key_cstr: [*:0]const u8, value: [*:0]const u8) void {
+    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, key_cstr, c.kCFStringEncodingUTF8);
+    if (key == null) return;
+    defer c.CFRelease(key);
+    const val = c.CFStringCreateWithCString(c.kCFAllocatorDefault, value, c.kCFStringEncodingUTF8);
+    if (val == null) return;
+    defer c.CFRelease(val);
+    c.CFDictionarySetValue(dict, key, val);
+}
+
+/// Create one keyboard-usage matching dict, add whichever of
+/// vendor/product/transport are supplied, and append it to `dicts`. A
+/// FIFO/SPI built-in alias contributes one dict per transport (no
+/// VID/PID); an external alias contributes a single VID/PID dict.
+fn appendMatchDict(
+    dicts: c.CFMutableArrayRef,
+    vendor: ?u32,
+    product: ?u32,
+    transport: ?[:0]const u8,
+) !void {
+    const dict = c.CFDictionaryCreateMutable(
+        c.kCFAllocatorDefault,
+        4,
+        &c.kCFTypeDictionaryKeyCallBacks,
+        &c.kCFTypeDictionaryValueCallBacks,
+    );
+    if (dict == null) return error.CFDictionaryCreateFailed;
+    defer c.CFRelease(dict);
+
+    if (vendor) |v| setMatchKey(dict, c.kIOHIDVendorIDKey, @intCast(v));
+    if (product) |p| setMatchKey(dict, c.kIOHIDProductIDKey, @intCast(p));
+    if (transport) |t| setMatchStrKey(dict, c.kIOHIDTransportKey, t.ptr);
+    setMatchKey(dict, c.kIOHIDPrimaryUsagePageKey, c.kHIDPage_GenericDesktop);
+    setMatchKey(dict, c.kIOHIDPrimaryUsageKey, c.kHIDUsage_GD_Keyboard);
+
+    c.CFArrayAppendValue(dicts, dict);
+}
+
+/// Build a CFArray of dictionaries, one or more per match, and apply it
+/// as the manager's matching filter. Must be called before `start`.
 ///
 /// We deliberately constrain to (Generic Desktop / Keyboard) only.
 /// Apple's built-in MacBook keyboard exposes other HID services on
@@ -108,65 +204,29 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         self.owned_matches = &.{};
     }
 
-    const dicts = c.CFArrayCreateMutable(c.kCFAllocatorDefault, @intCast(matches.len), &c.kCFTypeArrayCallBacks);
+    // Capacity 0 = unbounded: a built-in alias expands to one dict per
+    // transport, so the dict count can exceed matches.len.
+    const dicts = c.CFArrayCreateMutable(c.kCFAllocatorDefault, 0, &c.kCFTypeArrayCallBacks);
     if (dicts == null) return error.CFArrayCreateFailed;
     defer c.CFRelease(dicts);
 
     for (matches) |m| {
-        // Partial-zero (one of vendor/product is 0, the other isn't) takes
-        // the non-broad branch with a literal VendorID=0 or ProductID=0 in
-        // the matching dict — which matches no real device. Warn loudly so
-        // misconfigured aliases don't fail silently.
+        // Partial-zero (one of vendor/product is 0, the other isn't) is
+        // neither a FIFO built-in (both zero) nor a real external device
+        // (both non-zero) — it matches nothing. Warn so misconfigured
+        // aliases don't fail silently.
         if ((m.vendor == 0) != (m.product == 0)) {
             log.warn("device alias with partial-zero VID/PID (vendor=0x{x}, product=0x{x}) will match nothing — use both zero for FIFO built-in keyboards, or both non-zero for an external device", .{ m.vendor, m.product });
         }
 
-        const dict = c.CFDictionaryCreateMutable(
-            c.kCFAllocatorDefault,
-            4,
-            &c.kCFTypeDictionaryKeyCallBacks,
-            &c.kCFTypeDictionaryValueCallBacks,
-        );
-        if (dict == null) return error.CFDictionaryCreateFailed;
-        defer c.CFRelease(dict);
-
-        // FIFO-transport built-in keyboards don't expose VendorID/ProductID
-        // in IOKit — including them with value 0 requires the property to
-        // *exist*, so 0 devices match. Omit when both are zero; the
-        // usage filter keeps us to keyboards. Un-seize the VHIDD in start().
-        if (m.vendor != 0 or m.product != 0) {
-            const vendor_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDVendorIDKey, c.kCFStringEncodingUTF8);
-            defer c.CFRelease(vendor_key);
-            const product_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDProductIDKey, c.kCFStringEncodingUTF8);
-            defer c.CFRelease(product_key);
-
-            var vendor: i32 = @intCast(m.vendor);
-            var product: i32 = @intCast(m.product);
-            const vendor_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &vendor);
-            defer c.CFRelease(vendor_num);
-            const product_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &product);
-            defer c.CFRelease(product_num);
-
-            c.CFDictionarySetValue(dict, vendor_key, vendor_num);
-            c.CFDictionarySetValue(dict, product_key, product_num);
+        const pred = matchPredicate(m);
+        if (pred.transports.len > 0) {
+            for (pred.transports) |t| {
+                try appendMatchDict(dicts, null, null, t);
+            }
+        } else {
+            try appendMatchDict(dicts, pred.vendor, pred.product, null);
         }
-
-        const usage_page_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsagePageKey, c.kCFStringEncodingUTF8);
-        defer c.CFRelease(usage_page_key);
-        const usage_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDPrimaryUsageKey, c.kCFStringEncodingUTF8);
-        defer c.CFRelease(usage_key);
-
-        var usage_page: i32 = c.kHIDPage_GenericDesktop;
-        var usage: i32 = c.kHIDUsage_GD_Keyboard;
-        const usage_page_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &usage_page);
-        defer c.CFRelease(usage_page_num);
-        const usage_num = c.CFNumberCreate(c.kCFAllocatorDefault, c.kCFNumberSInt32Type, &usage);
-        defer c.CFRelease(usage_num);
-
-        c.CFDictionarySetValue(dict, usage_page_key, usage_page_num);
-        c.CFDictionarySetValue(dict, usage_key, usage_num);
-
-        c.CFArrayAppendValue(dicts, dict);
     }
 
     c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
@@ -227,43 +287,14 @@ pub fn start(self: *Self, mode: Mode) !void {
         log.warn("matching dictionary captured 0 devices — vendor/product mismatch?", .{});
     }
 
-    // Broad usage-only match (vendor/product both zero) also captures
-    // the Karabiner VHIDD. Un-seize any device with a non-zero VendorID
-    // to avoid a feedback loop — we inject *through* the VHIDD.
-    const has_broad_match = for (self.owned_matches) |m| {
-        if (m.vendor == 0 and m.product == 0) break true;
-    } else false;
-
-    if (matched) |s| {
-        if (has_broad_match) un_seize: {
-            const n: usize = @intCast(c.CFSetGetCount(s));
-            if (n == 0) break :un_seize;
-            const buf = self.allocator.alloc(?*const anyopaque, n) catch {
-                log.warn("un-seize buffer alloc failed; VHIDD may stay seized", .{});
-                break :un_seize;
-            };
-            defer self.allocator.free(buf);
-            c.CFSetGetValues(s, buf.ptr);
-
-            const vid_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDVendorIDKey, c.kCFStringEncodingUTF8);
-            defer if (vid_key) |k| c.CFRelease(k);
-
-            for (buf) |raw| {
-                const dev: c.IOHIDDeviceRef = @constCast(raw);
-                if (vid_key) |k| {
-                    const prop = c.IOHIDDeviceGetProperty(dev, k);
-                    if (prop != null) {
-                        var vid: i32 = 0;
-                        if (c.CFNumberGetValue(@ptrCast(prop), c.kCFNumberSInt32Type, @ptrCast(&vid)) != 0 and vid != 0) {
-                            log.debug("un-seizing device with VendorID=0x{x} (not the target)", .{@as(u32, @bitCast(vid))});
-                            _ = c.IOHIDDeviceClose(dev, self.open_options);
-                        }
-                    }
-                }
-            }
-        }
-        c.CFRelease(s);
-    }
+    // No post-match filtering needed: the matching dicts are exact. The
+    // (0,0) built-in matches only Transport ∈ {FIFO,SPI} keyboards (the
+    // internal one); external keyboards report USB/Bluetooth, and the
+    // Karabiner VHIDD we inject into exposes no Transport property at all
+    // (verified), so none of them can match. Explicit (vendor,product)
+    // aliases match only their own device. So every seized device is one
+    // we were asked to seize.
+    if (matched) |s| c.CFRelease(s);
 
     if (mode == .seize) {
         self.disableCapsLockDelayOnMatches(self.owned_matches);
@@ -399,4 +430,98 @@ fn valueCallback(
         .usage = usage,
         .pressed = int_value != 0,
     });
+}
+
+const testing = std.testing;
+
+test "matchPredicate: FIFO built-in (0,0) scopes to internal transports, omits VID/PID" {
+    // The bug this guards: a (0,0) alias must NOT match every keyboard by
+    // usage alone (which seized external keyboards + the VHIDD). It scopes
+    // to the internal-bus transports so IOKit only offers the built-in.
+    const p = matchPredicate(.{ .vendor = 0, .product = 0 });
+    try testing.expectEqual(@as(?u32, null), p.vendor);
+    try testing.expectEqual(@as(?u32, null), p.product);
+    try testing.expectEqualSlices([:0]const u8, &builtin_transports, p.transports);
+}
+
+test "matchPredicate: external device matches VID/PID, no transport constraint" {
+    // NEO ERGO WIRED — the keyboard that was wrongly seized. An explicit
+    // (vendor,product) alias targets that exact device and sets no
+    // transport (it is, by definition, external).
+    const p = matchPredicate(.{ .vendor = 0x4e45, .product = 0x4552 });
+    try testing.expectEqual(@as(?u32, 0x4e45), p.vendor);
+    try testing.expectEqual(@as(?u32, 0x4552), p.product);
+    try testing.expectEqual(@as(usize, 0), p.transports.len);
+}
+
+// Live check that the production (0,0) match excludes externals on real
+// hardware — the thing a unit test can't assert. Gated behind
+// SKHD_HID_LIVE=1 (CI has no keyboard); run with an external attached:
+//
+//     SKHD_HID_LIVE=1 zig build test
+//
+// Opens in observe mode (no seize, so no root) and inspects the match
+// alone: a non-zero VendorID in the matched set means the transport
+// scope failed here. (Built-In can't be used — IOHIDManager matching
+// ignores it; only Transport is honored.)
+test "live: (0,0) match excludes external keyboards" {
+    if (std.c.getenv("SKHD_HID_LIVE") == null) return error.SkipZigTest;
+
+    const noop = struct {
+        fn cb(_: ?*anyopaque, _: Event) void {}
+    };
+    const self = try init(testing.allocator, noop.cb, null);
+    defer self.deinit();
+
+    try self.setMatches(&.{.{ .vendor = 0, .product = 0 }});
+
+    self.open_options = c.kIOHIDOptionsTypeNone;
+    const r = c.IOHIDManagerOpen(self.manager, self.open_options);
+    if (r != c.kIOReturnSuccess) {
+        std.debug.print("IOHIDManagerOpen(observe) failed: 0x{X:0>8} — cannot verify\n", .{@as(u32, @bitCast(r))});
+        return error.CannotVerify;
+    }
+    defer _ = c.IOHIDManagerClose(self.manager, self.open_options);
+
+    const matched = c.IOHIDManagerCopyDevices(self.manager) orelse {
+        std.debug.print("no devices matched — cannot verify (keyboard connected?)\n", .{});
+        return error.CannotVerify;
+    };
+    defer c.CFRelease(matched);
+
+    const n: usize = @intCast(c.CFSetGetCount(matched));
+    try testing.expect(n > 0); // The match must still find the internal keyboard.
+
+    const buf = try testing.allocator.alloc(?*const anyopaque, n);
+    defer testing.allocator.free(buf);
+    c.CFSetGetValues(matched, buf.ptr);
+
+    const vid_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, c.kIOHIDVendorIDKey, c.kCFStringEncodingUTF8);
+    defer if (vid_key) |k| c.CFRelease(k);
+
+    var builtin_count: usize = 0;
+    var external_count: usize = 0;
+    for (buf) |raw| {
+        const dev: c.IOHIDDeviceRef = @constCast(raw);
+        var vid: i32 = 0;
+        if (vid_key) |k| {
+            const prop = c.IOHIDDeviceGetProperty(dev, k);
+            if (prop != null) {
+                _ = c.CFNumberGetValue(@ptrCast(prop), c.kCFNumberSInt32Type, @ptrCast(&vid));
+            }
+        }
+        if (vid == 0) {
+            builtin_count += 1;
+        } else {
+            external_count += 1;
+            std.debug.print("UNEXPECTED: (0,0) match captured a non-built-in device VendorID=0x{x}\n", .{@as(u32, @bitCast(vid))});
+        }
+    }
+    std.debug.print("(0,0) match -> {d} built-in (VID-less), {d} external\n", .{ builtin_count, external_count });
+
+    // The fix: a VID-less built-in matched, and nothing with a real
+    // VendorID did. external_count > 0 means the transport scope didn't
+    // hold on this machine and the seize would leak onto externals.
+    try testing.expectEqual(@as(usize, 0), external_count);
+    try testing.expect(builtin_count > 0);
 }

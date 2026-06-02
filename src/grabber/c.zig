@@ -152,6 +152,12 @@ pub const kIOHIDVendorIDKey: [*:0]const u8 = "VendorID";
 pub const kIOHIDProductIDKey: [*:0]const u8 = "ProductID";
 pub const kIOHIDPrimaryUsagePageKey: [*:0]const u8 = "PrimaryUsagePage";
 pub const kIOHIDPrimaryUsageKey: [*:0]const u8 = "PrimaryUsage";
+/// Matching key for the device's bus transport ("USB", "Bluetooth",
+/// "FIFO", "SPI", ...). Unlike "Built-In" (which IOHIDManager matching
+/// silently ignores), Transport *is* honored by device-matching, so we
+/// use it to scope the VID/PID-less FIFO built-in to internal-bus
+/// keyboards and keep external USB/Bluetooth keyboards out of the match.
+pub const kIOHIDTransportKey: [*:0]const u8 = "Transport";
 /// Per-device property: how long (in ms) Apple's keyboard firmware
 /// waits before treating a caps_lock press as a toggle. Default ~150.
 /// Setting it to 0 disables the firmware-level toggle entirely so
@@ -175,7 +181,6 @@ pub extern fn IOHIDManagerCopyDevices(manager: IOHIDManagerRef) ?*anyopaque; // 
 pub extern fn CFSetGetCount(theSet: ?*anyopaque) CFIndex;
 pub extern fn CFSetGetValues(theSet: ?*anyopaque, values: [*]?*const anyopaque) void;
 pub extern fn IOHIDDeviceSetProperty(device: IOHIDDeviceRef, key: CFStringRef, property: CFTypeRef) Boolean;
-pub extern fn IOHIDDeviceClose(device: IOHIDDeviceRef, options: u32) IOReturn;
 
 // Private IOHIDEventSystemClient API. These symbols are in
 // IOKit.framework but live in the private header

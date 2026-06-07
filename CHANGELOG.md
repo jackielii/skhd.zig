@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.7...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.8...HEAD)
+
+## [0.1.8](https://github.com/jackielii/skhd.zig/compare/v0.1.7...v0.1.8) - 2026-06-07
+
+### Fixed
+- **`skhd --status` now reports "Hotkeys functional" reliably.** The status command used to print `Unknown (no recent event-tap activity in log)` even when hotkeys were working fine. It never actually checked the event tap — it *inferred* health from process uptime (assuming "alive >30s ⇒ working") and by scraping an `Event tap created successfully` line out of `~/Library/Logs/skhd.log`. But that success line is an `info`-level log, which the ReleaseFast release compiles out, so on an installed build the log scan could never confirm success; the uptime guess was the only positive signal, leaving a ~30-second window after every (re)start where a perfectly healthy daemon reported `Unknown`. Status now queries the window server directly via `CGGetEventTapList`, filtered to the daemon's PID, and reads the tap's live `enabled` flag — no timing window, no log scraping, and identical behavior across Debug/ReleaseSafe/ReleaseFast builds. A new `disabled` state distinguishes a registered-but-disabled tap from one that was never created (accessibility denied), and the separate Input Monitoring check still covers the case where the tap is enabled but events are suppressed by a stale TCC grant.
+
+### Added
+- **`skhd --status` now reports skhd-grabber health when your config needs it.** If your config has block-form `.remap` (tap-hold) rules targeting a connected device — the rules that require the system grabber — `--status` now shows a compact grabber block: whether the grabber is required (and for which device), installed, running, and whether its IPC socket is reachable, with a pointer to `--grabber-status` for the full breakdown. Configs that only use colon-form `.remap` (handled by `hidutil`, no grabber needed) or no remap rules at all stay quiet. The "is the grabber needed here" determination is now shared with the `--install-service` smart prompt so both agree.
 
 ## [0.1.7](https://github.com/jackielii/skhd.zig/compare/v0.1.6...v0.1.7) - 2026-05-29
 

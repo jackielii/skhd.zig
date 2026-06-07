@@ -1919,8 +1919,12 @@ test "load directive shares aliases with included files" {
     var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
 
+    // Include the PID, not just random_seed: `zig build test` runs this same
+    // test in several test binaries concurrently and hands them all the same
+    // --seed, so a seed-only path collides across processes and they race on
+    // the shared /tmp file (one's deinit deletes it mid-load in another).
     const test_id = std.testing.random_seed;
-    const include_path = try std.fmt.allocPrint(alloc, "/tmp/skhd_alias_include_{d}.skhdrc", .{test_id});
+    const include_path = try std.fmt.allocPrint(alloc, "/tmp/skhd_alias_include_{d}_{d}.skhdrc", .{ test_id, std.c.getpid() });
     defer alloc.free(include_path);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, include_path) catch {};
 

@@ -1583,10 +1583,14 @@ test "hot reload refresh is deferred until maintenance turn" {
     hotload_refresh_pending.store(false, .release);
     defer hotload_refresh_pending.store(false, .release);
 
+    // PID-qualified: this test is compiled into multiple test binaries that
+    // `zig build test` runs concurrently with the same --seed, so a
+    // seed-only /tmp path would race across processes.
     const test_id = std.testing.random_seed;
-    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_{d}.skhdrc", .{test_id});
+    const pid = std.c.getpid();
+    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_{d}_{d}.skhdrc", .{ test_id, pid });
     defer allocator.free(config_path);
-    const include_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_include_{d}.skhdrc", .{test_id});
+    const include_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_hotload_refresh_include_{d}_{d}.skhdrc", .{ test_id, pid });
     defer allocator.free(include_path);
 
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = "cmd - a : echo initial" });

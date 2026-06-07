@@ -302,7 +302,7 @@ test "Config file resolution" {
     const io = std.testing.io;
 
     // Test getting config file
-    const getConfigFile = @import("main.zig").getConfigFile;
+    const getConfigFile = @import("utils.zig").getConfigFile;
 
     // This should resolve to a path based on environment
     const config_path = try getConfigFile(allocator, io, "skhdrc");

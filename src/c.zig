@@ -353,6 +353,32 @@ pub extern fn CGEventTapCreate(
 ) CFMachPortRef;
 pub extern fn CGEventTapEnable(tap: CFMachPortRef, enable: bool) void;
 pub extern fn CGEventTapIsEnabled(tap: CFMachPortRef) bool;
+
+// CGGetEventTapList enumerates every active event tap in the current
+// session along with the PID that created it and its live enabled state.
+// Used by `--status` to verify the daemon's tap directly instead of
+// inferring health from process uptime / log scraping. Field layout
+// matches <CoreGraphics/CGEventTypes.h> CGEventTapInformation; Zig's
+// extern struct honours the C ABI (note the 4-byte pad before the
+// 8-byte-aligned eventsOfInterest).
+pub const CGEventTapID = u32;
+pub const CGEventTapInformation = extern struct {
+    eventTapID: CGEventTapID,
+    tapPoint: CGEventTapLocation,
+    options: CGEventTapOptions,
+    eventsOfInterest: CGEventMask,
+    tappingProcess: pid_t,
+    processBeingTapped: pid_t,
+    enabled: bool,
+    minUsecLatency: f32,
+    avgUsecLatency: f32,
+    maxUsecLatency: f32,
+};
+pub extern fn CGGetEventTapList(
+    maxNumberOfTaps: u32,
+    tapList: ?[*]CGEventTapInformation,
+    eventTapCount: *u32,
+) CGError;
 pub extern fn CGEventSourceCreate(stateID: CGEventSourceStateID) CGEventSourceRef;
 pub extern fn CGEventSourceFlagsState(stateID: CGEventSourceStateID) CGEventFlags;
 pub extern fn CGEnableEventStateCombining(combineState: bool) CGError;

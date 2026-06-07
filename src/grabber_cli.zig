@@ -11,6 +11,10 @@ const build_options = @import("build_options");
 const c = @import("c.zig");
 const protocol = @import("grabber_protocol");
 const Client = @import("agent_grabber_client.zig").Client;
+const utils = @import("utils.zig");
+const Mappings = @import("Mappings.zig");
+const Parser = @import("Parser.zig");
+const DeviceCheck = @import("DeviceCheck.zig");
 
 /// The Karabiner-DriverKit-VirtualHIDDevice version skhd-grabber's IPC has
 /// been validated against. Set in build.zig (`karabiner_dext_version`),
@@ -332,6 +336,132 @@ fn renderGrabberPlist(allocator: std.mem.Allocator, grabber_path: []const u8) ![
 /// users who already installed the grabber separately.
 pub fn isGrabberInstalled(io: std.Io) bool {
     return fileExists(io, grabber_plist_path);
+}
+
+/// Whether the user's config requires the system grabber on THIS machine.
+pub const GrabberNeed = union(enum) {
+    /// Config has no block-form `.remap` (tap-hold) rules — the grabber is
+    /// unnecessary. Colon-form `.remap` runs through hidutil, not the
+    /// grabber, so it does not count here.
+    no_rules,
+    /// Tap-hold rules exist but none of their target devices are currently
+    /// connected, so the grabber isn't needed on this machine (e.g. a
+    /// config shared between a laptop and a desktop).
+    no_device,
+    /// The grabber is required. Payload is an owned dupe of the first
+    /// connected target device's alias name — caller frees it.
+    needed: []const u8,
+};
+
+/// Parse the user's skhd config and decide whether the system grabber is
+/// required here. Shared by `--install-service`'s smart prompt and
+/// `--status` so both agree on "is the grabber needed". Returns an error
+/// only when the config can't be resolved/read/parsed — callers treat that
+/// as "can't tell, skip the grabber step".
+pub fn analyzeGrabberNeed(allocator: std.mem.Allocator, io: std.Io) !GrabberNeed {
+    const config_path = try utils.getConfigFile(allocator, io, "skhdrc");
+    defer allocator.free(config_path);
+
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1 << 20));
+    defer allocator.free(content);
+
+    return analyzeGrabberNeedFromContent(allocator, io, content, config_path);
+}
+
+/// Core of `analyzeGrabberNeed`, split out so tests can drive it with config
+/// text directly instead of the user's real `~/.config/skhd/skhdrc`.
+fn analyzeGrabberNeedFromContent(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    content: []const u8,
+    config_path: []const u8,
+) !GrabberNeed {
+    var mappings = try Mappings.init(allocator, io);
+    defer mappings.deinit();
+
+    var parser = try Parser.init(allocator, io);
+    defer parser.deinit();
+
+    try parser.parseWithPath(&mappings, content, config_path);
+    try parser.processLoadDirectives(&mappings);
+
+    if (mappings.tapholds.items.len == 0) return .no_rules;
+
+    // Filter by device presence so a config shared between a laptop and a
+    // Mac Studio doesn't force the grabber on the machine without the
+    // targeted keyboard attached.
+    for (mappings.tapholds.items) |th| {
+        const alias = mappings.device_aliases.get(th.device_alias) orelse continue;
+        if (DeviceCheck.isPresent(alias.vendor, alias.product)) {
+            return .{ .needed = try allocator.dupe(u8, th.device_alias) };
+        }
+    }
+    return .no_device;
+}
+
+test "analyzeGrabberNeed: no tap-hold rules → no_rules" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const cfg = "cmd - a : echo hi\n";
+    const need = try analyzeGrabberNeedFromContent(allocator, io, cfg, "test.skhdrc");
+    try std.testing.expect(need == .no_rules);
+}
+
+test "analyzeGrabberNeed: tap-hold on absent device → no_device" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // 0xFFFF/0xFFFF is not a real vendor/product, so DeviceCheck.isPresent
+    // returns false and the grabber isn't needed on this (any) machine.
+    const cfg =
+        \\.device phantom { vendor: 0xFFFF, product: 0xFFFF }
+        \\.remap caps_lock [device phantom] {
+        \\    tap: escape
+        \\    hold: lctrl
+        \\}
+        \\
+    ;
+    const need = try analyzeGrabberNeedFromContent(allocator, io, cfg, "test.skhdrc");
+    defer switch (need) {
+        .needed => |alias| allocator.free(alias),
+        else => {},
+    };
+    try std.testing.expect(need == .no_device);
+}
+
+/// True iff the grabber's IPC socket is reachable and completes a protocol
+/// handshake. The definitive "the grabber is actually serving" check.
+fn grabberIpcReachable(allocator: std.mem.Allocator, io: std.Io) bool {
+    var client = Client.connect(allocator, io, protocol.default_socket_path) catch return false;
+    defer client.close();
+    client.hello() catch return false;
+    client.bye() catch {};
+    return true;
+}
+
+/// Compact grabber health block for `--status`, printed only when
+/// `analyzeGrabberNeed` reports the grabber is required. Full detail
+/// (dext, VHIDD daemon, protocol version) lives in `--grabber-status`;
+/// this is the at-a-glance version, mirroring the main status lines.
+pub fn printGrabberStatusSummary(allocator: std.mem.Allocator, io: std.Io, device_alias: []const u8) void {
+    std.debug.print("\n  Grabber required:     Yes (tap-hold rules on connected device '{s}')\n", .{device_alias});
+
+    const installed = isGrabberInstalled(io);
+    std.debug.print("  Grabber installed:    {s}\n", .{if (installed)
+        "Yes"
+    else
+        "No (run: sudo skhd --install-grabber)"});
+
+    const running = processRunning(allocator, io, "skhd-grabber") catch false;
+    std.debug.print("  Grabber running:      {s}\n", .{if (running)
+        "Yes"
+    else
+        "No (sudo launchctl kickstart -k system/com.jackielii.skhd.grabber)"});
+
+    const reachable = grabberIpcReachable(allocator, io);
+    std.debug.print("  Grabber IPC socket:   {s}\n", .{if (reachable)
+        "Reachable"
+    else
+        "Not reachable (run: skhd --grabber-status for detail)"});
 }
 
 /// Re-exec ourselves under sudo with `--install-grabber`. Sudo

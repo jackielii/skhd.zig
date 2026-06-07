@@ -6,12 +6,11 @@ const c = @import("c.zig");
 const DeviceCheck = @import("DeviceCheck.zig");
 const grabber_cli = @import("grabber_cli.zig");
 const grabber_protocol = @import("grabber_protocol");
-const Mappings = @import("Mappings.zig");
-const Parser = @import("Parser.zig");
 const service = @import("service.zig");
 const Skhd = @import("skhd.zig");
 const synthesize = @import("synthesize.zig");
 const TrackingAllocator = @import("TrackingAllocator.zig");
+const utils = @import("utils.zig");
 
 const version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
 const log = std.log.scoped(.main);
@@ -170,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
     const resolved_config_file = if (config_file) |cf|
         try gpa.dupe(u8, cf)
     else
-        try getConfigFile(gpa, io, "skhdrc");
+        try utils.getConfigFile(gpa, io, "skhdrc");
     defer gpa.free(resolved_config_file);
 
     // Check if another instance is already running
@@ -430,48 +429,6 @@ fn applyConfigPaths(allocator: std.mem.Allocator, entries: []const []const u8) v
 /// 1. $XDG_CONFIG_HOME/skhd/<filename>
 /// 2. $HOME/.config/skhd/<filename>
 /// 3. $HOME/.<filename>
-pub fn getConfigFile(allocator: std.mem.Allocator, io: std.Io, filename: []const u8) ![]const u8 {
-    // Try XDG_CONFIG_HOME first
-    if (@import("utils.zig").getenv("XDG_CONFIG_HOME")) |xdg_home| {
-        const path = try std.fmt.allocPrint(allocator, "{s}/skhd/{s}", .{ xdg_home, filename });
-        defer allocator.free(path);
-
-        if (fileExists(io, path)) {
-            return try allocator.dupe(u8, path);
-        }
-    }
-
-    // Try HOME/.config/skhd
-    if (@import("utils.zig").getenv("HOME")) |home| {
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/.config/skhd/{s}", .{ home, filename });
-        defer allocator.free(config_path);
-
-        if (fileExists(io, config_path)) {
-            return try allocator.dupe(u8, config_path);
-        }
-
-        // Try HOME/.skhdrc (dotfile in home)
-        const dotfile_path = try std.fmt.allocPrint(allocator, "{s}/.{s}", .{ home, filename });
-        defer allocator.free(dotfile_path);
-
-        if (fileExists(io, dotfile_path)) {
-            return try allocator.dupe(u8, dotfile_path);
-        }
-    }
-
-    // Default to filename in current directory
-    return try allocator.dupe(u8, filename);
-}
-
-fn fileExists(io: std.Io, path: []const u8) bool {
-    if (std.fs.path.isAbsolute(path)) {
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
-    } else {
-        std.Io.Dir.cwd().access(io, path, .{}) catch return false;
-    }
-    return true;
-}
-
 /// Run after a successful `--install-service`. Checks whether the
 /// user's config has any caps_lock-class `.remap` block-form rules
 /// targeting a currently-connected device — those need the system
@@ -492,48 +449,22 @@ fn maybeInstallGrabber(allocator: std.mem.Allocator, io: std.Io) !void {
     }
 
     // Parse the user's config to find caps-class rules.
-    const config_path = getConfigFile(allocator, io, "skhdrc") catch |err| {
-        std.debug.print("\n(could not resolve config file: {s})\n", .{@errorName(err)});
+    const need = grabber_cli.analyzeGrabberNeed(allocator, io) catch |err| {
+        std.debug.print("\n(could not analyze config for grabber rules: {s} — skipping grabber check)\n", .{@errorName(err)});
         return;
     };
-    defer allocator.free(config_path);
-
-    var mappings = Mappings.init(allocator, io) catch return;
-    defer mappings.deinit();
-
-    var parser = Parser.init(allocator, io) catch return;
-    defer parser.deinit();
-
-    const content = std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1 << 20)) catch |err| {
-        std.debug.print("\n(could not read config {s}: {s} — skipping grabber check)\n", .{ config_path, @errorName(err) });
-        return;
+    const device_alias = switch (need) {
+        .no_rules => {
+            std.debug.print("\nNo caps_lock-class rules in config — skhd-grabber not needed.\n", .{});
+            return;
+        },
+        .no_device => {
+            std.debug.print("\nConfig has caps_lock-class rules, but none of the targeted devices are connected — skhd-grabber not needed on this machine.\n", .{});
+            return;
+        },
+        .needed => |alias| alias,
     };
-    defer allocator.free(content);
-
-    parser.parseWithPath(&mappings, content, config_path) catch return;
-    parser.processLoadDirectives(&mappings) catch return;
-
-    if (mappings.tapholds.items.len == 0) {
-        std.debug.print("\nNo caps_lock-class rules in config — skhd-grabber not needed.\n", .{});
-        return;
-    }
-
-    // Filter by device presence so a config shared between a laptop
-    // and a Mac Studio doesn't force grabber install on the Studio.
-    var any_present = false;
-    var first_alias: ?[]const u8 = null;
-    for (mappings.tapholds.items) |th| {
-        const alias = mappings.device_aliases.get(th.device_alias) orelse continue;
-        if (DeviceCheck.isPresent(alias.vendor, alias.product)) {
-            any_present = true;
-            if (first_alias == null) first_alias = th.device_alias;
-            break;
-        }
-    }
-    if (!any_present) {
-        std.debug.print("\nConfig has caps_lock-class rules, but none of the targeted devices are connected — skhd-grabber not needed on this machine.\n", .{});
-        return;
-    }
+    defer allocator.free(device_alias);
 
     std.debug.print(
         \\
@@ -542,7 +473,7 @@ fn maybeInstallGrabber(allocator: std.mem.Allocator, io: std.Io) !void {
         \\daemon (root) and seizes the keyboard for tap-hold processing.
         \\
         \\Install it now? (you'll be prompted for your sudo password) [Y/n]
-    , .{first_alias.?});
+    , .{device_alias});
 
     const answer = readLine(allocator, io) catch {
         std.debug.print("\n(could not read answer; run `sudo skhd --install-grabber` to install manually)\n", .{});

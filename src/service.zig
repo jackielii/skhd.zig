@@ -542,118 +542,66 @@ fn getDaemonState(allocator: std.mem.Allocator, io: std.Io) DaemonState {
     return .not_loaded;
 }
 
-const EventTapHealth = enum { unknown, working, denied };
+const EventTapHealth = enum {
+    /// No running daemon to query, or the CoreGraphics call itself failed
+    /// — we genuinely can't tell.
+    unknown,
+    /// The daemon owns an event tap and it is enabled — events flow
+    /// (modulo a separate Input Monitoring / TCC denial, checked below).
+    working,
+    /// The daemon owns a tap but it is currently disabled (e.g. the kernel
+    /// disabled it on a timeout and the watchdog hasn't re-enabled it yet).
+    disabled,
+    /// The daemon is running but owns no event tap — tap creation failed,
+    /// which on macOS means Accessibility is denied.
+    denied,
+};
 
-/// Darwin sysctl MIB to fetch a single process's kinfo_proc.
-/// Equivalent to: `int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };`
-const CTL_KERN: c_int = 1;
-const KERN_PROC: c_int = 14;
-const KERN_PROC_PID: c_int = 1;
-
-/// Get the running process's uptime in seconds via the darwin sysctl
-/// `kern.proc.pid.<pid>` interface. The first 8 bytes of `struct
-/// kinfo_proc` are `kp_proc.p_un.__p_starttime.tv_sec` (this layout has
-/// been stable across macOS versions). Avoids spawning `ps`. Returns
-/// null if the process isn't reachable or the call fails.
-fn getProcessUptimeSeconds(io: std.Io, pid: i32) ?u64 {
-    var mib = [_]c_int{ CTL_KERN, KERN_PROC, KERN_PROC_PID, @intCast(pid) };
-
-    // kinfo_proc is ~656 bytes on macOS — 1 KiB stack buffer is plenty.
-    var buf: [1024]u8 = undefined;
-    var size: usize = buf.len;
-    if (std.c.sysctl(&mib, mib.len, &buf, &size, null, 0) != 0) return null;
-    if (size < @sizeOf(i64)) return null;
-
-    const tv_sec = std.mem.readInt(i64, buf[0..@sizeOf(i64)], .little);
-    if (tv_sec <= 0) return null;
-
-    const now_ns = std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds;
-    const now: i64 = @intCast(@divTrunc(now_ns, std.time.ns_per_s));
-    if (now < tv_sec) return null;
-    return @intCast(now - tv_sec);
-}
-
-/// Determine whether the daemon's event tap is currently active. Two signals
-/// in priority order:
+/// Determine whether the daemon's event tap is currently active by asking
+/// the window server directly via `CGGetEventTapList`, filtered to the
+/// daemon's PID. This reads the *actual* live tap state rather than
+/// inferring it from process uptime or scraping success/denial markers out
+/// of the log — the old heuristic could never confirm success in a
+/// ReleaseFast build (where `log.info` is suppressed) and reported
+/// "unknown" for the first ~30s after every (re)start. The direct query
+/// works identically across Debug / ReleaseSafe / ReleaseFast and has no
+/// timing window.
 ///
-/// 1. **Process uptime.** With `KeepAlive=true` and `ThrottleInterval=10`,
-///    a daemon that fails event-tap creation exits within ~5s (10 retries
-///    × 500ms) and is respawned 10s later — so a daemon that has been
-///    alive for >30s necessarily has a working event tap. This is the
-///    primary signal: it works for any build mode without relying on the
-///    daemon emitting success messages (we deliberately keep the log
-///    quiet on the happy path).
-/// 2. **Log tail fallback** for daemons too young for #1 to be conclusive,
-///    or when the daemon is loaded but currently in the throttle window.
-///    Anchored on the *current* daemon's start marker so a stale
-///    "ACCESSIBILITY PERMISSIONS REQUIRED" block from a previously
-///    crashed instance doesn't poison the read. Recent "ACCESSIBILITY
-///    PERMISSIONS REQUIRED" / "Event tap creation failed" entries after
-///    that marker point to denial; success-side patterns are matched for
-///    Debug / ReleaseSafe builds where `log.info` reaches the file.
-fn getEventTapHealth(allocator: std.mem.Allocator, io: std.Io, daemon_state: DaemonState) EventTapHealth {
-    if (daemon_state == .running) {
-        if (getProcessUptimeSeconds(io, daemon_state.running)) |uptime| {
-            if (uptime >= 30) return .working;
-        }
-    }
-
-    const home = @import("utils.zig").getenv("HOME") orelse return .unknown;
-    const log_path = std.fmt.allocPrint(allocator, "{s}/Library/Logs/skhd.log", .{home}) catch return .unknown;
-    defer allocator.free(log_path);
-
-    var file = std.Io.Dir.openFileAbsolute(io, log_path, .{}) catch return .unknown;
-    defer file.close(io);
-
-    const stat_size = file.length(io) catch return .unknown;
-    if (stat_size == 0) return .unknown;
-
-    const tail_size: u64 = 64 * 1024;
-    const start: u64 = if (stat_size > tail_size) stat_size - tail_size else 0;
-    const want_u64 = @min(tail_size, stat_size - start);
-    const want: usize = @intCast(want_u64);
-
-    const content = allocator.alloc(u8, want) catch return .unknown;
-    defer allocator.free(content);
-    const read_total = file.readPositionalAll(io, content, start) catch return .unknown;
-    const content_slice = content[0..read_total];
-
-    // Find the last `=== skhd … (PID <daemon_pid>) ===` start marker.
-    // Without anchoring on the current daemon's PID, log entries from a
-    // previous crashed run (the cdHash-mismatch case in particular) keep
-    // showing as "denied" forever. Scanning only after the marker is the
-    // simplest way to make the status reflect the *current* daemon.
-    const scan_start: usize = scan_start: {
-        if (daemon_state == .running) {
-            var pid_buf: [32]u8 = undefined;
-            const pid_marker = std.fmt.bufPrint(&pid_buf, "(PID {d})", .{daemon_state.running}) catch break :scan_start 0;
-            if (std.mem.lastIndexOf(u8, content_slice, pid_marker)) |idx| break :scan_start idx;
-        }
-        // No running daemon to anchor on, or its marker isn't in the tail
-        // window — caller hasn't established whether *this* run is broken,
-        // so don't make claims either way.
-        return .unknown;
+/// Note: a tap reported `enabled` here can still have its events suppressed
+/// by a stale Input Monitoring (kTCCServiceListenEvent) grant — that case
+/// is surfaced separately by `checkInputMonitoringAccess`.
+fn getEventTapHealth(allocator: std.mem.Allocator, daemon_state: DaemonState) EventTapHealth {
+    const pid: c.pid_t = switch (daemon_state) {
+        .running => |p| p,
+        // Without a running daemon there's no tap to attribute; the caller
+        // already reports the daemon as not running.
+        else => return .unknown,
     };
 
-    var lines = std.mem.splitScalar(u8, content_slice[scan_start..], '\n');
-    var last: EventTapHealth = .unknown;
-    while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "Event tap created successfully") != null or
-            std.mem.indexOf(u8, line, "Event tap created on attempt") != null)
-        {
-            last = .working;
-        } else if (std.mem.indexOf(u8, line, "ACCESSIBILITY PERMISSIONS REQUIRED") != null or
-            std.mem.indexOf(u8, line, "Event tap creation failed") != null)
-        {
-            last = .denied;
+    // First call with a null list just yields the current tap count.
+    var count: u32 = 0;
+    if (c.CGGetEventTapList(0, null, &count) != 0) return .unknown;
+    if (count == 0) return .denied; // no taps at all → ours wasn't created
+
+    const taps = allocator.alloc(c.CGEventTapInformation, count) catch return .unknown;
+    defer allocator.free(taps);
+
+    var written: u32 = count;
+    if (c.CGGetEventTapList(count, taps.ptr, &written) != 0) return .unknown;
+
+    var saw_tap_for_pid = false;
+    for (taps[0..@min(written, count)]) |t| {
+        if (t.tappingProcess == pid) {
+            saw_tap_for_pid = true;
+            if (t.enabled) return .working;
         }
     }
-    return last;
+    return if (saw_tap_for_pid) .disabled else .denied;
 }
 
 pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
     const daemon_state = getDaemonState(allocator, io);
-    const tap_health = getEventTapHealth(allocator, io, daemon_state);
+    const tap_health = getEventTapHealth(allocator, daemon_state);
 
     // Determine SMAppService registration status. Don't use the legacy
     // ~/Library/LaunchAgents/<id>.plist file as a marker any more — that
@@ -674,8 +622,9 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
 
     const tap_label = switch (tap_health) {
         .working => "Yes (event tap active)",
+        .disabled => "No (event tap registered but disabled — try --restart-service)",
         .denied => "No (accessibility denied — see remediation below)",
-        .unknown => "Unknown (no recent event-tap activity in log)",
+        .unknown => "Unknown (daemon not running or window server unavailable)",
     };
     std.debug.print("  Hotkeys functional:   {s}\n", .{tap_label});
 
@@ -691,6 +640,21 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
         .unknown => "Unknown (will prompt on first key event)",
     };
     std.debug.print("  Input Monitoring:     {s}\n", .{im_label});
+
+    // Grabber: only surfaced when the user's config actually needs it
+    // (block-form `.remap` / tap-hold rules targeting a connected device).
+    // For configs that never use those, the grabber is irrelevant and we
+    // stay quiet. Parse failures are swallowed — `--status` shouldn't error
+    // out over a malformed config.
+    if (grabber_cli.analyzeGrabberNeed(allocator, io)) |need| {
+        switch (need) {
+            .needed => |device_alias| {
+                defer allocator.free(device_alias);
+                grabber_cli.printGrabberStatusSummary(allocator, io, device_alias);
+            },
+            .no_rules, .no_device => {},
+        }
+    } else |_| {}
 
     // HID daemon (Karabiner-DriverKit-VirtualHIDDevice). Required by
     // skhd-grabber for .remap / .taphold rules. printHidDaemonStatus

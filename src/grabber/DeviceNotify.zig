@@ -4,9 +4,9 @@
 //! Why: the grabber's seize silently dies when the built-in keyboard
 //! re-enumerates across a `DarkWake from Deep Idle` — the old IORegistry
 //! entry terminates, a new one appears, but that DarkWake never delivers
-//! `kIOMessageSystemHasPoweredOn`, so PowerNotify's re-seize never fires
-//! and the seize keeps holding the dead device (keyboard appears dead;
-//! verified — old entry id 4294969998 → new 4295340270).
+//! a full system power-on, so a wake-driven re-seize never fires and the
+//! seize keeps holding the dead device (keyboard appears dead; verified —
+//! old entry id 4294969998 → new 4295340270).
 //!
 //! This subscribes to the IOKit registry directly (kIOFirstMatch +
 //! kIOTerminated on a keyboard matching dict). The kernel fires the

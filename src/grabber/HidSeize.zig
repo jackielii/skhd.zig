@@ -257,11 +257,11 @@ pub fn start(self: *Self, mode: Mode) !void {
     if (self.running) return;
 
     c.IOHIDManagerRegisterInputValueCallback(self.manager, valueCallback, self);
-    // Per-device add/remove notifications. Logging-only — re-seize on
-    // wake is driven by PowerNotify so we don't double-trigger here.
-    // These fire after manager open: matching for the initial
-    // population and again for any device that re-enumerates (e.g.
-    // unplug/replug, or post-sleep stale-ref replacement).
+    // Per-device add/remove notifications. Logging-only (vendor/product
+    // forensics in a debug build) — the actual re-seize on re-enumeration
+    // is driven by DeviceNotify (IOService match/terminate), so we don't
+    // double-trigger here. These fire after manager open: matching for the
+    // initial population and again for any device that re-enumerates.
     c.IOHIDManagerRegisterDeviceMatchingCallback(self.manager, deviceMatchedCallback, self);
     c.IOHIDManagerRegisterDeviceRemovalCallback(self.manager, deviceRemovedCallback, self);
     c.IOHIDManagerScheduleWithRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);

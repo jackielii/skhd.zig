@@ -293,40 +293,13 @@ pub extern fn IOObjectRelease(object: io_object_t) IOReturn;
 pub extern fn IOHIDSetModifierLockState(handle: io_connect_t, selector: c_int, state: u8) IOReturn;
 pub extern fn IOHIDGetModifierLockState(handle: io_connect_t, selector: c_int, state: *u8) IOReturn;
 
-// System sleep/wake notifications via the root power-management port.
-// IORegisterForSystemPower returns an io_connect_t to the root domain
-// and gives us an IONotificationPortRef whose run-loop source we add
-// to CFRunLoop. The callback fires for Can/Will sleep + Will/Has
-// powered-on; we must ack the Can/Will-sleep messages with
-// IOAllowPowerChange or sleep gets blocked. Per Apple docs the
-// messageArgument carries the notification ID — it's a void* on the
-// API surface but is used as a `long` for ack.
-//
-// IOMessage.h: iokit_common_msg(x) = 0xE0000000 | x.
-pub const kIOMessageCanSystemSleep: u32 = 0xE0000270;
-pub const kIOMessageSystemWillSleep: u32 = 0xE0000280;
-pub const kIOMessageSystemWillPowerOn: u32 = 0xE0000320;
-pub const kIOMessageSystemHasPoweredOn: u32 = 0xE0000300;
-
+// IONotificationPort — run-loop-integrated delivery port for IOKit
+// notifications. DeviceNotify creates one (IONotificationPortCreate,
+// declared with the IOService notification bindings above) and adds its
+// keyboard match/terminate run-loop source to the current run loop.
 pub const IONotificationPortRef = ?*anyopaque;
-
-pub const IOServiceInterestCallback = ?*const fn (
-    refcon: ?*anyopaque,
-    service: io_service_t,
-    messageType: u32,
-    messageArgument: ?*anyopaque,
-) callconv(.c) void;
-
-pub extern fn IORegisterForSystemPower(
-    refcon: ?*anyopaque,
-    thePortRef: *IONotificationPortRef,
-    callback: IOServiceInterestCallback,
-    notifier: *io_object_t,
-) io_connect_t;
-pub extern fn IODeregisterForSystemPower(notifier: *io_object_t) IOReturn;
 pub extern fn IONotificationPortGetRunLoopSource(notify: IONotificationPortRef) CFRunLoopSourceRef;
 pub extern fn IONotificationPortDestroy(notify: IONotificationPortRef) void;
-pub extern fn IOAllowPowerChange(kernelPort: io_connect_t, notificationID: isize) IOReturn;
 
 // SystemConfiguration — read the active console user uid. D5 uses
 // this to apply rules only from the foreground user's agent (so

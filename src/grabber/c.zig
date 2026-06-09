@@ -77,6 +77,7 @@ pub extern fn CFDictionaryCreateMutable(
     valueCallBacks: *const CFDictionaryValueCallBacks,
 ) CFMutableDictionaryRef;
 pub extern fn CFDictionarySetValue(dict: CFMutableDictionaryRef, key: ?*const anyopaque, value: ?*const anyopaque) void;
+pub extern fn CFRetain(cf: ?*const anyopaque) ?*const anyopaque;
 pub extern fn CFNumberCreate(allocator: CFAllocatorRef, type_: CFNumberType, valuePtr: *const anyopaque) CFNumberRef;
 pub extern fn CFStringCreateWithCString(allocator: CFAllocatorRef, cstr: [*:0]const u8, encoding: CFStringEncoding) CFStringRef;
 pub extern fn CFAbsoluteTimeGetCurrent() CFAbsoluteTime;
@@ -228,24 +229,10 @@ pub extern fn IOHIDManagerRegisterDeviceRemovalCallback(
     context: ?*anyopaque,
 ) void;
 pub extern fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) CFTypeRef;
-// Liveness probe: map a seized IOHIDDevice back to its IORegistry node,
-// then read that node's 64-bit registry entry ID. The ID is unique per
-// registry entry and a re-enumerated device (post sleep/DarkWake) gets a
-// fresh entry — so a changed ID set is ground-truth proof the seize is
-// holding stale refs, independent of whether IOHIDManager fired a
-// matching/removal callback. IOHIDDeviceGetService returns
-// MACH_PORT_NULL (0) on older refs; callers treat 0 as "unknown".
-pub extern fn IOHIDDeviceGetService(device: IOHIDDeviceRef) io_service_t;
+// Read a registry node's 64-bit entry ID. DeviceNotify logs it so a
+// re-enumeration is visible in the forensic log (old id terminates, new
+// id matches).
 pub extern fn IORegistryEntryGetRegistryEntryID(entry: io_service_t, entryID: *u64) IOReturn;
-// Liveness probe: resolve a captured entry ID back to a live service.
-// IORegistryEntryIDMatching builds a matching dict for one specific
-// registry entry; IOServiceGetMatchingService returns MACH_PORT_NULL (0)
-// if that entry no longer exists (device re-enumerated/terminated). This
-// queries the registry WITHOUT opening the device, so it never collides
-// with our own exclusive seize (a second IOHIDManagerOpen returns
-// kIOReturnExclusiveAccess). The matching dict is consumed by
-// IOServiceGetMatchingService — do not release it.
-pub extern fn IORegistryEntryIDMatching(entryID: u64) CFMutableDictionaryRef;
 
 // IOService / IOHIDSystem client. Used by HidSystem.zig to force
 // caps_lock state off after Apple's MacBook keyboard firmware toggles
@@ -270,6 +257,36 @@ pub extern var mach_task_self_: mach_port_t;
 
 pub extern fn IOServiceMatching(name: [*:0]const u8) CFMutableDictionaryRef;
 pub extern fn IOServiceGetMatchingService(masterPort: mach_port_t, matching: CFDictionaryRef) io_service_t;
+
+// IOService matched/terminated notifications — the event-driven trigger
+// for re-seizing when a keyboard (re-)enumerates. DeviceNotify.zig
+// registers a kIOFirstMatchNotification + kIOTerminatedNotification on a
+// keyboard matching dict; the kernel fires the callback with an iterator
+// the callback must drain (IOIteratorNext to exhaustion) both to read
+// the changed services AND to re-arm the notification.
+pub const io_iterator_t = io_object_t;
+pub const IO_OBJECT_NULL: io_object_t = 0;
+// io_name_t notification-type strings (IOKitKeys.h).
+pub const kIOFirstMatchNotification: [*:0]const u8 = "IOServiceFirstMatch";
+pub const kIOTerminatedNotification: [*:0]const u8 = "IOServiceTerminate";
+// Matching-dict provider class + keyboard usage keys (present on the
+// built-in keyboard's IOHIDDevice node; verified via ioreg).
+pub const kIOHIDDeviceKey: [*:0]const u8 = "IOHIDDevice";
+// kIOHIDPrimaryUsagePageKey / kIOHIDPrimaryUsageKey and the
+// kHIDPage_GenericDesktop / kHIDUsage_GD_Keyboard values are already
+// defined above (shared with HidSeize's matching dicts).
+
+pub const IOServiceMatchingCallback = ?*const fn (refcon: ?*anyopaque, iterator: io_iterator_t) callconv(.c) void;
+pub extern fn IONotificationPortCreate(mainPort: mach_port_t) IONotificationPortRef;
+pub extern fn IOServiceAddMatchingNotification(
+    notifyPort: IONotificationPortRef,
+    notificationType: [*:0]const u8,
+    matching: CFDictionaryRef,
+    callback: IOServiceMatchingCallback,
+    refCon: ?*anyopaque,
+    notification: *io_iterator_t,
+) IOReturn;
+pub extern fn IOIteratorNext(iterator: io_iterator_t) io_object_t;
 pub extern fn IOServiceOpen(service: io_service_t, owningTask: task_port_t, type_: u32, connect: *io_connect_t) IOReturn;
 pub extern fn IOServiceClose(connect: io_connect_t) IOReturn;
 pub extern fn IOObjectRelease(object: io_object_t) IOReturn;

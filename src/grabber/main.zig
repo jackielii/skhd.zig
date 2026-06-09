@@ -23,6 +23,7 @@ const HidSystem = @import("HidSystem.zig");
 const Ipc = @import("Ipc.zig");
 const KbState = @import("KbState.zig");
 const PowerNotify = @import("PowerNotify.zig");
+const DeviceNotify = @import("DeviceNotify.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -252,15 +253,15 @@ const Daemon = struct {
     /// subscription should be active.
     console_user_timer: c.CFRunLoopTimerRef = null,
 
-    /// CFRunLoopTimer that probes seize liveness every few seconds. The
-    /// seize can silently go dead (a built-in keyboard re-enumerates
-    /// across sleep/DarkWake while IOHIDManager keeps a stale ref and
-    /// never re-matches) — the process stays healthy but no keystrokes
-    /// flow. PowerNotify only covers full power-on; this watchdog catches
-    /// every cause by comparing the live registry against the seized set
-    /// and rebuilding on mismatch. Cheap probe; the per-tick forensic
-    /// log is info-level (compiled out of ReleaseFast).
-    liveness_timer: c.CFRunLoopTimerRef = null,
+    /// Event-driven keyboard (re-)enumeration watch. The seize silently
+    /// dies when the built-in keyboard re-enumerates across a DarkWake
+    /// (old IORegistry entry terminates, new one appears) — the process
+    /// stays healthy but no keystrokes flow, and PowerNotify misses it
+    /// because that DarkWake never delivers kIOMessageSystemHasPoweredOn.
+    /// DeviceNotify fires on the IOKit matched/terminated notification, so
+    /// onDeviceChange re-seizes exactly when a keyboard appears/disappears
+    /// — no polling, zero steady-state overhead.
+    device_notify: ?*DeviceNotify = null,
 
     /// Pending vhidd recovery timer, non-null while the daemon is in
     /// the "vhidd is broken, retrying" state. One-shot — the callback
@@ -342,8 +343,11 @@ const Daemon = struct {
             pn.deinit();
             self.power_notify = null;
         }
+        if (self.device_notify) |dn| {
+            dn.deinit();
+            self.device_notify = null;
+        }
         self.stopConsoleUserTimer();
-        self.stopLivenessTimer();
         self.cancelVhiddRecoveryTimer();
         self.teardownSeize();
         if (self.vhidd) |v| {
@@ -400,7 +404,6 @@ const Daemon = struct {
             return;
         };
         self.startConsoleUserTimer();
-        self.startLivenessTimer();
         // Best-effort: if power-notification registration fails the
         // grabber still works in steady state — only the post-wake
         // recovery path is unavailable. Kept at warn (fires once, only
@@ -408,6 +411,13 @@ const Daemon = struct {
         // about even in a release build.
         self.power_notify = PowerNotify.init(self.allocator, onSystemWake, self) catch |err| blk: {
             log.warn("PowerNotify init failed ({s}); post-wake auto-reseize disabled", .{@errorName(err)});
+            break :blk null;
+        };
+        // Event-driven keyboard re-enumeration watch — the primary
+        // recovery for a seize that goes dead on DarkWake (the case
+        // PowerNotify misses). Same warn rationale.
+        self.device_notify = DeviceNotify.init(self.allocator, onDeviceChange, self) catch |err| blk: {
+            log.warn("DeviceNotify init failed ({s}); keyboard re-enumeration auto-reseize disabled", .{@errorName(err)});
             break :blk null;
         };
 
@@ -814,46 +824,6 @@ const Daemon = struct {
         }
     }
 
-    /// Poll seize liveness every 5 seconds. The interval is a balance:
-    /// short enough that a dead keyboard self-heals within a few seconds
-    /// (vs. the user noticing and SSHing in), long enough that the
-    /// throwaway-manager enumeration is negligible load on an always-on
-    /// daemon. The check is a no-op when nothing is seized.
-    fn startLivenessTimer(self: *Daemon) void {
-        if (self.liveness_timer != null) return;
-        var ctx: c.CFRunLoopTimerContext = .{
-            .version = 0,
-            .info = self,
-            .retain = null,
-            .release = null,
-            .copyDescription = null,
-        };
-        const interval: f64 = 5.0;
-        const fire_at = c.CFAbsoluteTimeGetCurrent() + interval;
-        self.liveness_timer = c.CFRunLoopTimerCreate(
-            c.kCFAllocatorDefault,
-            fire_at,
-            interval,
-            0,
-            0,
-            livenessTimerCallback,
-            &ctx,
-        );
-        if (self.liveness_timer == null) {
-            log.warn("could not create liveness timer; a dead keyboard will not self-heal", .{});
-            return;
-        }
-        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), self.liveness_timer, c.kCFRunLoopDefaultMode);
-    }
-
-    fn stopLivenessTimer(self: *Daemon) void {
-        if (self.liveness_timer) |t| {
-            c.CFRunLoopTimerInvalidate(t);
-            c.CFRelease(t);
-            self.liveness_timer = null;
-        }
-    }
-
     /// Entry point from the seize callback when a vhidd send fails.
     /// Latches `vhidd_broken` and queues a recovery pass for the next
     /// runloop iteration. Idempotent — concurrent failures collapse
@@ -956,23 +926,21 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
     };
 }
 
-fn livenessTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
-    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
-    // Read the live pointer each fire: applyLatestRules recreates the
-    // HidSeize on every rebuild, so caching it would dangle.
-    const seize = d.seize orelse return; // nothing seized → nothing to watch
-    switch (seize.pollLiveness()) {
-        .ok, .indeterminate => {},
-        .stale => {
-            // warn (not info) so this lands in the ReleaseFast release log
-            // — it's the one signal that proves a real recurrence happened
-            // and self-healed, the thing we currently have zero record of.
-            log.warn("seize liveness check failed: live keyboard set diverged from seized set — rebuilding", .{});
-            d.applyLatestRules() catch |err| {
-                log.warn("liveness-triggered rebuild failed: {s}", .{@errorName(err)});
-            };
-        },
-    }
+/// DeviceNotify callback: a keyboard (re-)enumerated or terminated.
+/// Re-seize against the current device set. applyLatestRules tears down
+/// and rebuilds the seize, so this both grabs a freshly-appeared keyboard
+/// and replaces a stale ref to one that re-enumerated under us. Runs
+/// between run-loop sources (not inside a seize callback), so the
+/// teardown is safe — same context as the console-user and power
+/// callbacks. Re-seizing does not itself re-enumerate the device, so
+/// there is no feedback loop.
+fn onDeviceChange(ctx: ?*anyopaque) void {
+    const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
+    if (d.seize == null) return; // nothing seized yet → first apply_rules will
+    log.warn("keyboard enumeration changed — re-seizing", .{});
+    d.applyLatestRules() catch |err| {
+        log.warn("device-change rebuild failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn vhiddRecoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {

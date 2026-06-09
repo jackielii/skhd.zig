@@ -97,6 +97,12 @@ open_options: u32 = 0,
 /// disableCapsLockDelayOnMatches to filter event-system services
 /// to just the ones we seized.
 owned_matches: []Match = &.{},
+/// IORegistry entry IDs of the devices actually seized, captured at the
+/// end of `start(.seize)`. The liveness watchdog re-enumerates the live
+/// internal keyboards each tick and compares against this set; a
+/// mismatch means a device re-enumerated under us (stale seize) and the
+/// daemon must rebuild. Empty until the first successful seize.
+seized_entry_ids: []u64 = &.{},
 
 const Self = @This();
 
@@ -123,6 +129,7 @@ pub fn init(allocator: std.mem.Allocator, callback: Callback, callback_ctx: ?*an
 pub fn deinit(self: *Self) void {
     if (self.running) self.stop();
     if (self.owned_matches.len > 0) self.allocator.free(self.owned_matches);
+    if (self.seized_entry_ids.len > 0) self.allocator.free(self.seized_entry_ids);
     c.CFRelease(self.manager);
     instance = null;
     self.allocator.destroy(self);
@@ -204,11 +211,21 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         self.owned_matches = &.{};
     }
 
+    const dicts = try buildMatchDicts(matches);
+    defer c.CFRelease(dicts);
+    c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
+}
+
+/// Build the CFArray of matching dictionaries for `matches`. Shared by
+/// the seize manager (`setMatches`) and the liveness probe's throwaway
+/// manager (`pollLiveness`) so both enumerate by identical criteria —
+/// the probe can't drift from what we actually seize. Caller releases.
+fn buildMatchDicts(matches: []const Match) !c.CFArrayRef {
     // Capacity 0 = unbounded: a built-in alias expands to one dict per
     // transport, so the dict count can exceed matches.len.
     const dicts = c.CFArrayCreateMutable(c.kCFAllocatorDefault, 0, &c.kCFTypeArrayCallBacks);
     if (dicts == null) return error.CFArrayCreateFailed;
-    defer c.CFRelease(dicts);
+    errdefer c.CFRelease(dicts);
 
     for (matches) |m| {
         // Partial-zero (one of vendor/product is 0, the other isn't) is
@@ -229,7 +246,7 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         }
     }
 
-    c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
+    return dicts;
 }
 
 /// Schedule the manager on the current run loop and open it.
@@ -298,7 +315,148 @@ pub fn start(self: *Self, mode: Mode) !void {
 
     if (mode == .seize) {
         self.disableCapsLockDelayOnMatches(self.owned_matches);
+        self.captureSeizedEntryIds();
     }
+}
+
+/// Snapshot the IORegistry entry IDs of the devices the seize manager
+/// currently holds. Called at the end of `start(.seize)` and after every
+/// re-seize so the liveness watchdog compares against the ID set that is
+/// actually live. Best-effort: on any allocation/IOKit hiccup we leave
+/// the set empty, which the watchdog treats as "can't tell" rather than
+/// forcing a spurious re-seize.
+fn captureSeizedEntryIds(self: *Self) void {
+    if (self.seized_entry_ids.len > 0) {
+        self.allocator.free(self.seized_entry_ids);
+        self.seized_entry_ids = &.{};
+    }
+    self.seized_entry_ids = self.collectEntryIds(self.manager) catch &.{};
+}
+
+/// Read the registry entry IDs of every device a manager currently
+/// matches. Allocates the returned slice (caller owns). Devices whose
+/// service can't be resolved (entry ID 0) are skipped — they can't be
+/// compared meaningfully, and including 0 would make two unrelated
+/// unknowns look equal.
+fn collectEntryIds(self: *Self, manager: c.IOHIDManagerRef) ![]u64 {
+    const set = c.IOHIDManagerCopyDevices(manager) orelse return &.{};
+    defer c.CFRelease(set);
+    const count: usize = @intCast(c.CFSetGetCount(set));
+    if (count == 0) return &.{};
+
+    const refs = try self.allocator.alloc(?*const anyopaque, count);
+    defer self.allocator.free(refs);
+    c.CFSetGetValues(set, refs.ptr);
+
+    var ids = try std.ArrayList(u64).initCapacity(self.allocator, count);
+    errdefer ids.deinit(self.allocator);
+    for (refs) |ref| {
+        const dev: c.IOHIDDeviceRef = @constCast(ref);
+        const id = deviceEntryId(dev);
+        if (id != 0) ids.appendAssumeCapacity(id);
+    }
+    return ids.toOwnedSlice(self.allocator);
+}
+
+/// Map an IOHIDDevice to its IORegistry entry ID. Returns 0 if the
+/// device has no backing service (a stale ref can report this) or the
+/// registry read fails.
+fn deviceEntryId(device: c.IOHIDDeviceRef) u64 {
+    const service = c.IOHIDDeviceGetService(device);
+    if (service == 0) return 0;
+    var id: u64 = 0;
+    if (c.IORegistryEntryGetRegistryEntryID(service, &id) != c.kIOReturnSuccess) return 0;
+    return id;
+}
+
+/// Result of a liveness check. `.indeterminate` means the probe itself
+/// couldn't enumerate (transient IOKit failure) — the caller leaves the
+/// seize alone rather than rebuilding on no evidence.
+pub const Liveness = enum { ok, stale, indeterminate };
+
+/// Detect whether the devices we seized are still the live ones. For
+/// each entry ID captured at seize time, ask IOKit whether that exact
+/// registry entry still exists (`registryEntryAlive`). This queries the
+/// IORegistry directly — it never opens a device, so unlike a second
+/// IOHIDManager it can't collide with our own exclusive seize (which
+/// makes a rival open return kIOReturnExclusiveAccess). When a built-in
+/// keyboard re-enumerates across sleep/DarkWake it gets a *fresh*
+/// registry entry, so the ID we hold stops resolving — that vanished ID
+/// is ground-truth proof the seize is stale, independent of whether
+/// IOHIDManager ever fired a matching/removal callback.
+///
+/// Scope note: this catches the documented failure (a seized device
+/// re-enumerating under us). It does not, by itself, catch "a brand-new
+/// keyboard appeared that we should seize but never did" — device
+/// arrival is still covered by the IOHIDManager matching callback,
+/// PowerNotify, and the next apply_rules.
+pub fn pollLiveness(self: *Self) Liveness {
+    if (!self.running) return .indeterminate;
+    if (self.seized_entry_ids.len == 0) return .indeterminate; // nothing captured to check
+
+    const alive = self.liveSeizedIds() catch return .indeterminate;
+    defer if (alive.len > 0) self.allocator.free(alive);
+
+    // info: fires every watchdog tick, so it is compiled out of the
+    // ReleaseFast release (keeps only warn+) and only shows in a
+    // ReleaseSafe/Debug build when tracing a "keyboard went dead"
+    // recurrence. This is the forensic record of which seized devices
+    // were still in the registry at each tick.
+    log.info("liveness: seized_ids={any} still_alive={any}", .{ self.seized_entry_ids, alive });
+
+    return if (entryIdSetsMatch(self.seized_entry_ids, alive)) .ok else .stale;
+}
+
+/// Return the subset of `seized_entry_ids` whose registry entries still
+/// exist. A shorter result than the seized set means a seized device
+/// vanished (re-enumerated/terminated) → the caller treats it as stale.
+fn liveSeizedIds(self: *Self) ![]u64 {
+    var alive = try std.ArrayList(u64).initCapacity(self.allocator, self.seized_entry_ids.len);
+    errdefer alive.deinit(self.allocator);
+    for (self.seized_entry_ids) |id| {
+        if (registryEntryAlive(id)) alive.appendAssumeCapacity(id);
+    }
+    return alive.toOwnedSlice(self.allocator);
+}
+
+/// True if a registry entry with this ID currently exists. Resolves the
+/// ID to a service without opening it; releases the service immediately.
+fn registryEntryAlive(entry_id: u64) bool {
+    // IORegistryEntryIDMatching returns a +1 dict that
+    // IOServiceGetMatchingService consumes — we must not release it.
+    const matching = c.IORegistryEntryIDMatching(entry_id);
+    if (matching == null) return false;
+    const service = c.IOServiceGetMatchingService(c.kIOMainPortDefault, matching);
+    if (service == 0) return false;
+    _ = c.IOObjectRelease(service);
+    return true;
+}
+
+/// Set equality on registry entry IDs (order-independent, IDs are
+/// unique so no multiset concerns). Pure so the watchdog's decision is
+/// unit-testable without a live IOHIDManager.
+fn entryIdSetsMatch(seized: []const u64, live: []const u64) bool {
+    if (seized.len != live.len) return false;
+    for (live) |id| {
+        if (std.mem.indexOfScalar(u64, seized, id) == null) return false;
+    }
+    return true;
+}
+
+test entryIdSetsMatch {
+    const expectEqual = std.testing.expectEqual;
+    // identical sets (any order) → match
+    try expectEqual(true, entryIdSetsMatch(&.{ 1, 2, 3 }, &.{ 3, 1, 2 }));
+    // both empty (login window / no keyboard) → match, no spurious reseize
+    try expectEqual(true, entryIdSetsMatch(&.{}, &.{}));
+    // device re-enumerated: same count, one fresh ID → stale
+    try expectEqual(false, entryIdSetsMatch(&.{ 1, 2 }, &.{ 1, 9 }));
+    // a keyboard appeared that we never seized → stale
+    try expectEqual(false, entryIdSetsMatch(&.{1}, &.{ 1, 2 }));
+    // seized device vanished from the live set → stale
+    try expectEqual(false, entryIdSetsMatch(&.{ 1, 2 }, &.{1}));
+    // seized nothing but a keyboard is now present → stale (reseize it)
+    try expectEqual(false, entryIdSetsMatch(&.{}, &.{1}));
 }
 
 /// Set HIDKeyboardCapsLockDelayOverride=0 on every event-system

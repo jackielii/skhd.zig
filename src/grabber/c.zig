@@ -228,6 +228,24 @@ pub extern fn IOHIDManagerRegisterDeviceRemovalCallback(
     context: ?*anyopaque,
 ) void;
 pub extern fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) CFTypeRef;
+// Liveness probe: map a seized IOHIDDevice back to its IORegistry node,
+// then read that node's 64-bit registry entry ID. The ID is unique per
+// registry entry and a re-enumerated device (post sleep/DarkWake) gets a
+// fresh entry — so a changed ID set is ground-truth proof the seize is
+// holding stale refs, independent of whether IOHIDManager fired a
+// matching/removal callback. IOHIDDeviceGetService returns
+// MACH_PORT_NULL (0) on older refs; callers treat 0 as "unknown".
+pub extern fn IOHIDDeviceGetService(device: IOHIDDeviceRef) io_service_t;
+pub extern fn IORegistryEntryGetRegistryEntryID(entry: io_service_t, entryID: *u64) IOReturn;
+// Liveness probe: resolve a captured entry ID back to a live service.
+// IORegistryEntryIDMatching builds a matching dict for one specific
+// registry entry; IOServiceGetMatchingService returns MACH_PORT_NULL (0)
+// if that entry no longer exists (device re-enumerated/terminated). This
+// queries the registry WITHOUT opening the device, so it never collides
+// with our own exclusive seize (a second IOHIDManagerOpen returns
+// kIOReturnExclusiveAccess). The matching dict is consumed by
+// IOServiceGetMatchingService — do not release it.
+pub extern fn IORegistryEntryIDMatching(entryID: u64) CFMutableDictionaryRef;
 
 // IOService / IOHIDSystem client. Used by HidSystem.zig to force
 // caps_lock state off after Apple's MacBook keyboard firmware toggles

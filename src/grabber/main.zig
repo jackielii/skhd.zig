@@ -252,6 +252,16 @@ const Daemon = struct {
     /// subscription should be active.
     console_user_timer: c.CFRunLoopTimerRef = null,
 
+    /// CFRunLoopTimer that probes seize liveness every few seconds. The
+    /// seize can silently go dead (a built-in keyboard re-enumerates
+    /// across sleep/DarkWake while IOHIDManager keeps a stale ref and
+    /// never re-matches) — the process stays healthy but no keystrokes
+    /// flow. PowerNotify only covers full power-on; this watchdog catches
+    /// every cause by comparing the live registry against the seized set
+    /// and rebuilding on mismatch. Cheap probe; the per-tick forensic
+    /// log is info-level (compiled out of ReleaseFast).
+    liveness_timer: c.CFRunLoopTimerRef = null,
+
     /// Pending vhidd recovery timer, non-null while the daemon is in
     /// the "vhidd is broken, retrying" state. One-shot — the callback
     /// releases it and either schedules a new one (on failure) or
@@ -333,6 +343,7 @@ const Daemon = struct {
             self.power_notify = null;
         }
         self.stopConsoleUserTimer();
+        self.stopLivenessTimer();
         self.cancelVhiddRecoveryTimer();
         self.teardownSeize();
         if (self.vhidd) |v| {
@@ -389,6 +400,7 @@ const Daemon = struct {
             return;
         };
         self.startConsoleUserTimer();
+        self.startLivenessTimer();
         // Best-effort: if power-notification registration fails the
         // grabber still works in steady state — only the post-wake
         // recovery path is unavailable. Kept at warn (fires once, only
@@ -802,6 +814,46 @@ const Daemon = struct {
         }
     }
 
+    /// Poll seize liveness every 5 seconds. The interval is a balance:
+    /// short enough that a dead keyboard self-heals within a few seconds
+    /// (vs. the user noticing and SSHing in), long enough that the
+    /// throwaway-manager enumeration is negligible load on an always-on
+    /// daemon. The check is a no-op when nothing is seized.
+    fn startLivenessTimer(self: *Daemon) void {
+        if (self.liveness_timer != null) return;
+        var ctx: c.CFRunLoopTimerContext = .{
+            .version = 0,
+            .info = self,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+        const interval: f64 = 5.0;
+        const fire_at = c.CFAbsoluteTimeGetCurrent() + interval;
+        self.liveness_timer = c.CFRunLoopTimerCreate(
+            c.kCFAllocatorDefault,
+            fire_at,
+            interval,
+            0,
+            0,
+            livenessTimerCallback,
+            &ctx,
+        );
+        if (self.liveness_timer == null) {
+            log.warn("could not create liveness timer; a dead keyboard will not self-heal", .{});
+            return;
+        }
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), self.liveness_timer, c.kCFRunLoopDefaultMode);
+    }
+
+    fn stopLivenessTimer(self: *Daemon) void {
+        if (self.liveness_timer) |t| {
+            c.CFRunLoopTimerInvalidate(t);
+            c.CFRelease(t);
+            self.liveness_timer = null;
+        }
+    }
+
     /// Entry point from the seize callback when a vhidd send fails.
     /// Latches `vhidd_broken` and queues a recovery pass for the next
     /// runloop iteration. Idempotent — concurrent failures collapse
@@ -902,6 +954,25 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
     d.applyLatestRules() catch |err| {
         log.warn("rebuild after console user change failed: {s}", .{@errorName(err)});
     };
+}
+
+fn livenessTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    // Read the live pointer each fire: applyLatestRules recreates the
+    // HidSeize on every rebuild, so caching it would dangle.
+    const seize = d.seize orelse return; // nothing seized → nothing to watch
+    switch (seize.pollLiveness()) {
+        .ok, .indeterminate => {},
+        .stale => {
+            // warn (not info) so this lands in the ReleaseFast release log
+            // — it's the one signal that proves a real recurrence happened
+            // and self-healed, the thing we currently have zero record of.
+            log.warn("seize liveness check failed: live keyboard set diverged from seized set — rebuilding", .{});
+            d.applyLatestRules() catch |err| {
+                log.warn("liveness-triggered rebuild failed: {s}", .{@errorName(err)});
+            };
+        },
+    }
 }
 
 fn vhiddRecoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {

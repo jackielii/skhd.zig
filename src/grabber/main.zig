@@ -1344,7 +1344,7 @@ fn emitToVhidd(ctx_ptr: ?*anyopaque, ev: TapHold.Event) void {
     if (usage16 < 0x04) return;
     if (!cx.state.applyKeyboardEvent(usage16, ev.pressed)) return;
 
-    log.info("emit: usage=0x{X:0>2} pressed={}", .{ usage16, ev.pressed });
+    log.debug("emit: usage=0x{X:0>2} pressed={}", .{ usage16, ev.pressed });
 
     // Short-circuit if a previous post already triggered recovery —
     // the seize tear-down is scheduled on the runloop and any events

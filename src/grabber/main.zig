@@ -578,12 +578,15 @@ const Daemon = struct {
         return null;
     }
 
-    /// Called from PowerNotify when the system finishes waking. The
-    /// IOHIDManager opened before sleep can be holding stale device
-    /// refs; re-running applyLatestRules tears down + rebuilds vhidd
-    /// + seize against the post-wake device set. Same code path as a
-    /// fresh agent apply_rules so we don't carry a parallel recovery
-    /// implementation.
+    /// Called from PowerNotify when the system finishes waking — a
+    /// backstop to DeviceNotify (which is the primary recovery, firing on
+    /// the keyboard's re-enumeration). On a normal wake DeviceNotify's
+    /// match/terminate events already re-seize, so this is often a
+    /// redundant rebuild; it's kept because it also covers a wake where
+    /// the device notification was dropped or the seize went stale
+    /// without re-enumerating. applyLatestRules is idempotent, and the
+    /// extra rebuilds double as retries while the post-wake device set
+    /// settles. Same code path as a fresh agent apply_rules.
     fn onSystemWake(ctx: ?*anyopaque) void {
         const self: *Daemon = @ptrCast(@alignCast(ctx orelse return));
         // info: fires on every wake (several times/day), so it stays out

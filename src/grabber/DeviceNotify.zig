@@ -92,6 +92,7 @@ pub fn init(
         log.err("IOServiceAddMatchingNotification(match) failed: 0x{X:0>8}", .{@as(u32, @bitCast(mr))});
         return error.AddNotificationFailed;
     }
+    errdefer _ = c.IOObjectRelease(self.matched_iter);
 
     _ = c.CFRetain(dict);
     const tr = c.IOServiceAddMatchingNotification(port, c.kIOTerminatedNotification, dict, terminatedCallback, self, &self.terminated_iter);
@@ -99,6 +100,7 @@ pub fn init(
         log.err("IOServiceAddMatchingNotification(terminate) failed: 0x{X:0>8}", .{@as(u32, @bitCast(tr))});
         return error.AddNotificationFailed;
     }
+    errdefer _ = c.IOObjectRelease(self.terminated_iter);
 
     // Drain the initial iterators to ARM the notifications. These are the
     // keyboards already present at startup, which the normal seize path

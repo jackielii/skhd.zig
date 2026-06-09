@@ -1,11 +1,16 @@
 //! System sleep/wake notifications via IORegisterForSystemPower.
 //!
-//! Why: after a long lid-close → sleep → wake cycle, the IOHIDManager
-//! we set up at startup keeps holding stale IOHIDDeviceRefs and stops
-//! delivering input. The grabber's CFRunLoop sits in mach_msg forever
-//! and the user's builtin keyboard appears dead. Re-running the
-//! current apply_rules path on wake re-creates the manager and the
-//! seize against the post-wake device set.
+//! Role: a wake backstop to DeviceNotify. The primary recovery for a
+//! dead keyboard is DeviceNotify — the keyboard re-enumerates (old
+//! IORegistry entry terminates, new one appears) and we re-seize on that
+//! event. This re-seizes unconditionally on every full wake, covering
+//! the two cases DeviceNotify can't: (a) the seize goes stale *without*
+//! a re-enumeration (same entry id), and (b) the IOKit match/terminate
+//! notification is dropped on wake (a documented, rare IOKit behavior).
+//! Re-running the apply_rules path re-creates the manager + seize against
+//! the post-wake device set; it's idempotent, so overlapping with
+//! DeviceNotify's re-seize on a normal wake just costs a redundant
+//! rebuild — see onSystemWake.
 //!
 //! Logging: every transition is logged to the grabber log (Can/Will
 //! sleep, Will/Has power-on) so the next incident is self-evident

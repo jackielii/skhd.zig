@@ -209,10 +209,9 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
     c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
 }
 
-/// Build the CFArray of matching dictionaries for `matches`. Shared by
-/// the seize manager (`setMatches`) and the liveness probe's throwaway
-/// manager (`pollLiveness`) so both enumerate by identical criteria —
-/// the probe can't drift from what we actually seize. Caller releases.
+/// Build the CFArray of matching dictionaries that filters the seize
+/// manager to the devices in `matches`. Caller releases the returned
+/// array.
 fn buildMatchDicts(matches: []const Match) !c.CFArrayRef {
     // Capacity 0 = unbounded: a built-in alias expands to one dict per
     // transport, so the dict count can exceed matches.len.

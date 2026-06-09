@@ -22,7 +22,7 @@ const HidSeize = @import("HidSeize.zig");
 const HidSystem = @import("HidSystem.zig");
 const Ipc = @import("Ipc.zig");
 const KbState = @import("KbState.zig");
-const PowerNotify = @import("PowerNotify.zig");
+const DeviceNotify = @import("DeviceNotify.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -252,6 +252,16 @@ const Daemon = struct {
     /// subscription should be active.
     console_user_timer: c.CFRunLoopTimerRef = null,
 
+    /// Event-driven keyboard (re-)enumeration watch. The seize silently
+    /// dies when the built-in keyboard re-enumerates across a DarkWake
+    /// (old IORegistry entry terminates, new one appears) — the process
+    /// stays healthy but no keystrokes flow, and a wake-driven re-seize
+    /// can't catch it because that DarkWake never delivers a full system
+    /// power-on. DeviceNotify fires on the IOKit matched/terminated
+    /// notification, so onDeviceChange re-seizes exactly when a keyboard
+    /// appears/disappears — no polling, zero steady-state overhead.
+    device_notify: ?*DeviceNotify = null,
+
     /// Pending vhidd recovery timer, non-null while the daemon is in
     /// the "vhidd is broken, retrying" state. One-shot — the callback
     /// releases it and either schedules a new one (on failure) or
@@ -261,13 +271,6 @@ const Daemon = struct {
     /// is the first attempt, fire immediately". Doubles each failure,
     /// capped at vhidd_recovery_backoff_max_ms.
     vhidd_recovery_backoff_ms: u32 = 0,
-
-    /// System sleep/wake hook. On wake the IOHIDManager's device refs
-    /// can be silently invalidated; without this the grabber sits in
-    /// CFRunLoop forever and the user's keyboard appears dead. The
-    /// wake handler re-runs applyLatestRules which tears down and
-    /// rebuilds vhidd + seize against the post-wake device set.
-    power_notify: ?*PowerNotify = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, profile: bool) !Daemon {
         try ensureSocketParentDir(socket_path);
@@ -328,9 +331,9 @@ const Daemon = struct {
     }
 
     pub fn deinit(self: *Daemon) void {
-        if (self.power_notify) |pn| {
-            pn.deinit();
-            self.power_notify = null;
+        if (self.device_notify) |dn| {
+            dn.deinit();
+            self.device_notify = null;
         }
         self.stopConsoleUserTimer();
         self.cancelVhiddRecoveryTimer();
@@ -389,13 +392,15 @@ const Daemon = struct {
             return;
         };
         self.startConsoleUserTimer();
-        // Best-effort: if power-notification registration fails the
-        // grabber still works in steady state — only the post-wake
-        // recovery path is unavailable. Kept at warn (fires once, only
-        // on failure) because a disarmed recovery path is worth knowing
-        // about even in a release build.
-        self.power_notify = PowerNotify.init(self.allocator, onSystemWake, self) catch |err| blk: {
-            log.warn("PowerNotify init failed ({s}); post-wake auto-reseize disabled", .{@errorName(err)});
+        // Event-driven keyboard re-enumeration watch — recovers a seize
+        // that goes dead when the built-in keyboard re-enumerates across
+        // a DarkWake/hibernate (old IORegistry entry terminates, new one
+        // appears). Best-effort: if registration fails the grabber still
+        // works in steady state, only the auto-reseize is lost. Kept at
+        // warn (fires once, only on failure) because a disarmed recovery
+        // path is worth knowing about even in a release build.
+        self.device_notify = DeviceNotify.init(self.allocator, onDeviceChange, self) catch |err| blk: {
+            log.warn("DeviceNotify init failed ({s}); keyboard re-enumeration auto-reseize disabled", .{@errorName(err)});
             break :blk null;
         };
 
@@ -554,23 +559,6 @@ const Daemon = struct {
             if (s.uid == uid) return s;
         }
         return null;
-    }
-
-    /// Called from PowerNotify when the system finishes waking. The
-    /// IOHIDManager opened before sleep can be holding stale device
-    /// refs; re-running applyLatestRules tears down + rebuilds vhidd
-    /// + seize against the post-wake device set. Same code path as a
-    /// fresh agent apply_rules so we don't carry a parallel recovery
-    /// implementation.
-    fn onSystemWake(ctx: ?*anyopaque) void {
-        const self: *Daemon = @ptrCast(@alignCast(ctx orelse return));
-        // info: fires on every wake (several times/day), so it stays out
-        // of release logs (ReleaseFast compiles out < warn). Visible in
-        // a ReleaseSafe debug build if the post-wake path needs tracing.
-        log.info("post-wake: re-applying current rules to refresh IOHIDManager device refs", .{});
-        self.applyLatestRules() catch |err| {
-            log.warn("post-wake applyLatestRules failed: {s}", .{@errorName(err)});
-        };
     }
 
     /// (Re)build vhidd / seize / engine slots from the active
@@ -901,6 +889,23 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
     // wires up layer push.
     d.applyLatestRules() catch |err| {
         log.warn("rebuild after console user change failed: {s}", .{@errorName(err)});
+    };
+}
+
+/// DeviceNotify callback: a keyboard (re-)enumerated or terminated.
+/// Re-seize against the current device set. applyLatestRules tears down
+/// and rebuilds the seize, so this both grabs a freshly-appeared keyboard
+/// and replaces a stale ref to one that re-enumerated under us. Runs
+/// between run-loop sources (not inside a seize callback), so the
+/// teardown is safe — same context as the console-user and power
+/// callbacks. Re-seizing does not itself re-enumerate the device, so
+/// there is no feedback loop.
+fn onDeviceChange(ctx: ?*anyopaque) void {
+    const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
+    if (d.seize == null) return; // nothing seized yet → first apply_rules will
+    log.warn("keyboard enumeration changed — re-seizing", .{});
+    d.applyLatestRules() catch |err| {
+        log.warn("device-change rebuild failed: {s}", .{@errorName(err)});
     };
 }
 
@@ -1273,7 +1278,7 @@ fn emitToVhidd(ctx_ptr: ?*anyopaque, ev: TapHold.Event) void {
     if (usage16 < 0x04) return;
     if (!cx.state.applyKeyboardEvent(usage16, ev.pressed)) return;
 
-    log.info("emit: usage=0x{X:0>2} pressed={}", .{ usage16, ev.pressed });
+    log.debug("emit: usage=0x{X:0>2} pressed={}", .{ usage16, ev.pressed });
 
     // Short-circuit if a previous post already triggered recovery —
     // the seize tear-down is scheduled on the runloop and any events

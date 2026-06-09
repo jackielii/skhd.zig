@@ -245,7 +245,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                         }
                     }
                     if (!down_was_buffered) {
-                        log.info("pass-through up: src=0x{X:0>2} usage=0x{X:0>2} (down was external)", .{ self.rule.src_usage, ev.usage });
+                        log.debug("pass-through up: src=0x{X:0>2} usage=0x{X:0>2} (down was external)", .{ self.rule.src_usage, ev.usage });
                         return .{ .disposition = .pass, .timer = .none };
                     }
                 }
@@ -257,7 +257,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                 if (ev.pressed) {
                     self.pushBufferedDown(ev_usage16) catch {};
                 }
-                log.info("buffer: slot src=0x{X:0>2} +usage=0x{X:0>2} pressed={} (depth={d})", .{ self.rule.src_usage, ev.usage, ev.pressed, self.buffer_len });
+                log.debug("buffer: slot src=0x{X:0>2} +usage=0x{X:0>2} pressed={} (depth={d})", .{ self.rule.src_usage, ev.usage, ev.pressed, self.buffer_len });
                 if (self.rule.permissive_hold and !self.isLayer() and !ev.pressed) {
                     // Modifier-style permissive_hold: nested down+up
                     // commits hold and replays the inner key under
@@ -363,7 +363,7 @@ pub fn flushPrefixAndDiscardRest(self: *Self, prefix_len: usize) void {
 }
 
 fn commitTap(self: *Self) void {
-    log.info("commit tap: src=0x{X:0>2} → tap=0x{X:0>2}", .{ self.rule.src_usage, self.rule.tap_usage });
+    log.debug("commit tap: src=0x{X:0>2} → tap=0x{X:0>2}", .{ self.rule.src_usage, self.rule.tap_usage });
     self.emit(self.rule.tap_usage, true);
     self.emit(self.rule.tap_usage, false);
     // After tap, replay any buffered events in their original order.
@@ -374,11 +374,11 @@ fn commitTap(self: *Self) void {
 fn emitHoldDown(self: *Self) void {
     switch (self.rule.hold) {
         .hid_usage => |u| {
-            log.info("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} down", .{ self.rule.src_usage, u });
+            log.debug("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} down", .{ self.rule.src_usage, u });
             self.emit(u, true);
         },
         .layer => |name| {
-            log.info("commit hold: src=0x{X:0>2} → enter layer '{s}'", .{ self.rule.src_usage, name });
+            log.debug("commit hold: src=0x{X:0>2} → enter layer '{s}'", .{ self.rule.src_usage, name });
             if (self.layer_sink) |ls| {
                 ls(self.layer_sink_ctx, name, true);
             } else {
@@ -391,11 +391,11 @@ fn emitHoldDown(self: *Self) void {
 fn emitHoldUp(self: *Self) void {
     switch (self.rule.hold) {
         .hid_usage => |u| {
-            log.info("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} up", .{ self.rule.src_usage, u });
+            log.debug("commit hold: src=0x{X:0>2} → hold=0x{X:0>2} up", .{ self.rule.src_usage, u });
             self.emit(u, false);
         },
         .layer => |name| {
-            log.info("commit hold: src=0x{X:0>2} → exit layer '{s}'", .{ self.rule.src_usage, name });
+            log.debug("commit hold: src=0x{X:0>2} → exit layer '{s}'", .{ self.rule.src_usage, name });
             if (self.layer_sink) |ls| {
                 ls(self.layer_sink_ctx, name, false);
             }
@@ -413,7 +413,7 @@ fn emit(self: *Self, usage: u16, pressed: bool) void {
 
 fn flushBuffer(self: *Self) void {
     if (self.buffer_len > 0) {
-        log.info("flush: slot src=0x{X:0>2} replaying {d} buffered event(s)", .{ self.rule.src_usage, self.buffer_len });
+        log.debug("flush: slot src=0x{X:0>2} replaying {d} buffered event(s)", .{ self.rule.src_usage, self.buffer_len });
     }
     for (self.bufferItems()) |ev| {
         self.sink(self.sink_ctx, ev);

@@ -204,11 +204,20 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         self.owned_matches = &.{};
     }
 
+    const dicts = try buildMatchDicts(matches);
+    defer c.CFRelease(dicts);
+    c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
+}
+
+/// Build the CFArray of matching dictionaries that filters the seize
+/// manager to the devices in `matches`. Caller releases the returned
+/// array.
+fn buildMatchDicts(matches: []const Match) !c.CFArrayRef {
     // Capacity 0 = unbounded: a built-in alias expands to one dict per
     // transport, so the dict count can exceed matches.len.
     const dicts = c.CFArrayCreateMutable(c.kCFAllocatorDefault, 0, &c.kCFTypeArrayCallBacks);
     if (dicts == null) return error.CFArrayCreateFailed;
-    defer c.CFRelease(dicts);
+    errdefer c.CFRelease(dicts);
 
     for (matches) |m| {
         // Partial-zero (one of vendor/product is 0, the other isn't) is
@@ -229,7 +238,7 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
         }
     }
 
-    c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
+    return dicts;
 }
 
 /// Schedule the manager on the current run loop and open it.
@@ -248,11 +257,11 @@ pub fn start(self: *Self, mode: Mode) !void {
     if (self.running) return;
 
     c.IOHIDManagerRegisterInputValueCallback(self.manager, valueCallback, self);
-    // Per-device add/remove notifications. Logging-only — re-seize on
-    // wake is driven by PowerNotify so we don't double-trigger here.
-    // These fire after manager open: matching for the initial
-    // population and again for any device that re-enumerates (e.g.
-    // unplug/replug, or post-sleep stale-ref replacement).
+    // Per-device add/remove notifications. Logging-only (vendor/product
+    // forensics in a debug build) — the actual re-seize on re-enumeration
+    // is driven by DeviceNotify (IOService match/terminate), so we don't
+    // double-trigger here. These fire after manager open: matching for the
+    // initial population and again for any device that re-enumerates.
     c.IOHIDManagerRegisterDeviceMatchingCallback(self.manager, deviceMatchedCallback, self);
     c.IOHIDManagerRegisterDeviceRemovalCallback(self.manager, deviceRemovedCallback, self);
     c.IOHIDManagerScheduleWithRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);

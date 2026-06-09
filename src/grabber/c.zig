@@ -77,6 +77,7 @@ pub extern fn CFDictionaryCreateMutable(
     valueCallBacks: *const CFDictionaryValueCallBacks,
 ) CFMutableDictionaryRef;
 pub extern fn CFDictionarySetValue(dict: CFMutableDictionaryRef, key: ?*const anyopaque, value: ?*const anyopaque) void;
+pub extern fn CFRetain(cf: ?*const anyopaque) ?*const anyopaque;
 pub extern fn CFNumberCreate(allocator: CFAllocatorRef, type_: CFNumberType, valuePtr: *const anyopaque) CFNumberRef;
 pub extern fn CFStringCreateWithCString(allocator: CFAllocatorRef, cstr: [*:0]const u8, encoding: CFStringEncoding) CFStringRef;
 pub extern fn CFAbsoluteTimeGetCurrent() CFAbsoluteTime;
@@ -228,6 +229,10 @@ pub extern fn IOHIDManagerRegisterDeviceRemovalCallback(
     context: ?*anyopaque,
 ) void;
 pub extern fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) CFTypeRef;
+// Read a registry node's 64-bit entry ID. DeviceNotify logs it so a
+// re-enumeration is visible in the forensic log (old id terminates, new
+// id matches).
+pub extern fn IORegistryEntryGetRegistryEntryID(entry: io_service_t, entryID: *u64) IOReturn;
 
 // IOService / IOHIDSystem client. Used by HidSystem.zig to force
 // caps_lock state off after Apple's MacBook keyboard firmware toggles
@@ -252,46 +257,49 @@ pub extern var mach_task_self_: mach_port_t;
 
 pub extern fn IOServiceMatching(name: [*:0]const u8) CFMutableDictionaryRef;
 pub extern fn IOServiceGetMatchingService(masterPort: mach_port_t, matching: CFDictionaryRef) io_service_t;
+
+// IOService matched/terminated notifications — the event-driven trigger
+// for re-seizing when a keyboard (re-)enumerates. DeviceNotify.zig
+// registers a kIOFirstMatchNotification + kIOTerminatedNotification on a
+// keyboard matching dict; the kernel fires the callback with an iterator
+// the callback must drain (IOIteratorNext to exhaustion) both to read
+// the changed services AND to re-arm the notification.
+pub const io_iterator_t = io_object_t;
+pub const IO_OBJECT_NULL: io_object_t = 0;
+// io_name_t notification-type strings (IOKitKeys.h).
+pub const kIOFirstMatchNotification: [*:0]const u8 = "IOServiceFirstMatch";
+pub const kIOTerminatedNotification: [*:0]const u8 = "IOServiceTerminate";
+// Matching-dict provider class + keyboard usage keys (present on the
+// built-in keyboard's IOHIDDevice node; verified via ioreg).
+pub const kIOHIDDeviceKey: [*:0]const u8 = "IOHIDDevice";
+// kIOHIDPrimaryUsagePageKey / kIOHIDPrimaryUsageKey and the
+// kHIDPage_GenericDesktop / kHIDUsage_GD_Keyboard values are already
+// defined above (shared with HidSeize's matching dicts).
+
+pub const IOServiceMatchingCallback = ?*const fn (refcon: ?*anyopaque, iterator: io_iterator_t) callconv(.c) void;
+pub extern fn IONotificationPortCreate(mainPort: mach_port_t) IONotificationPortRef;
+pub extern fn IOServiceAddMatchingNotification(
+    notifyPort: IONotificationPortRef,
+    notificationType: [*:0]const u8,
+    matching: CFDictionaryRef,
+    callback: IOServiceMatchingCallback,
+    refCon: ?*anyopaque,
+    notification: *io_iterator_t,
+) IOReturn;
+pub extern fn IOIteratorNext(iterator: io_iterator_t) io_object_t;
 pub extern fn IOServiceOpen(service: io_service_t, owningTask: task_port_t, type_: u32, connect: *io_connect_t) IOReturn;
 pub extern fn IOServiceClose(connect: io_connect_t) IOReturn;
 pub extern fn IOObjectRelease(object: io_object_t) IOReturn;
 pub extern fn IOHIDSetModifierLockState(handle: io_connect_t, selector: c_int, state: u8) IOReturn;
 pub extern fn IOHIDGetModifierLockState(handle: io_connect_t, selector: c_int, state: *u8) IOReturn;
 
-// System sleep/wake notifications via the root power-management port.
-// IORegisterForSystemPower returns an io_connect_t to the root domain
-// and gives us an IONotificationPortRef whose run-loop source we add
-// to CFRunLoop. The callback fires for Can/Will sleep + Will/Has
-// powered-on; we must ack the Can/Will-sleep messages with
-// IOAllowPowerChange or sleep gets blocked. Per Apple docs the
-// messageArgument carries the notification ID — it's a void* on the
-// API surface but is used as a `long` for ack.
-//
-// IOMessage.h: iokit_common_msg(x) = 0xE0000000 | x.
-pub const kIOMessageCanSystemSleep: u32 = 0xE0000270;
-pub const kIOMessageSystemWillSleep: u32 = 0xE0000280;
-pub const kIOMessageSystemWillPowerOn: u32 = 0xE0000320;
-pub const kIOMessageSystemHasPoweredOn: u32 = 0xE0000300;
-
+// IONotificationPort — run-loop-integrated delivery port for IOKit
+// notifications. DeviceNotify creates one (IONotificationPortCreate,
+// declared with the IOService notification bindings above) and adds its
+// keyboard match/terminate run-loop source to the current run loop.
 pub const IONotificationPortRef = ?*anyopaque;
-
-pub const IOServiceInterestCallback = ?*const fn (
-    refcon: ?*anyopaque,
-    service: io_service_t,
-    messageType: u32,
-    messageArgument: ?*anyopaque,
-) callconv(.c) void;
-
-pub extern fn IORegisterForSystemPower(
-    refcon: ?*anyopaque,
-    thePortRef: *IONotificationPortRef,
-    callback: IOServiceInterestCallback,
-    notifier: *io_object_t,
-) io_connect_t;
-pub extern fn IODeregisterForSystemPower(notifier: *io_object_t) IOReturn;
 pub extern fn IONotificationPortGetRunLoopSource(notify: IONotificationPortRef) CFRunLoopSourceRef;
 pub extern fn IONotificationPortDestroy(notify: IONotificationPortRef) void;
-pub extern fn IOAllowPowerChange(kernelPort: io_connect_t, notificationID: isize) IOReturn;
 
 // SystemConfiguration — read the active console user uid. D5 uses
 // this to apply rules only from the foreground user's agent (so

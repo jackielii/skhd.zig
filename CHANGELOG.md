@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.8...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.9...HEAD)
+
+## [0.1.9](https://github.com/jackielii/skhd.zig/compare/v0.1.8...v0.1.9) - 2026-06-12
+
+### Fixed
+- **Release builds no longer crash on Intel Macs (#46).** Signed x86_64 release binaries died at startup with SIGILL/SIGBUS in whatever function happened to sit first in the text section (`Keycodes.init`, `Parser.init`). Root cause is upstream [ziglang/zig#23704](https://github.com/ziglang/zig/issues/23704): Zig's MachO linker emits zero headerpad on x86_64, so Apple's `codesign` silently writes its `LC_CODE_SIGNATURE` load command over the first bytes of `__TEXT,__text`, corrupting the first function's prologue (arm64 was unaffected because Zig already reserves an ad-hoc signature load command there; unsigned binaries ran fine, and Debug builds escaped by layout luck). Both `skhd` and `skhd-grabber` now reserve `0x1000` of headerpad — the same amount Apple's clang/ld64 leaves — so signing no longer touches code. Verified by diffing `__text` across a `codesign` run: previously the prologue bytes were replaced by the signature load command, now they're untouched. Thanks @UnixMonky for the patient round-trips that pinned this down!
+- **skhd-grabber recovers the keyboard after DarkWake/hibernate.** The 0.1.7 sleep/wake fix re-seized on the system power-on notification, but a DarkWake or hibernate cycle re-enumerates the keyboard *without* sending power-on, so the grabber kept holding a dead device and the built-in keyboard came back unresponsive. The grabber now watches the keyboard's IOService directly (`IOServiceAddMatchingNotification`, `kIOFirstMatch` + `kIOTerminated`, in the new `src/grabber/DeviceNotify.zig`) and re-seizes whenever the device re-appears — event-driven, no polling, the same approach Karabiner's grabber uses. This replaces the power-notification path (`PowerNotify.zig` is gone). Reproduced via scheduled DarkWake and validated across a real hibernate cycle.
 
 ## [0.1.8](https://github.com/jackielii/skhd.zig/compare/v0.1.7...v0.1.8) - 2026-06-07
 

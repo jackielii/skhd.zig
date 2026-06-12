@@ -191,6 +191,12 @@ pub fn build(b: *std.Build) void {
         .name = "skhd",
         .root_module = exe_mod,
     });
+    // Zig's MachO linker emits zero headerpad on x86_64 (arm64 gets an
+    // ad-hoc LC_CODE_SIGNATURE already). codesign then silently
+    // overwrites the first bytes of __TEXT,__text with its load
+    // command, corrupting the first function and crashing signed
+    // binaries on Intel with SIGILL/SIGBUS (#46, ziglang/zig#23704).
+    exe.headerpad_size = 0x1000;
     b.installArtifact(exe);
 
     // skhd-grabber: system daemon (root) for caps_lock-class tap-hold.
@@ -209,6 +215,8 @@ pub fn build(b: *std.Build) void {
         .name = "skhd-grabber",
         .root_module = grabber_mod,
     });
+    // Same codesign headerpad fix as skhd above — the grabber is signed too.
+    grabber_exe.headerpad_size = 0x1000;
     b.installArtifact(grabber_exe);
 
     // `zig build grabber-app` — build the grabber binary, wrap it in

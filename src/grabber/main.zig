@@ -23,6 +23,7 @@ const HidSystem = @import("HidSystem.zig");
 const Ipc = @import("Ipc.zig");
 const KbState = @import("KbState.zig");
 const DeviceNotify = @import("DeviceNotify.zig");
+const PowerNotify = @import("PowerNotify.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -40,7 +41,35 @@ pub const std_options: std.Options = .{
         .ReleaseSafe => .info,
         .ReleaseFast, .ReleaseSmall => .warn,
     },
+    .logFn = grabberLog,
 };
+
+/// Like the default log function but prefixes each line with a local
+/// wall-clock `[HH:MM:SS]` so grabber events correlate directly with
+/// `pmset -g log` sleep/wake times when chasing a seize recurrence.
+fn grabberLog(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+    var buffer: [64]u8 = undefined;
+    const t = std.debug.lockStderr(&buffer).terminal();
+    defer std.debug.unlockStderr();
+    var now: c.time_t = c.time(null);
+    var tm: c.Tm = undefined;
+    if (c.localtime_r(&now, &tm) != null) {
+        t.writer.print("[{d:0>2}:{d:0>2}:{d:0>2}] ", .{
+            @as(u32, @intCast(@max(0, tm.tm_hour))),
+            @as(u32, @intCast(@max(0, tm.tm_min))),
+            @as(u32, @intCast(@max(0, tm.tm_sec))),
+        }) catch {};
+    }
+    std.log.defaultLogFileTerminal(level, scope, format, args, t) catch {};
+}
 
 /// Set by SIGTERM/SIGINT/SIGHUP so the accept() loop tears down on
 /// next iteration. async-signal-safe by being volatile primitives only.
@@ -262,6 +291,17 @@ const Daemon = struct {
     /// appears/disappears — no polling, zero steady-state overhead.
     device_notify: ?*DeviceNotify = null,
 
+    /// System sleep/wake hook. Holding the seize across sleep leaves it
+    /// stale on wake (same device id, matched_count=1, dead event pipe);
+    /// re-seizing in place can't revive it — only a device re-enumeration
+    /// does. So we release the seize on will-sleep and re-acquire on
+    /// wake, never spanning the power transition (Karabiner's pattern).
+    power_notify: ?*PowerNotify = null,
+    /// True between will-sleep and power-on. While set, the seize is kept
+    /// torn down — applyLatestRules and onDeviceChange must not re-seize
+    /// (the device is powering down/up and a seize would go stale).
+    sleeping: bool = false,
+
     /// Pending vhidd recovery timer, non-null while the daemon is in
     /// the "vhidd is broken, retrying" state. One-shot — the callback
     /// releases it and either schedules a new one (on failure) or
@@ -335,6 +375,10 @@ const Daemon = struct {
             dn.deinit();
             self.device_notify = null;
         }
+        if (self.power_notify) |pn| {
+            pn.deinit();
+            self.power_notify = null;
+        }
         self.stopConsoleUserTimer();
         self.cancelVhiddRecoveryTimer();
         self.teardownSeize();
@@ -401,6 +445,12 @@ const Daemon = struct {
         // path is worth knowing about even in a release build.
         self.device_notify = DeviceNotify.init(self.allocator, onDeviceChange, self) catch |err| blk: {
             log.warn("DeviceNotify init failed ({s}); keyboard re-enumeration auto-reseize disabled", .{@errorName(err)});
+            break :blk null;
+        };
+        // Release-on-sleep / re-acquire-on-wake. Without it the seize
+        // held across sleep goes stale and the keyboard dies on wake.
+        self.power_notify = PowerNotify.init(self.allocator, onWillSleep, onSystemWake, self) catch |err| blk: {
+            log.warn("PowerNotify init failed ({s}); seize will not be released across sleep", .{@errorName(err)});
             break :blk null;
         };
 
@@ -567,6 +617,15 @@ const Daemon = struct {
     /// or the console user switched. The active subscription's
     /// stream becomes the layer-push target.
     fn applyLatestRules(self: *Daemon) !void {
+        // While the system is asleep the seize must stay torn down: the
+        // device is powering down/up and a seize taken across that
+        // transition goes stale. onSystemWake re-runs this after clearing
+        // `sleeping`. Rule/subscription state is already stored by the
+        // caller, so the latest rules apply on wake.
+        if (self.sleeping) {
+            self.teardownSeize();
+            return;
+        }
         const sub = self.activeSubscription() orelse {
             log.info("no active subscription — keeping seize torn down", .{});
             self.teardownSeize();
@@ -902,10 +961,33 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
 /// there is no feedback loop.
 fn onDeviceChange(ctx: ?*anyopaque) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
+    if (d.sleeping) return; // seize stays released until wake
     if (d.seize == null) return; // nothing seized yet → first apply_rules will
     log.warn("keyboard enumeration changed — re-seizing", .{});
     d.applyLatestRules() catch |err| {
         log.warn("device-change rebuild failed: {s}", .{@errorName(err)});
+    };
+}
+
+/// PowerNotify: the system is about to sleep. Release the seize so the
+/// keyboard sleeps as a normal HID device — a seize held across the
+/// power transition goes stale (dead event pipe, unrecoverable in place).
+/// `sleeping` keeps it released until wake.
+fn onWillSleep(ctx: ?*anyopaque) void {
+    const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
+    d.sleeping = true;
+    d.teardownSeize();
+    log.info("seize released for sleep", .{});
+}
+
+/// PowerNotify: the system finished waking. Re-acquire a fresh seize on
+/// the now-healthy device. applyLatestRules rebuilds against the current
+/// device set, so this grabs whatever the keyboard re-enumerated to.
+fn onSystemWake(ctx: ?*anyopaque) void {
+    const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
+    d.sleeping = false;
+    d.applyLatestRules() catch |err| {
+        log.warn("post-wake re-seize failed: {s}", .{@errorName(err)});
     };
 }
 

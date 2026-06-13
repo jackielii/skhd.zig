@@ -421,7 +421,9 @@ fn applyConfigPaths(allocator: std.mem.Allocator, entries: []const []const u8) v
         log.warn("PATH apply: setenv failed", .{});
         return;
     }
-    log.warn("PATH after .path directives: {s}", .{buf.items[0 .. buf.items.len - 1]});
+    // info, not warn: routine startup diagnostic (mirrors the inherited-PATH
+    // info line above), not an error — keep it out of the release log.
+    log.info("PATH after .path directives: {s}", .{buf.items[0 .. buf.items.len - 1]});
 }
 
 /// Resolve config file path following XDG spec

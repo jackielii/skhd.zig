@@ -294,7 +294,7 @@ fn logSessionStart(io: std.Io) void {
     const month_day = year_day.calculateMonthDay();
     const day_secs = epoch_secs.getDaySeconds();
 
-    log.warn("=== skhd {s} started at {d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z (PID {d}) ===", .{
+    log.info("=== skhd {s} started at {d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z (PID {d}) ===", .{
         version,
         @as(u32, year_day.year),
         @intFromEnum(month_day.month),

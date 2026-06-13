@@ -67,7 +67,12 @@ fn grabberLog(
     var now: c.time_t = c.time(null);
     var tm: c.Tm = undefined;
     if (c.localtime_r(&now, &tm) != null) {
-        t.writer.print("[{d:0>2}:{d:0>2}:{d:0>2}] ", .{
+        // Full local date+time (matches `pmset -g log` format) so a sleep
+        // span across days is unambiguous — the daemon can be idle for days.
+        t.writer.print("[{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}] ", .{
+            @as(u32, @intCast(@max(0, tm.tm_year + 1900))),
+            @as(u32, @intCast(@max(0, tm.tm_mon + 1))),
+            @as(u32, @intCast(@max(0, tm.tm_mday))),
             @as(u32, @intCast(@max(0, tm.tm_hour))),
             @as(u32, @intCast(@max(0, tm.tm_min))),
             @as(u32, @intCast(@max(0, tm.tm_sec))),

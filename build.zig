@@ -210,6 +210,7 @@ pub fn build(b: *std.Build) void {
     });
     linkGrabberFrameworks(b, grabber_mod);
     grabber_mod.addImport("grabber_protocol", grabber_protocol_mod);
+    addVersionImport(b, grabber_mod);
 
     const grabber_exe = b.addExecutable(.{
         .name = "skhd-grabber",

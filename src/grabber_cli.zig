@@ -547,6 +547,18 @@ pub fn uninstallGrabber(allocator: std.mem.Allocator, io: std.Io) !void {
     , .{});
 }
 
+/// Connect to the running grabber and return the build version it
+/// reports in its hello-ok reply (caller frees). Returns null if the
+/// grabber isn't reachable or is too old to report a version — the
+/// status output then shows it as not running / unknown.
+pub fn runningGrabberVersion(allocator: std.mem.Allocator, io: std.Io) ?[]u8 {
+    var client = Client.connect(allocator, io, protocol.default_socket_path) catch return null;
+    defer client.close();
+    client.hello() catch return null;
+    const v = client.grabber_version orelse return null;
+    return allocator.dupe(u8, v) catch null;
+}
+
 /// Walk every prerequisite for caps_lock-class tap-hold and report
 /// where the chain breaks. One command users can run when something
 /// isn't working — gives a clear "this is where it's broken, this is

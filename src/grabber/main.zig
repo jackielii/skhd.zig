@@ -29,6 +29,11 @@ const Vhidd = @import("Vhidd.zig");
 
 const log = std.log.scoped(.grabber);
 
+/// Build-stamped version (VERSION file + git hash + build mode), shared
+/// with the agent. Reported by `--version` and in the hello-ok reply so
+/// `skhd --status` can show the running grabber's version.
+pub const version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
+
 /// `-P/--profile` instrumentation is compiled in for Debug and
 /// ReleaseSafe only — matching `Tracer.zig` in the user-agent. In
 /// ReleaseFast/ReleaseSmall every profile branch folds away at
@@ -126,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
             // accepted for symmetry with other daemons but unused at
             // D1. D6 will hook it up to a stderr redirect.
         } else if (std.mem.eql(u8, a, "--version") or std.mem.eql(u8, a, "-v")) {
-            std.debug.print("skhd-grabber (D1 skeleton)\n", .{});
+            std.debug.print("skhd-grabber v{s}\n", .{version});
             return;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             printHelp();

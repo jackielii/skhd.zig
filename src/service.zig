@@ -611,6 +611,18 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
     const installed = sm_status != .not_registered and sm_status != .not_found;
 
     std.debug.print("skhd service status:\n", .{});
+
+    // Versions of the two daemons. skhd's is this binary's own build
+    // (== the running agent: same install path, and macOS won't let our
+    // install flow swap a running binary's inode without stopping it
+    // first). The grabber's is queried live over IPC (its hello-ok reply),
+    // so it reflects the actually-running daemon, not the on-disk binary.
+    const skhd_version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
+    const grabber_ver = grabber_cli.runningGrabberVersion(allocator, io);
+    defer if (grabber_ver) |v| allocator.free(v);
+    std.debug.print("  skhd version:         {s}\n", .{skhd_version});
+    std.debug.print("  skhd-grabber version: {s}\n", .{grabber_ver orelse "not running"});
+
     std.debug.print("  Service installed:    {s}\n", .{if (installed) "Yes" else "No"});
     std.debug.print("  Registration status:  {s}\n", .{sm_status.describe()});
 

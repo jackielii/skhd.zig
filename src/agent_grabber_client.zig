@@ -15,6 +15,10 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: std.Io.net.Stream,
+    /// Running grabber's build version, captured from the hello-ok reply
+    /// (null until `hello()` succeeds, or if the grabber is too old to
+    /// send it). Owned by the client; freed in `close`.
+    grabber_version: ?[]u8 = null,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !Client {
         const addr = std.Io.net.UnixAddress.init(socket_path) catch |err| {
@@ -39,6 +43,7 @@ pub const Client = struct {
     }
 
     pub fn close(self: *Client) void {
+        if (self.grabber_version) |v| self.allocator.free(v);
         self.stream.close(self.io);
         self.* = undefined;
     }
@@ -106,7 +111,17 @@ fn expectOk(client: *Client) !void {
     const t = obj.get("type") orelse return error.BadResponse;
     if (t != .string) return error.BadResponse;
 
-    if (std.mem.eql(u8, t.string, "ok")) return;
+    if (std.mem.eql(u8, t.string, "ok")) {
+        // Capture the grabber's reported version (parsed json is freed on
+        // return, so dupe into client-owned memory).
+        if (obj.get("grabber_version")) |v| {
+            if (v == .string) {
+                if (client.grabber_version) |old| client.allocator.free(old);
+                client.grabber_version = client.allocator.dupe(u8, v.string) catch null;
+            }
+        }
+        return;
+    }
 
     if (std.mem.eql(u8, t.string, "error")) {
         const code = if (obj.get("code")) |v| (if (v == .string) v.string else "?") else "?";

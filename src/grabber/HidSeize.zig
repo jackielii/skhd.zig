@@ -295,6 +295,10 @@ pub fn start(self: *Self, mode: Mode) !void {
     if (count == 0) {
         log.warn("matching dictionary captured 0 devices — vendor/product mismatch?", .{});
     }
+    // Observability: log the registry entry id of each seized device so a
+    // recurrence shows exactly which device the seize holds (vs the live
+    // keyboard's id from `ioreg`) — the gap that forced us to infer it.
+    if (mode == .seize) self.logSeizedEntryIds(matched, count);
 
     // No post-match filtering needed: the matching dicts are exact. The
     // (0,0) built-in matches only Transport ∈ {FIFO,SPI} keyboards (the
@@ -307,6 +311,22 @@ pub fn start(self: *Self, mode: Mode) !void {
 
     if (mode == .seize) {
         self.disableCapsLockDelayOnMatches(self.owned_matches);
+    }
+}
+
+/// Log the IORegistry entry id of each device in the seized set.
+/// Best-effort — bails on any allocation/IOKit hiccup.
+fn logSeizedEntryIds(self: *Self, set: ?*anyopaque, count: usize) void {
+    if (set == null or count == 0) return;
+    const refs = self.allocator.alloc(?*const anyopaque, count) catch return;
+    defer self.allocator.free(refs);
+    c.CFSetGetValues(set, refs.ptr);
+    for (refs) |ref| {
+        const dev: c.IOHIDDeviceRef = @constCast(ref);
+        const svc = c.IOHIDDeviceGetService(dev);
+        var id: u64 = 0;
+        if (svc != 0) _ = c.IORegistryEntryGetRegistryEntryID(svc, &id);
+        log.info("seized device entry_id={d}", .{id});
     }
 }
 

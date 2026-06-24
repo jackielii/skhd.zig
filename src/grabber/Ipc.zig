@@ -10,6 +10,10 @@ const protocol = @import("grabber_protocol");
 
 const log = std.log.scoped(.grabber_ipc);
 
+/// This grabber's build version, returned in the hello-ok reply so
+/// `skhd --status` can show the running grabber's version over IPC.
+const grabber_version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
+
 /// Owned (deep-copied) rules and remaps from one apply_rules
 /// message. Caller takes ownership and is responsible for freeing
 /// each Rule's hold_layer slice plus the rules and remaps slices
@@ -135,7 +139,10 @@ fn handleHello(allocator: std.mem.Allocator, sw: *std.Io.net.Stream.Writer, msg:
         return error.VersionMismatch;
     }
     log.info("hello from uid={d} version={d}", .{ uid, version });
-    try sendOk(allocator, sw);
+    // Reply ok with our build version so the status path can read the
+    // running grabber's version (extra field; older agents ignore it).
+    try protocol.writeMessage(&sw.interface, allocator, .{ .type = "ok", .grabber_version = grabber_version });
+    try sw.interface.flush();
     return uid;
 }
 

@@ -301,6 +301,61 @@ pub const IONotificationPortRef = ?*anyopaque;
 pub extern fn IONotificationPortGetRunLoopSource(notify: IONotificationPortRef) CFRunLoopSourceRef;
 pub extern fn IONotificationPortDestroy(notify: IONotificationPortRef) void;
 
+// System sleep/wake notifications via the root power-management domain.
+// PowerNotify uses these to RELEASE the seize on will-sleep and
+// re-acquire it on power-on, so the seize never spans the sleep power
+// transition (a seize held across sleep goes stale: same device id,
+// matched_count=1, but the event pipe is dead). Can/WillSleep must be
+// acked with IOAllowPowerChange or sleep is blocked. messageArgument is
+// a void* on the API but used as a `long` notification id for the ack.
+// IOMessage.h: iokit_common_msg(x) = 0xE0000000 | x.
+pub const kIOMessageCanSystemSleep: u32 = 0xE0000270;
+pub const kIOMessageSystemWillSleep: u32 = 0xE0000280;
+pub const kIOMessageSystemWillPowerOn: u32 = 0xE0000320;
+pub const kIOMessageSystemHasPoweredOn: u32 = 0xE0000300;
+
+pub const IOServiceInterestCallback = ?*const fn (
+    refcon: ?*anyopaque,
+    service: io_service_t,
+    messageType: u32,
+    messageArgument: ?*anyopaque,
+) callconv(.c) void;
+
+pub extern fn IORegisterForSystemPower(
+    refcon: ?*anyopaque,
+    thePortRef: *IONotificationPortRef,
+    callback: IOServiceInterestCallback,
+    notifier: *io_object_t,
+) io_connect_t;
+pub extern fn IODeregisterForSystemPower(notifier: *io_object_t) IOReturn;
+pub extern fn IOAllowPowerChange(kernelPort: io_connect_t, notificationID: isize) IOReturn;
+
+// Map a seized IOHIDDevice back to its IORegistry node so we can log the
+// seized device's registry entry id (observability: which device the
+// seize actually holds, vs the live keyboard).
+pub extern fn IOHIDDeviceGetService(device: IOHIDDeviceRef) io_service_t;
+
+// libc time — for local-time log timestamps so grabber events correlate
+// with `pmset -g log` wake/sleep times. We only read the first three
+// `struct tm` fields (sec/min/hour), so the rest of the layout being
+// approximate is harmless.
+pub const time_t = c_long;
+pub const Tm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: ?[*:0]const u8,
+};
+pub extern fn time(t: ?*time_t) time_t;
+pub extern fn localtime_r(timep: *const time_t, result: *Tm) ?*Tm;
+
 // SystemConfiguration — read the active console user uid. D5 uses
 // this to apply rules only from the foreground user's agent (so
 // fast-user-switching doesn't get caps_lock-as-ctrl set up by a

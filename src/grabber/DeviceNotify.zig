@@ -162,9 +162,12 @@ fn drainAndLog(iter: c.io_iterator_t, kind: []const u8) void {
         if (svc == c.IO_OBJECT_NULL) break;
         var id: u64 = 0;
         _ = c.IORegistryEntryGetRegistryEntryID(svc, &id);
-        // warn: rare (only on real keyboard enumeration changes), so it
-        // stays in the ReleaseFast log as the record of why we re-seized.
-        log.warn("keyboard {s}: entry_id={d}", .{ kind, id });
+        // info, NOT warn: this fires on every keyboard enumeration change
+        // (each wake, USB plug, vhidd reconnect) — routine operation, not
+        // an anomaly. Compiled out of ReleaseFast so a forever-running
+        // daemon's release log doesn't accumulate per-wake noise; visible
+        // in a ReleaseSafe diagnostic build.
+        log.info("keyboard {s}: entry_id={d}", .{ kind, id });
         _ = c.IOObjectRelease(svc);
     }
 }

@@ -294,7 +294,7 @@ fn logSessionStart(io: std.Io) void {
     const month_day = year_day.calculateMonthDay();
     const day_secs = epoch_secs.getDaySeconds();
 
-    log.warn("=== skhd {s} started at {d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z (PID {d}) ===", .{
+    log.info("=== skhd {s} started at {d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z (PID {d}) ===", .{
         version,
         @as(u32, year_day.year),
         @intFromEnum(month_day.month),
@@ -421,7 +421,9 @@ fn applyConfigPaths(allocator: std.mem.Allocator, entries: []const []const u8) v
         log.warn("PATH apply: setenv failed", .{});
         return;
     }
-    log.warn("PATH after .path directives: {s}", .{buf.items[0 .. buf.items.len - 1]});
+    // info, not warn: routine startup diagnostic (mirrors the inherited-PATH
+    // info line above), not an error — keep it out of the release log.
+    log.info("PATH after .path directives: {s}", .{buf.items[0 .. buf.items.len - 1]});
 }
 
 /// Resolve config file path following XDG spec

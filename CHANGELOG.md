@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.9...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.10...HEAD)
+
+## [0.1.10](https://github.com/jackielii/skhd.zig/compare/v0.1.9...v0.1.10) - 2026-06-24
+
+### Fixed
+- **skhd-grabber no longer dead-keys the built-in keyboard across sleep (the remaining case).** 0.1.9 made the grabber re-seize when the keyboard *re-enumerates* on wake, but the keyboard could still come back dead with its IOKit registry id *unchanged* — so nothing re-enumerated, the re-enumeration watch correctly fired nothing, and re-seizing the same device in place couldn't revive it. Root cause: the grabber held its `IOHIDManager` seize *across* the sleep power transition, so when the keyboard powered down mid-sleep the seized connection went stale (on wake the device still reported present, but no events flowed). The grabber now **releases the seize before sleep and re-acquires a fresh one on wake** — it never holds the seize across the power transition (the same lifecycle Karabiner's grabber uses: devices are ungrabbable while the system is sleeping). On `kIOMessageSystemWillSleep` it tears down the seize and acks the sleep after a short delay so the release lands before the device loses power; on `kIOMessageSystemHasPoweredOn` it re-seizes against the now-healthy device. Validated across an 11-day soak with a single long-lived grabber process surviving multiple sleep cycles (including ~2-day and ~8-day suspends) with zero dead-keyboard recurrences.
+
+### Added
+- **`skhd --status` now reports both daemons' versions.** It prints the running `skhd` version and the running `skhd-grabber` version — the grabber's is queried live over IPC, so it reflects the actually-running daemon and surfaces an "agent updated but grabber not restarted" mismatch at a glance.
+
+### Changed
+- **`skhd-grabber --version` reports the real version** (it previously printed a hardcoded `skhd-grabber (D1 skeleton)` placeholder).
+- **Grabber log timestamps and noise.** Every grabber log line is now prefixed with a local `[YYYY-MM-DD HH:MM:SS]` timestamp so events line up with `pmset -g log` across multi-day idle periods. Routine per-wake events (keyboard re-seizes, device enumeration changes) and informational startup lines were demoted to `info`, so a release build's log grows only on genuine anomalies — important for a daemon meant to run for months without a restart.
 
 ## [0.1.9](https://github.com/jackielii/skhd.zig/compare/v0.1.8...v0.1.9) - 2026-06-12
 

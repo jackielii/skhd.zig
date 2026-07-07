@@ -312,6 +312,19 @@ const Daemon = struct {
     /// (the device is powering down/up and a seize would go stale).
     sleeping: bool = false,
 
+    /// Post-wake seize verifier. The wake re-seize can grab the built-in
+    /// keyboard *before its HID stack finishes re-initializing* — the
+    /// seize opens (matched_count=1) but delivers no events, and since the
+    /// registry id is unchanged nothing re-triggers a re-seize (dead until
+    /// manual restart). After a wake we verify the seize is actually
+    /// delivering (`seize_ctx.input_seen`); if it stays silent we re-seize
+    /// — a later attempt lands on a now-ready device. Bounded to a short
+    /// window after wake, then stops. One-shot timer, re-armed per attempt.
+    post_wake_timer: c.CFRunLoopTimerRef = null,
+    /// Which post-wake verify attempt we're on (index into
+    /// post_wake_verify_gaps_s). Reset to 0 on each wake.
+    post_wake_attempt: u32 = 0,
+
     /// Pending vhidd recovery timer, non-null while the daemon is in
     /// the "vhidd is broken, retrying" state. One-shot — the callback
     /// releases it and either schedules a new one (on failure) or
@@ -390,6 +403,7 @@ const Daemon = struct {
             self.power_notify = null;
         }
         self.stopConsoleUserTimer();
+        self.stopPostWakeVerify();
         self.cancelVhiddRecoveryTimer();
         self.teardownSeize();
         if (self.vhidd) |v| {
@@ -772,6 +786,9 @@ const Daemon = struct {
         }
         self.seize_ctx.caps_remap_active = caps_active;
         self.seize_ctx.fkeys_as_standard = sub.fkeys_as_standard;
+        // Fresh seize: reset the liveness signal so the post-wake verifier
+        // and the "seize live" log key off *this* seize's first event.
+        self.seize_ctx.input_seen = false;
 
         // Rebuild the colon-form remap table. Reset to all-zero first
         // so a previously-installed rule that's no longer present is
@@ -856,6 +873,44 @@ const Daemon = struct {
             c.CFRunLoopTimerInvalidate(t);
             c.CFRelease(t);
             self.console_user_timer = null;
+        }
+    }
+
+    /// Arm the next post-wake verify check at
+    /// `post_wake_verify_gaps_s[post_wake_attempt]` seconds from now.
+    fn schedulePostWakeVerify(self: *Daemon) void {
+        self.stopPostWakeVerify();
+        if (self.post_wake_attempt >= post_wake_verify_gaps_s.len) return;
+        var ctx: c.CFRunLoopTimerContext = .{
+            .version = 0,
+            .info = self,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+        const fire_at = c.CFAbsoluteTimeGetCurrent() + post_wake_verify_gaps_s[self.post_wake_attempt];
+        const timer = c.CFRunLoopTimerCreate(
+            c.kCFAllocatorDefault,
+            fire_at,
+            0, // one-shot
+            0,
+            0,
+            postWakeVerifyCallback,
+            &ctx,
+        );
+        if (timer == null) {
+            log.warn("post-wake verify timer create failed; a dead wake seize won't self-heal", .{});
+            return;
+        }
+        self.post_wake_timer = timer;
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopDefaultMode);
+    }
+
+    fn stopPostWakeVerify(self: *Daemon) void {
+        if (self.post_wake_timer) |t| {
+            c.CFRunLoopTimerInvalidate(t);
+            c.CFRelease(t);
+            self.post_wake_timer = null;
         }
     }
 
@@ -988,19 +1043,65 @@ fn onDeviceChange(ctx: ?*anyopaque) void {
 fn onWillSleep(ctx: ?*anyopaque) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
     d.sleeping = true;
+    d.stopPostWakeVerify(); // no verifying while asleep
     d.teardownSeize();
     log.info("seize released for sleep", .{});
 }
 
-/// PowerNotify: the system finished waking. Re-acquire a fresh seize on
-/// the now-healthy device. applyLatestRules rebuilds against the current
-/// device set, so this grabs whatever the keyboard re-enumerated to.
+/// Seconds *between* successive post-wake verify checks (gaps, not
+/// absolute). First check ~3s after wake (fast recovery of a dead seize),
+/// last around ~20s (device is certainly ready by then). One re-seize per
+/// silent check; stops as soon as input is seen.
+const post_wake_verify_gaps_s = [_]f64{ 3, 5, 12 };
+
+/// PowerNotify: the system finished waking. Re-acquire a fresh seize, then
+/// verify it actually delivers input — the wake re-seize can grab the
+/// keyboard before its HID stack is ready (opens fine, no events), and
+/// with an unchanged registry id nothing else would re-trigger a re-seize.
 fn onSystemWake(ctx: ?*anyopaque) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
     d.sleeping = false;
     d.applyLatestRules() catch |err| {
         log.warn("post-wake re-seize failed: {s}", .{@errorName(err)});
     };
+    // Kick off verification — did that seize actually come up live?
+    d.post_wake_attempt = 0;
+    d.schedulePostWakeVerify();
+}
+
+/// Fires `post_wake_verify_gaps_s[attempt]` seconds after the previous
+/// step. If the current seize has delivered input it's confirmed live and
+/// we stop. Otherwise the seize may be dead (device wasn't ready) — re-seize
+/// and, if attempts remain, verify again; the last attempt lands on a
+/// device that's certainly ready by now.
+fn postWakeVerifyCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    // One-shot: release this timer before doing work.
+    if (d.post_wake_timer) |t| {
+        c.CFRunLoopTimerInvalidate(t);
+        c.CFRelease(t);
+        d.post_wake_timer = null;
+    }
+    if (d.sleeping or d.seize == null) return; // slept again / nothing seized
+
+    if (d.seize_ctx.input_seen) {
+        log.info("post-wake verify: seize confirmed live after {d} check(s)", .{d.post_wake_attempt + 1});
+        return;
+    }
+
+    const attempt = d.post_wake_attempt;
+    log.info("post-wake verify: no input yet (check {d}/{d}) — re-seizing", .{ attempt + 1, post_wake_verify_gaps_s.len });
+    d.applyLatestRules() catch |err| {
+        log.warn("post-wake verify re-seize failed: {s}", .{@errorName(err)});
+    };
+    d.post_wake_attempt += 1;
+    if (d.post_wake_attempt < post_wake_verify_gaps_s.len) {
+        d.schedulePostWakeVerify();
+    } else {
+        // Exhausted. The final re-seize just ran on a device that should be
+        // ready now; if it's still silent the user was simply idle.
+        log.info("post-wake verify: done after {d} re-seizes (seize now on a ready device)", .{post_wake_verify_gaps_s.len});
+    }
 }
 
 fn vhiddRecoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
@@ -1234,6 +1335,13 @@ const SeizeCtx = struct {
     /// skip the per-event caps_lock force-off so we don't interfere
     /// with users who haven't remapped caps_lock.
     caps_remap_active: bool = false,
+    /// Set true by seizeInputCallback on the first input event after a
+    /// (re)seize; reset to false each time applyLatestRules establishes a
+    /// seize. Lets the post-wake verifier tell a *live* seize (events
+    /// flowing) from a dead one (device wasn't ready when we grabbed it
+    /// on wake — same registry id, matched_count=1, but no events). The
+    /// only cheap, reliable "is this seize actually delivering?" signal.
+    input_seen: bool = false,
     /// Mirror of NSGlobalDomain `com.apple.keyboard.fnState` from the
     /// active subscription. Decides whether bare F-row should run
     /// `translateFRow` (false → media keys) or pass through as a
@@ -1536,6 +1644,16 @@ fn translateFRow(cx: *SeizeCtx, raw_usage16: u16, pressed: bool) void {
 
 fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     const cx: *SeizeCtx = @ptrCast(@alignCast(ctx orelse return));
+
+    // First event since this (re)seize: the seize is confirmed delivering.
+    // One info line per seize (not per keystroke), so a dead seize is
+    // obvious in the log — a `seized device entry_id=…` with no following
+    // `seize live` line means events never flowed. Also clears the
+    // post-wake verifier's retry loop.
+    if (!cx.input_seen) {
+        cx.input_seen = true;
+        log.info("seize live: first input received (page=0x{X:0>2} usage=0x{X:0>4})", .{ ev.usage_page, ev.usage });
+    }
 
     if (comptime profile_supported) {
         if (cx.profile) {

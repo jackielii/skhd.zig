@@ -124,6 +124,10 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, trigger_cb: Callback, ctx:
     c.IOHIDManagerSetDeviceMatchingMultiple(self.manager, dicts);
 
     c.IOHIDManagerRegisterInputValueCallback(self.manager, valueCallback, self);
+    // Observe stage: log each device the observer ends up holding, so
+    // the soak log shows which un-seized services exist and (together
+    // with the value logs) which of them actually emit.
+    c.IOHIDManagerRegisterDeviceMatchingCallback(self.manager, deviceMatchedCallback, self);
     c.IOHIDManagerScheduleWithRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
 
     const r = c.IOHIDManagerOpen(self.manager, c.kIOHIDOptionsTypeNone);
@@ -176,6 +180,34 @@ fn setDictInt(dict: c.CFMutableDictionaryRef, key_cstr: [*:0]const u8, value: i3
     if (num == null) return;
     defer c.CFRelease(num);
     c.CFDictionarySetValue(dict, key, num);
+}
+
+fn deviceMatchedCallback(
+    ctx: ?*anyopaque,
+    result: c.IOReturn,
+    sender: ?*anyopaque,
+    device: c.IOHIDDeviceRef,
+) callconv(.c) void {
+    _ = ctx;
+    _ = sender;
+    if (result != c.kIOReturnSuccess) return;
+    log.info("restore-key observer holds: page=0x{X:0>4} usage=0x{X:0>4} vendor=0x{X:0>4} product=0x{X:0>4}", .{
+        deviceI32Property(device, c.kIOHIDPrimaryUsagePageKey),
+        deviceI32Property(device, c.kIOHIDPrimaryUsageKey),
+        deviceI32Property(device, c.kIOHIDVendorIDKey),
+        deviceI32Property(device, c.kIOHIDProductIDKey),
+    });
+}
+
+fn deviceI32Property(device: c.IOHIDDeviceRef, key_cstr: [*:0]const u8) u32 {
+    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, key_cstr, c.kCFStringEncodingUTF8);
+    if (key == null) return 0;
+    defer c.CFRelease(key);
+    const value = c.IOHIDDeviceGetProperty(device, key);
+    if (value == null) return 0;
+    var out: i32 = 0;
+    _ = c.CFNumberGetValue(value, c.kCFNumberSInt32Type, &out);
+    return @bitCast(out);
 }
 
 fn valueCallback(

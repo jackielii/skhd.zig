@@ -550,6 +550,7 @@ pub fn build(b: *std.Build) void {
         "src/grabber/KbState.zig",
         "src/grabber/TapHold.zig",
         "src/grabber/HidSeize.zig",
+        "src/grabber/PowerSourceNotify.zig",
         // "src/Hotload.zig", // Skip hot load test for local test only
     };
 

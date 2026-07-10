@@ -24,6 +24,7 @@ const Ipc = @import("Ipc.zig");
 const KbState = @import("KbState.zig");
 const DeviceNotify = @import("DeviceNotify.zig");
 const PowerNotify = @import("PowerNotify.zig");
+const PowerSourceNotify = @import("PowerSourceNotify.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -39,6 +40,11 @@ pub const version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
 /// ReleaseFast/ReleaseSmall every profile branch folds away at
 /// comptime so the seize hot path pays nothing for it.
 const profile_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+
+/// Power-source/battery diagnostics compile in only where their .info
+/// logs are visible. ReleaseFast never even registers the IOPS source —
+/// users pay zero overhead for a hook whose output would be compiled out.
+const power_diagnostics_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
@@ -307,6 +313,9 @@ const Daemon = struct {
     /// does. So we release the seize on will-sleep and re-acquire on
     /// wake, never spanning the power transition (Karabiner's pattern).
     power_notify: ?*PowerNotify = null,
+    /// Battery/power-source diagnostics — log-only (Debug/ReleaseSafe;
+    /// stays null in ReleaseFast, init is comptime-gated).
+    power_source_notify: ?*PowerSourceNotify = null,
     /// True between will-sleep and power-on. While set, the seize is kept
     /// torn down — applyLatestRules and onDeviceChange must not re-seize
     /// (the device is powering down/up and a seize would go stale).
@@ -402,6 +411,10 @@ const Daemon = struct {
             pn.deinit();
             self.power_notify = null;
         }
+        if (self.power_source_notify) |psn| {
+            psn.deinit();
+            self.power_source_notify = null;
+        }
         self.stopConsoleUserTimer();
         self.stopPostWakeVerify();
         self.cancelVhiddRecoveryTimer();
@@ -477,6 +490,15 @@ const Daemon = struct {
             log.warn("PowerNotify init failed ({s}); seize will not be released across sleep", .{@errorName(err)});
             break :blk null;
         };
+        // Battery/power-source diagnostics — log-only, gated out of
+        // ReleaseFast entirely (its .info lines would be compiled out,
+        // so registering the source would be pure overhead).
+        if (comptime power_diagnostics_supported) {
+            self.power_source_notify = PowerSourceNotify.init(self.allocator) catch |err| blk: {
+                log.warn("PowerSourceNotify init failed ({s}); battery diagnostics disabled", .{@errorName(err)});
+                break :blk null;
+            };
+        }
 
         log.info("listening on {s}", .{self.socket_path});
 

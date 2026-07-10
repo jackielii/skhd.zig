@@ -109,6 +109,40 @@ pub const Response = enum(u8) {
     _,
 };
 
+/// A parsed inbound datagram (outer envelope included). Used by the
+/// daemon's vhidd watchdog, which drains the socket via a runloop read
+/// source and reacts to heartbeats / status pushes as they arrive.
+pub const Frame = union(enum) {
+    /// Server heartbeat. Payload is the announced next-heartbeat
+    /// deadline in milliseconds (0 if the body was short/malformed —
+    /// callers should substitute a sane default).
+    heartbeat: u32,
+    /// Inner-protocol response with its first body byte (if any).
+    response: struct { resp: Response, body_first: ?u8 },
+    /// Empty or unrecognized frame.
+    other,
+};
+
+/// Parse one received datagram. Pure — no I/O.
+pub fn parseFrame(buf: []const u8) Frame {
+    if (buf.len == 0) return .other;
+    switch (buf[0]) {
+        @intFromEnum(FrameType.heartbeat) => {
+            if (buf.len < 5) return .{ .heartbeat = 0 };
+            return .{ .heartbeat = std.mem.readInt(u32, buf[1..5], .little) };
+        },
+        @intFromEnum(FrameType.user_data) => {
+            if (buf.len < 2) return .other;
+            return .{ .response = .{
+                // Response is non-exhaustive — any u8 is representable.
+                .resp = @enumFromInt(buf[1]),
+                .body_first = if (buf.len > 2) buf[2] else null,
+            } };
+        },
+        else => return .other,
+    }
+}
+
 /// Modifier byte layout for `keyboard_input.modifiers`. Bit values
 /// match HID Usage Page 0x07 modifier semantics.
 pub const Modifier = packed struct(u8) {
@@ -493,4 +527,29 @@ test "Modifier packs to 8 bits matching Karabiner enum" {
     const byte: u8 = @bitCast(m);
     // bit 0 (left_control) | bit 7 (right_command) = 0b10000001 = 0x81
     try std.testing.expectEqual(@as(u8, 0x81), byte);
+}
+
+test "parseFrame: heartbeat carries LE u32 deadline; short body → 0" {
+    const hb = [_]u8{ 0, 0x10, 0x27, 0, 0 }; // 0x2710 = 10000ms
+    try std.testing.expectEqual(Frame{ .heartbeat = 10_000 }, parseFrame(&hb));
+    const short = [_]u8{ 0, 0x10 };
+    try std.testing.expectEqual(Frame{ .heartbeat = 0 }, parseFrame(&short));
+}
+
+test "parseFrame: user_data response with and without body" {
+    const ready_true = [_]u8{ 1, 4, 1 };
+    const f = parseFrame(&ready_true);
+    try std.testing.expectEqual(Response.virtual_hid_keyboard_ready, f.response.resp);
+    try std.testing.expectEqual(@as(?u8, 1), f.response.body_first);
+
+    const bare = [_]u8{ 1, 2 }; // driver_connected, no body
+    const g = parseFrame(&bare);
+    try std.testing.expectEqual(Response.driver_connected, g.response.resp);
+    try std.testing.expectEqual(@as(?u8, null), g.response.body_first);
+}
+
+test "parseFrame: empty, header-only, and unknown types are .other" {
+    try std.testing.expectEqual(Frame.other, parseFrame(&.{}));
+    try std.testing.expectEqual(Frame.other, parseFrame(&.{1})); // user_data, no response byte
+    try std.testing.expectEqual(Frame.other, parseFrame(&.{ 9, 1, 2 })); // unknown envelope type
 }

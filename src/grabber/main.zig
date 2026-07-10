@@ -340,6 +340,22 @@ const Daemon = struct {
     /// capped at vhidd_recovery_backoff_max_ms.
     vhidd_recovery_backoff_ms: u32 = 0,
 
+    /// vhidd heartbeat watchdog. The server heartbeats every connected
+    /// client (frame type=0 carrying the next-heartbeat deadline). A
+    /// wedged server session — the confirmed mid-session dead-keyboard
+    /// cause: posts succeed, ready-probe answers, nothing injects —
+    /// stops heartbeating, so a runloop read source drains the socket
+    /// as frames arrive and re-arms a one-shot deadline timer per
+    /// heartbeat. Deadline missed → full vhidd+seize rebuild. Also
+    /// reacts to a live `virtual_hid_keyboard_ready=false` push (the
+    /// virtual device went away server-side). Event-driven: the timer
+    /// is armed by protocol traffic, never polled.
+    vhidd_watch_fd: c.CFFileDescriptorRef = null,
+    vhidd_watch_source: c.CFRunLoopSourceRef = null,
+    vhidd_deadline_timer: c.CFRunLoopTimerRef = null,
+    /// One "heartbeats flowing (deadline=Nms)" info line per connection.
+    vhidd_hb_logged: bool = false,
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, profile: bool) !Daemon {
         try ensureSocketParentDir(socket_path);
         // Stale socket from a crashed previous run: bind() would EADDRINUSE.
@@ -414,6 +430,7 @@ const Daemon = struct {
         self.stopConsoleUserTimer();
         self.stopPostWakeVerify();
         self.cancelVhiddRecoveryTimer();
+        self.stopVhiddWatch();
         self.teardownSeize();
         if (self.vhidd) |v| {
             v.close();
@@ -737,6 +754,9 @@ const Daemon = struct {
             log.info("virtual keyboard ready", .{});
             self.vhidd = v;
             self.seize_ctx.vhidd = v;
+            // Handshake done — hand the socket to the heartbeat
+            // watchdog (no synchronous recv beyond this point).
+            self.startVhiddWatch();
         }
 
         // Layer push target = the active subscription's stream
@@ -945,26 +965,131 @@ const Daemon = struct {
     /// fires *between* runloop sources. The vhidd_broken flag
     /// short-circuits further posts in the meantime so we don't spam
     /// the log on any events delivered in the same runloop pass.
-    /// Probe an existing vhidd connection end-to-end: re-send the
-    /// keyboard initialize (idempotent — the reconnect path re-sends it
-    /// on every recovery) and wait for the server's ready=true. A healthy
-    /// server answers in single-digit ms; a wedged one times out and we
-    /// escalate to the full rebuild. Synchronous recv is safe here: the
-    /// vhidd fd has no runloop source, the client is used synchronously
-    /// throughout. Called on wake — bounded, event-driven, no polling.
-    fn verifyVhiddAlive(self: *Daemon) void {
-        const v = self.vhidd orelse return; // nothing connected → applyLatestRules will handshake
-        v.initializeKeyboard(.{}) catch |err| {
-            log.warn("vhidd wake probe: send failed ({s})", .{@errorName(err)});
-            self.markVhiddBroken();
-            return;
+    /// Attach the heartbeat watchdog to a freshly-handshaked vhidd
+    /// connection. Must be called AFTER the synchronous connect
+    /// handshake (waitForBoolTrue) — once the read source exists, no
+    /// synchronous recv may run on this fd again until stopVhiddWatch.
+    fn startVhiddWatch(self: *Daemon) void {
+        const v = self.vhidd orelse return;
+        self.stopVhiddWatch();
+
+        var ctx: c.CFFileDescriptorContext = .{
+            .version = 0,
+            .info = self,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
         };
-        v.waitForBoolTrue(.virtual_hid_keyboard_ready, 1500) catch |err| {
-            log.warn("vhidd wake probe: no ready reply ({s}) — rebuilding connection", .{@errorName(err)});
-            self.markVhiddBroken();
+        const cf_fd = c.CFFileDescriptorCreate(
+            c.kCFAllocatorDefault,
+            v.fd,
+            0, // closeOnInvalidate=false: the Client owns the fd
+            vhiddWatchCallback,
+            &ctx,
+        );
+        if (cf_fd == null) {
+            log.warn("vhidd watchdog: CFFileDescriptorCreate failed — heartbeat monitoring disabled", .{});
             return;
+        }
+        const src = c.CFFileDescriptorCreateRunLoopSource(c.kCFAllocatorDefault, cf_fd, 0);
+        if (src == null) {
+            log.warn("vhidd watchdog: run-loop source create failed — heartbeat monitoring disabled", .{});
+            c.CFFileDescriptorInvalidate(cf_fd);
+            c.CFRelease(cf_fd);
+            return;
+        }
+        self.vhidd_watch_fd = cf_fd;
+        self.vhidd_watch_source = src;
+        self.vhidd_hb_logged = false;
+        c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), src, c.kCFRunLoopDefaultMode);
+        c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
+        // Grace window for the first heartbeat. A server that never
+        // heartbeats this session is indistinguishable from a wedged
+        // one — rebuild.
+        self.armVhiddDeadline(vhidd_deadline_default_ms);
+    }
+
+    fn stopVhiddWatch(self: *Daemon) void {
+        self.cancelVhiddDeadline();
+        if (self.vhidd_watch_source) |src| {
+            c.CFRunLoopRemoveSource(c.CFRunLoopGetCurrent(), src, c.kCFRunLoopDefaultMode);
+            c.CFRelease(src);
+            self.vhidd_watch_source = null;
+        }
+        if (self.vhidd_watch_fd) |fd| {
+            c.CFFileDescriptorInvalidate(fd);
+            c.CFRelease(fd);
+            self.vhidd_watch_fd = null;
+        }
+    }
+
+    /// (Re-)arm the one-shot heartbeat deadline. No-op while sleeping —
+    /// heartbeats pause with the machine, and a deadline armed before
+    /// sleep would fire spuriously on wake.
+    fn armVhiddDeadline(self: *Daemon, deadline_ms: u32) void {
+        if (self.sleeping) return;
+        self.cancelVhiddDeadline();
+        var ctx: c.CFRunLoopTimerContext = .{
+            .version = 0,
+            .info = self,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
         };
-        log.info("vhidd wake probe: alive", .{});
+        const total_ms = deadline_ms + vhidd_deadline_grace_ms;
+        const fire_at = c.CFAbsoluteTimeGetCurrent() + @as(f64, @floatFromInt(total_ms)) / 1000.0;
+        const timer = c.CFRunLoopTimerCreate(
+            c.kCFAllocatorDefault,
+            fire_at,
+            0, // one-shot
+            0,
+            0,
+            vhiddDeadlineCallback,
+            &ctx,
+        );
+        if (timer == null) return; // watchdog degraded, not fatal
+        self.vhidd_deadline_timer = timer;
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopDefaultMode);
+    }
+
+    fn cancelVhiddDeadline(self: *Daemon) void {
+        if (self.vhidd_deadline_timer) |t| {
+            c.CFRunLoopTimerInvalidate(t);
+            c.CFRelease(t);
+            self.vhidd_deadline_timer = null;
+        }
+    }
+
+    /// Drain every pending datagram (non-blocking) and react:
+    /// heartbeat → re-arm the deadline; ready=false push → rebuild.
+    fn handleVhiddReadable(self: *Daemon) void {
+        const v = self.vhidd orelse return;
+        var buf: [1024]u8 = undefined;
+        while (true) {
+            const n_signed = std.c.recv(v.fd, &buf, buf.len, std.c.MSG.DONTWAIT);
+            if (n_signed <= 0) break; // EAGAIN / error / empty → done draining
+            const n: usize = @intCast(n_signed);
+            switch (Vhidd.parseFrame(buf[0..n])) {
+                .heartbeat => |announced_ms| {
+                    // Clamp the announced deadline: 0 = malformed body,
+                    // absurd values would disarm the watchdog.
+                    const ms = std.math.clamp(announced_ms, vhidd_deadline_min_ms, vhidd_deadline_max_ms);
+                    if (!self.vhidd_hb_logged) {
+                        self.vhidd_hb_logged = true;
+                        log.info("vhidd heartbeats flowing (deadline={d}ms)", .{announced_ms});
+                    }
+                    self.armVhiddDeadline(ms);
+                },
+                .response => |r| {
+                    if (r.resp == .virtual_hid_keyboard_ready and r.body_first == 0) {
+                        log.warn("vhidd pushed keyboard_ready=false — virtual device gone, rebuilding", .{});
+                        self.markVhiddBroken();
+                        return; // recovery will tear this watch down
+                    }
+                },
+                .other => {},
+            }
+        }
     }
 
     fn markVhiddBroken(self: *Daemon) void {
@@ -1017,6 +1142,7 @@ const Daemon = struct {
         // Safe to tear down here — the timer callback is invoked
         // between runloop sources, not from inside a seize callback.
         self.teardownSeize();
+        self.stopVhiddWatch(); // before closing the fd it watches
         if (self.vhidd) |v| {
             v.close();
             self.allocator.destroy(v);
@@ -1099,6 +1225,10 @@ fn onWillSleep(ctx: ?*anyopaque) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
     d.sleeping = true;
     d.stopPostWakeVerify(); // no verifying while asleep
+    // Heartbeats pause with the machine — a deadline armed now would
+    // fire spuriously on wake. The read source stays attached; arming
+    // is gated on !sleeping.
+    d.cancelVhiddDeadline();
     d.teardownSeize();
     log.info("seize released for sleep", .{});
 }
@@ -1108,6 +1238,16 @@ fn onWillSleep(ctx: ?*anyopaque) void {
 /// last around ~20s (device is certainly ready by then). One re-seize per
 /// silent check; stops as soon as input is seen.
 const post_wake_verify_gaps_s = [_]f64{ 3, 5, 12 };
+
+/// vhidd heartbeat-deadline bounds (ms). The server announces its own
+/// deadline per heartbeat; grace absorbs runloop scheduling jitter, and
+/// the clamp guards against a malformed announcement disarming or
+/// hair-triggering the watchdog. Default covers the first-heartbeat
+/// grace window after attach/wake.
+const vhidd_deadline_grace_ms: u32 = 3_000;
+const vhidd_deadline_default_ms: u32 = 10_000;
+const vhidd_deadline_min_ms: u32 = 1_000;
+const vhidd_deadline_max_ms: u32 = 60_000;
 
 /// PowerNotify: the system finished waking. Re-acquire a fresh seize, then
 /// verify it actually delivers input — the wake re-seize can grab the
@@ -1119,13 +1259,14 @@ fn onSystemWake(ctx: ?*anyopaque) void {
     d.applyLatestRules() catch |err| {
         log.warn("post-wake re-seize failed: {s}", .{@errorName(err)});
     };
-    // Verify the OUTPUT side too. applyLatestRules only handshakes a
-    // freshly-connected vhidd; a connection held across sleep is reused
-    // untested, and a half-dead one swallows injected reports without
-    // erroring (keys seized but nothing typed — no signal anywhere).
-    // Re-probing makes a lid close/open cycle a guaranteed full restore:
-    // input side rebuilt above + verified below, output side verified here.
-    d.verifyVhiddAlive();
+    // Output side: re-arm the heartbeat watchdog with a fresh grace
+    // window. If the vhidd server session died across sleep (or was
+    // already wedged — the confirmed silent-dead-keyboard cause), no
+    // heartbeat arrives and the deadline forces a full rebuild within
+    // seconds of lid-open, no user action needed. (An in-place ready
+    // probe was tried and removed: a wedged session still answers
+    // ready=true — 2026-07-11 incident.)
+    if (d.vhidd != null) d.armVhiddDeadline(vhidd_deadline_default_ms);
     // Kick off verification — did that seize actually come up live?
     d.post_wake_attempt = 0;
     d.schedulePostWakeVerify();
@@ -1176,6 +1317,34 @@ fn vhiddRecoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callcon
         d.vhidd_recovery_timer = null;
     }
     d.attemptVhiddRecovery();
+}
+
+/// vhidd watchdog read source: frames arrived on the client socket.
+fn vhiddWatchCallback(
+    cf_fd: c.CFFileDescriptorRef,
+    callback_types: c.CFOptionFlags,
+    info: ?*anyopaque,
+) callconv(.c) void {
+    _ = callback_types;
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    d.handleVhiddReadable();
+    // CFFileDescriptor is one-shot: re-arm for the next frame. Harmless
+    // if recovery is tearing this watch down — invalidation wins.
+    c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
+}
+
+/// vhidd heartbeat deadline missed: the server session is presumed
+/// wedged (the confirmed silent-dead-keyboard cause) — full rebuild.
+fn vhiddDeadlineCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    // One-shot: it fired, drop our reference.
+    if (d.vhidd_deadline_timer) |t| {
+        c.CFRelease(t);
+        d.vhidd_deadline_timer = null;
+    }
+    if (d.sleeping or d.vhidd == null) return;
+    log.warn("vhidd heartbeat deadline missed — connection presumed dead, rebuilding", .{});
+    d.markVhiddBroken();
 }
 
 fn listenerCallback(

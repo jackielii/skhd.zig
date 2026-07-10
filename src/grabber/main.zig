@@ -25,6 +25,7 @@ const KbState = @import("KbState.zig");
 const DeviceNotify = @import("DeviceNotify.zig");
 const PowerNotify = @import("PowerNotify.zig");
 const PowerSourceNotify = @import("PowerSourceNotify.zig");
+const RestoreKey = @import("RestoreKey.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -316,6 +317,9 @@ const Daemon = struct {
     /// Battery/power-source diagnostics — log-only (Debug/ReleaseSafe;
     /// stays null in ReleaseFast, init is comptime-gated).
     power_source_notify: ?*PowerSourceNotify = null,
+    /// Master restore key — physical escape hatch on the un-seized
+    /// vendor HID services. All build modes (zero steady-state cost).
+    restore_key: ?*RestoreKey = null,
     /// True between will-sleep and power-on. While set, the seize is kept
     /// torn down — applyLatestRules and onDeviceChange must not re-seize
     /// (the device is powering down/up and a seize would go stale).
@@ -415,6 +419,10 @@ const Daemon = struct {
             psn.deinit();
             self.power_source_notify = null;
         }
+        if (self.restore_key) |rk| {
+            rk.deinit();
+            self.restore_key = null;
+        }
         self.stopConsoleUserTimer();
         self.stopPostWakeVerify();
         self.cancelVhiddRecoveryTimer();
@@ -499,6 +507,13 @@ const Daemon = struct {
                 break :blk null;
             };
         }
+        // Master restore key: fn x5 within 2s forces a full vhidd+seize
+        // rebuild even when the seized keyboard service is dead (the fn
+        // key rides the un-seized Top Case service). Best-effort.
+        self.restore_key = RestoreKey.init(self.allocator, self.io, onRestoreKeyTrigger, self) catch |err| blk: {
+            log.warn("RestoreKey init failed ({s}); master restore key disarmed", .{@errorName(err)});
+            break :blk null;
+        };
 
         log.info("listening on {s}", .{self.socket_path});
 
@@ -1056,6 +1071,21 @@ fn onDeviceChange(ctx: ?*anyopaque) void {
     d.applyLatestRules() catch |err| {
         log.warn("device-change rebuild failed: {s}", .{@errorName(err)});
     };
+}
+
+/// RestoreKey trigger: the user deliberately pressed the master restore
+/// sequence — force the same full rebuild the vhidd-broken path does
+/// (teardown seize → reconnect vhidd → re-seize). Covers both a stale
+/// seize and a dead injection path, since both ends are rebuilt.
+/// markVhiddBroken no-ops if a recovery is already in flight, so
+/// repeated triggers are safe. Runs between run-loop sources (the
+/// observer manager is a separate runloop source), same safe context
+/// as onDeviceChange.
+fn onRestoreKeyTrigger(ctx: ?*anyopaque) void {
+    const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
+    if (d.sleeping) return; // wake path re-seizes anyway
+    log.warn("master restore key pressed — rebuilding vhidd connection and seize", .{});
+    d.markVhiddBroken();
 }
 
 /// PowerNotify: the system is about to sleep. Release the seize so the

@@ -73,8 +73,11 @@ manager: c.IOHIDManagerRef,
 trigger_cb: Callback,
 ctx: ?*anyopaque,
 detector: TriggerDetector,
-/// Monotonic clock for the detector window.
-timer: std.time.Timer,
+/// Monotonic clock for the detector window (std.time.Timer was removed
+/// in Zig 0.16; `.awake` maps to CLOCK_UPTIME_RAW on macOS — suspend
+/// time is excluded, which is right for a 2s press window).
+io: std.Io,
+epoch_ns: i128,
 opened: bool = false,
 
 const Self = @This();
@@ -82,7 +85,7 @@ const Self = @This();
 /// Singleton — same one-per-daemon convention as HidSeize/PowerNotify.
 var instance: ?*Self = null;
 
-pub fn init(allocator: std.mem.Allocator, trigger_cb: Callback, ctx: ?*anyopaque) !*Self {
+pub fn init(allocator: std.mem.Allocator, io: std.Io, trigger_cb: Callback, ctx: ?*anyopaque) !*Self {
     if (instance != null) return error.AlreadyInitialized;
 
     const manager = c.IOHIDManagerCreate(c.kCFAllocatorDefault, c.kIOHIDOptionsTypeNone);
@@ -102,7 +105,8 @@ pub fn init(allocator: std.mem.Allocator, trigger_cb: Callback, ctx: ?*anyopaque
             .required = trigger_required,
             .window_ns = trigger_window_ns,
         },
-        .timer = try std.time.Timer.start(),
+        .io = io,
+        .epoch_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds,
     };
     instance = self;
     errdefer instance = null;
@@ -196,10 +200,16 @@ fn valueCallback(
     // rarely (user-initiated) so this cannot swamp the log.
     log.info("restore-key observe: page=0x{X:0>4} usage=0x{X:0>4} pressed={}", .{ page, usage, pressed });
 
-    if (self.detector.feed(page, usage, pressed, self.timer.read())) {
+    if (self.detector.feed(page, usage, pressed, self.nowNs())) {
         log.warn("master restore key: {d}x fn detected — forcing vhidd+seize rebuild", .{trigger_required});
         self.trigger_cb(self.ctx);
     }
+}
+
+/// ns since init on the awake monotonic clock.
+fn nowNs(self: *Self) u64 {
+    const delta = std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds - self.epoch_ns;
+    return if (delta < 0) 0 else @intCast(delta);
 }
 
 const testing = std.testing;

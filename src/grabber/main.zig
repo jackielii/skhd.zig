@@ -25,7 +25,6 @@ const KbState = @import("KbState.zig");
 const DeviceNotify = @import("DeviceNotify.zig");
 const PowerNotify = @import("PowerNotify.zig");
 const PowerSourceNotify = @import("PowerSourceNotify.zig");
-const RestoreKey = @import("RestoreKey.zig");
 const TapHold = @import("TapHold.zig");
 const Vhidd = @import("Vhidd.zig");
 
@@ -42,10 +41,6 @@ pub const version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
 /// comptime so the seize hot path pays nothing for it.
 const profile_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
-/// Power-source/battery diagnostics compile in only where their .info
-/// logs are visible. ReleaseFast never even registers the IOPS source —
-/// users pay zero overhead for a hook whose output would be compiled out.
-const power_diagnostics_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
@@ -314,12 +309,9 @@ const Daemon = struct {
     /// does. So we release the seize on will-sleep and re-acquire on
     /// wake, never spanning the power transition (Karabiner's pattern).
     power_notify: ?*PowerNotify = null,
-    /// Battery/power-source diagnostics — log-only (Debug/ReleaseSafe;
-    /// stays null in ReleaseFast, init is comptime-gated).
+    /// Power-source hook: cord-flip master restore trigger (all builds)
+    /// + battery diagnostics (Debug/ReleaseSafe, gated in the module).
     power_source_notify: ?*PowerSourceNotify = null,
-    /// Master restore key — physical escape hatch on the un-seized
-    /// vendor HID services. All build modes (zero steady-state cost).
-    restore_key: ?*RestoreKey = null,
     /// True between will-sleep and power-on. While set, the seize is kept
     /// torn down — applyLatestRules and onDeviceChange must not re-seize
     /// (the device is powering down/up and a seize would go stale).
@@ -419,10 +411,6 @@ const Daemon = struct {
             psn.deinit();
             self.power_source_notify = null;
         }
-        if (self.restore_key) |rk| {
-            rk.deinit();
-            self.restore_key = null;
-        }
         self.stopConsoleUserTimer();
         self.stopPostWakeVerify();
         self.cancelVhiddRecoveryTimer();
@@ -498,20 +486,13 @@ const Daemon = struct {
             log.warn("PowerNotify init failed ({s}); seize will not be released across sleep", .{@errorName(err)});
             break :blk null;
         };
-        // Battery/power-source diagnostics — log-only, gated out of
-        // ReleaseFast entirely (its .info lines would be compiled out,
-        // so registering the source would be pure overhead).
-        if (comptime power_diagnostics_supported) {
-            self.power_source_notify = PowerSourceNotify.init(self.allocator) catch |err| blk: {
-                log.warn("PowerSourceNotify init failed ({s}); battery diagnostics disabled", .{@errorName(err)});
-                break :blk null;
-            };
-        }
-        // Master restore key: fn x5 within 2s forces a full vhidd+seize
-        // rebuild even when the seized keyboard service is dead (the fn
-        // key rides the un-seized Top Case service). Best-effort.
-        self.restore_key = RestoreKey.init(self.allocator, self.io, onRestoreKeyTrigger, self) catch |err| blk: {
-            log.warn("RestoreKey init failed ({s}); master restore key disarmed", .{@errorName(err)});
+        // Power-source hook: the cord-flip master restore trigger (all
+        // builds — unplug/replug the charger 2x within 10s forces a full
+        // vhidd+seize rebuild even when all key input is dead) plus
+        // battery diagnostics (Debug/ReleaseSafe only, gated inside the
+        // module). Best-effort.
+        self.power_source_notify = PowerSourceNotify.init(self.allocator, self.io, onRestoreKeyTrigger, self) catch |err| blk: {
+            log.warn("PowerSourceNotify init failed ({s}); cord-flip restore + battery diagnostics disabled", .{@errorName(err)});
             break :blk null;
         };
 
@@ -964,6 +945,28 @@ const Daemon = struct {
     /// fires *between* runloop sources. The vhidd_broken flag
     /// short-circuits further posts in the meantime so we don't spam
     /// the log on any events delivered in the same runloop pass.
+    /// Probe an existing vhidd connection end-to-end: re-send the
+    /// keyboard initialize (idempotent — the reconnect path re-sends it
+    /// on every recovery) and wait for the server's ready=true. A healthy
+    /// server answers in single-digit ms; a wedged one times out and we
+    /// escalate to the full rebuild. Synchronous recv is safe here: the
+    /// vhidd fd has no runloop source, the client is used synchronously
+    /// throughout. Called on wake — bounded, event-driven, no polling.
+    fn verifyVhiddAlive(self: *Daemon) void {
+        const v = self.vhidd orelse return; // nothing connected → applyLatestRules will handshake
+        v.initializeKeyboard(.{}) catch |err| {
+            log.warn("vhidd wake probe: send failed ({s})", .{@errorName(err)});
+            self.markVhiddBroken();
+            return;
+        };
+        v.waitForBoolTrue(.virtual_hid_keyboard_ready, 1500) catch |err| {
+            log.warn("vhidd wake probe: no ready reply ({s}) — rebuilding connection", .{@errorName(err)});
+            self.markVhiddBroken();
+            return;
+        };
+        log.info("vhidd wake probe: alive", .{});
+    }
+
     fn markVhiddBroken(self: *Daemon) void {
         if (self.seize_ctx.vhidd_broken) return;
         self.seize_ctx.vhidd_broken = true;
@@ -1073,18 +1076,18 @@ fn onDeviceChange(ctx: ?*anyopaque) void {
     };
 }
 
-/// RestoreKey trigger: the user deliberately pressed the master restore
-/// sequence — force the same full rebuild the vhidd-broken path does
+/// Master restore trigger (cord-flip): the user deliberately flipped the
+/// power cord — force the same full rebuild the vhidd-broken path does
 /// (teardown seize → reconnect vhidd → re-seize). Covers both a stale
 /// seize and a dead injection path, since both ends are rebuilt.
 /// markVhiddBroken no-ops if a recovery is already in flight, so
-/// repeated triggers are safe. Runs between run-loop sources (the
-/// observer manager is a separate runloop source), same safe context
-/// as onDeviceChange.
+/// repeated triggers are safe. Runs between run-loop sources (the IOPS
+/// source), same safe context as onDeviceChange.
 fn onRestoreKeyTrigger(ctx: ?*anyopaque) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
     if (d.sleeping) return; // wake path re-seizes anyway
-    log.warn("master restore key pressed — rebuilding vhidd connection and seize", .{});
+    if (d.seize == null) return; // nothing seized → nothing to restore
+    log.warn("master restore triggered — rebuilding vhidd connection and seize", .{});
     d.markVhiddBroken();
 }
 
@@ -1116,6 +1119,13 @@ fn onSystemWake(ctx: ?*anyopaque) void {
     d.applyLatestRules() catch |err| {
         log.warn("post-wake re-seize failed: {s}", .{@errorName(err)});
     };
+    // Verify the OUTPUT side too. applyLatestRules only handshakes a
+    // freshly-connected vhidd; a connection held across sleep is reused
+    // untested, and a half-dead one swallows injected reports without
+    // erroring (keys seized but nothing typed — no signal anywhere).
+    // Re-probing makes a lid close/open cycle a guaranteed full restore:
+    // input side rebuilt above + verified below, output side verified here.
+    d.verifyVhiddAlive();
     // Kick off verification — did that seize actually come up live?
     d.post_wake_attempt = 0;
     d.schedulePostWakeVerify();

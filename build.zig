@@ -551,7 +551,6 @@ pub fn build(b: *std.Build) void {
         "src/grabber/TapHold.zig",
         "src/grabber/HidSeize.zig",
         "src/grabber/PowerSourceNotify.zig",
-        "src/grabber/RestoreKey.zig",
         // "src/Hotload.zig", // Skip hot load test for local test only
     };
 

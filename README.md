@@ -777,6 +777,13 @@ down this ladder — no second machine required:
    itself — re-enumeration triggers an automatic re-seize.
 4. **Last resort:** from another machine or an SSH session:
    ```bash
+   skhd --restart-service
+   ```
+   Restarting the agent makes the grabber drop and re-acquire the
+   keyboard seize (no sudo needed). If that's not enough — the
+   injection channel itself may be wedged — restart the grabber,
+   which rebuilds everything:
+   ```bash
    sudo launchctl kickstart -k system/com.jackielii.skhd.grabber
    ```
    Or, to stop remapping entirely and get the native keyboard back:

@@ -155,10 +155,13 @@ pub fn set_shell(self: *Mappings, shell: []const u8) !void {
 }
 
 pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
-    if (self.blacklist.contains(key)) {
+    // Stored lowercased: runtime lookup compares against the lowercased
+    // frontmost-app name from CarbonEvent
+    const owned = try std.ascii.allocLowerString(self.allocator, key);
+    errdefer self.allocator.free(owned);
+    if (self.blacklist.contains(owned)) {
         return error.BlacklistEntryAlreadyExists;
     }
-    const owned = try self.allocator.dupe(u8, key);
     try self.blacklist.put(self.allocator, owned, void{});
 }
 
@@ -400,6 +403,22 @@ test "add_blacklist returns error on duplicate" {
 
     // Verify the original entry is still there
     try std.testing.expect(mappings.blacklist.contains("firefox"));
+    try std.testing.expectEqual(@as(usize, 1), mappings.blacklist.count());
+}
+
+test "add_blacklist normalizes entries to lowercase" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+
+    // Runtime lookup uses the lowercased frontmost-app name (CarbonEvent),
+    // so entries must be stored lowercased regardless of config casing
+    try mappings.add_blacklist("VMware Fusion");
+    try std.testing.expect(mappings.blacklist.contains("vmware fusion"));
+
+    // Duplicate detection must also be case-insensitive
+    const result = mappings.add_blacklist("vmware FUSION");
+    try std.testing.expectError(error.BlacklistEntryAlreadyExists, result);
     try std.testing.expectEqual(@as(usize, 1), mappings.blacklist.count());
 }
 

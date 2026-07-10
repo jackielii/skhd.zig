@@ -751,6 +751,43 @@ on a machine that doesn't need them.
   brightness, mission control, …) so the F-row stays "media keys"
   under seize.
 
+### Keyboard unresponsive? The recovery ladder
+
+Because the grabber holds the keyboard *exclusively*, a rare failure
+(typically around sleep/wake or power transitions) can leave every key
+dead — presses are swallowed and nothing reaches macOS, so you can't
+type your way out. The grabber auto-recovers from every failure mode
+we've identified (device re-enumeration, sleep-stale seize, too-early
+wake seize, dead injection socket), but if you ever do get stuck, work
+down this ladder — no second machine required:
+
+1. **Close the lid, wait ~5 seconds, reopen.** Sleeping releases the
+   keyboard; waking re-acquires it, verifies the injection channel
+   end-to-end, and re-checks that input actually flows (retrying up to
+   3 times). This heals every known failure mode.
+2. **Unplug the power cord, replug, unplug, replug — within 10
+   seconds.** Four AC↔battery flips are the *master restore trigger*:
+   the grabber tears down and rebuilds both the keyboard seize and the
+   DriverKit injection connection from scratch. Works even when all
+   key input is dead (the power connector doesn't go through the
+   keyboard), and is deliberately awkward enough that it can't fire by
+   accident. Useful in clamshell mode where the lid trick isn't
+   available.
+3. **External keyboard dead instead?** Unplug and replug the keyboard
+   itself — re-enumeration triggers an automatic re-seize.
+4. **Last resort:** from another machine or an SSH session:
+   ```bash
+   sudo launchctl kickstart -k system/com.jackielii.skhd.grabber
+   ```
+   Or, to stop remapping entirely and get the native keyboard back:
+   ```bash
+   sudo launchctl bootout system/com.jackielii.skhd.grabber
+   ```
+
+If it happens, `/var/log/skhd-grabber.log` records the full event
+sequence (power transitions, seize lifecycle, recovery attempts) —
+please attach the relevant window to a GitHub issue.
+
 ## Built on Karabiner-Elements
 
 This whole feature exists because of **[Karabiner-Elements](https://karabiner-elements.pqrs.org/)** by [Takayama Fumihiko (pqrs.org)](https://pqrs.org/). The architecture, the idea, and the runtime dependency all come from there — skhd.zig is reusing pqrs's lower-level work to plug "QMK-style remapping" into a config format more skhd users already know.

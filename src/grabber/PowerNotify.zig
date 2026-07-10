@@ -142,6 +142,7 @@ fn powerCallback(
     switch (messageType) {
         c.kIOMessageCanSystemSleep => {
             // We never veto sleep — ack immediately.
+            log.info("can system sleep — allowing", .{});
             _ = c.IOAllowPowerChange(self.root_port, arg_id);
         },
         c.kIOMessageSystemWillSleep => {
@@ -159,7 +160,7 @@ fn powerCallback(
             self.on_wake(self.ctx);
         },
         else => {
-            log.info("unhandled power message: 0x{X:0>8}", .{messageType});
+            log.info("unhandled power message: 0x{X:0>8} arg={d}", .{ messageType, arg_id });
         },
     }
 }

@@ -330,6 +330,48 @@ pub extern fn IORegisterForSystemPower(
 pub extern fn IODeregisterForSystemPower(notifier: *io_object_t) IOReturn;
 pub extern fn IOAllowPowerChange(kernelPort: io_connect_t, notificationID: isize) IOReturn;
 
+// IOPowerSources (IOKit/ps/IOPowerSources.h) — battery / power-source
+// state. PowerSourceNotify (Debug/ReleaseSafe diagnostics only) logs a
+// line on every power-source change so low-battery transitions — a
+// suspected trigger of the mid-session dead-keyboard mode — become
+// visible in the log. Event-driven, no polling.
+
+pub const IOPowerSourceCallbackType = *const fn (context: ?*anyopaque) callconv(.c) void;
+
+/// Returns a runloop source that fires the callback on any power-source
+/// change (AC<->battery, capacity change, low-battery warning).
+pub extern fn IOPSNotificationCreateRunLoopSource(
+    callback: IOPowerSourceCallbackType,
+    context: ?*anyopaque,
+) CFRunLoopSourceRef;
+
+pub extern fn IOPSCopyPowerSourcesInfo() CFTypeRef;
+pub extern fn IOPSCopyPowerSourcesList(blob: CFTypeRef) CFArrayRef;
+pub extern fn IOPSGetPowerSourceDescription(blob: CFTypeRef, ps: CFTypeRef) CFDictionaryRef;
+
+/// System-wide kIOPSLowBatteryWarning* level.
+pub extern fn IOPSGetBatteryWarningLevel() c_int;
+pub const kIOPSLowBatteryWarningNone: c_int = 1;
+pub const kIOPSLowBatteryWarningEarly: c_int = 2;
+pub const kIOPSLowBatteryWarningFinal: c_int = 3;
+
+// IOPSKeys.h string keys/values. These are C #define string literals,
+// not exported symbols — create transient CFStrings from them at use
+// sites (same pattern as the kIOHID*Key matching keys).
+pub const kIOPSPowerSourceStateKey = "Power Source State";
+pub const kIOPSACPowerValue = "AC Power";
+pub const kIOPSCurrentCapacityKey = "Current Capacity";
+pub const kIOPSMaxCapacityKey = "Max Capacity";
+pub const kIOPSIsChargingKey = "Is Charging";
+
+// CF read helpers for parsing the IOPS description dictionaries.
+pub const CFBooleanRef = ?*const anyopaque;
+pub extern fn CFDictionaryGetValue(theDict: CFDictionaryRef, key: ?*const anyopaque) ?*const anyopaque;
+pub extern fn CFBooleanGetValue(boolean: CFBooleanRef) Boolean;
+pub const CFComparisonResult = c_long;
+pub const kCFCompareEqualTo: CFComparisonResult = 0;
+pub extern fn CFStringCompare(s1: CFStringRef, s2: CFStringRef, flags: c_ulong) CFComparisonResult;
+
 // Map a seized IOHIDDevice back to its IORegistry node so we can log the
 // seized device's registry entry id (observability: which device the
 // seize actually holds, vs the live keyboard).

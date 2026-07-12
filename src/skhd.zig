@@ -19,6 +19,7 @@ const Mappings = @import("Mappings.zig");
 const Mode = @import("Mode.zig");
 const Parser = @import("Parser.zig");
 const service = @import("service.zig");
+const Sequence = @import("Sequence.zig");
 const Tracer = @import("Tracer.zig");
 
 // Use scoped logging for skhd module
@@ -37,6 +38,15 @@ const HotkeyResult = enum {
     passthrough, // Hotkey found but marked as passthrough/unbound
     not_found, // No matching hotkey
 };
+
+const SequenceDispatch = union(enum) {
+    not_found,
+    pending,
+    complete: *Sequence,
+    mismatch,
+};
+
+const sequence_interval_ms: u32 = 300;
 
 allocator: std.mem.Allocator,
 io: std.Io,
@@ -66,6 +76,8 @@ grabber_reconnect_timer: c.CFRunLoopTimerRef = null,
 /// signal), restoreAll() clears the OS-level mapping so the keyboard
 /// returns to default.
 hidutil: ?*Hidutil = null,
+sequence_matcher: Sequence.Matcher = .{},
+sequence_timer: c.CFRunLoopTimerRef = null,
 
 pub fn init(gpa: std.mem.Allocator, io: std.Io, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -170,6 +182,8 @@ pub fn deinit(self: *Skhd) void {
         self.tracer.printSummary(&stderr_w.interface) catch {};
         stderr_w.interface.flush() catch {};
     }
+
+    self.cancelPendingSequence();
 
     // Clear hidutil UserKeyMapping FIRST so the user's keyboard isn't
     // left remapped if anything below errors. Idempotent — no-op when
@@ -362,6 +376,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
 /// layer back to default".
 fn modeChangePushed(ctx: ?*anyopaque, mode_name: []const u8) void {
     const self: *Skhd = @ptrCast(@alignCast(ctx orelse return));
+    self.cancelPendingSequence();
     if (mode_name.len == 0) {
         if (self.mappings.mode_map.getPtr("default")) |m| {
             self.current_mode = m;
@@ -740,6 +755,7 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
             // delivering callbacks instead of sending the disabled event) —
             // the watchdog timer catches that case.
             log.info("Restarting event-tap (typ={d})", .{typ});
+            self.cancelPendingSequence();
             c.CGEventTapEnable(self.event_tap.handle, true);
             if (!c.CGEventTapIsEnabled(self.event_tap.handle)) {
                 log.err("CGEventTapEnable did not bring the tap back; watchdog will detach it on the next tick.", .{});
@@ -784,6 +800,71 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
     }
 }
 
+fn dispatchSequence(
+    matcher: *Sequence.Matcher,
+    allocator: std.mem.Allocator,
+    sequences: []const *Sequence,
+    eventkey: Hotkey.KeyPress,
+    process_name: []const u8,
+) !SequenceDispatch {
+    const result = if (matcher.candidates.items.len > 0)
+        matcher.feed(eventkey, process_name)
+    else
+        try matcher.start(allocator, sequences, eventkey, process_name);
+    return switch (result) {
+        .none => .not_found,
+        .pending => .pending,
+        .complete => |sequence| .{ .complete = sequence },
+        .mismatch => .mismatch,
+    };
+}
+
+fn cancelSequenceTimer(self: *Skhd) void {
+    if (self.sequence_timer != null) {
+        c.CFRunLoopTimerInvalidate(self.sequence_timer);
+        c.CFRelease(self.sequence_timer);
+        self.sequence_timer = null;
+    }
+}
+
+fn cancelPendingSequence(self: *Skhd) void {
+    self.cancelSequenceTimer();
+    self.sequence_matcher.cancel(self.allocator);
+}
+
+fn sequenceTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const self: *Skhd = @ptrCast(@alignCast(info orelse return));
+    self.cancelPendingSequence();
+}
+
+fn startSequenceTimer(self: *Skhd) void {
+    self.cancelSequenceTimer();
+    const fire_date = c.CFAbsoluteTimeGetCurrent() +
+        @as(f64, @floatFromInt(sequence_interval_ms)) / 1000.0;
+    var context: c.CFRunLoopTimerContext = .{
+        .version = 0,
+        .info = self,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    self.sequence_timer = c.CFRunLoopTimerCreate(
+        c.kCFAllocatorDefault,
+        fire_date,
+        0,
+        0,
+        0,
+        sequenceTimerCallback,
+        &context,
+    );
+    if (self.sequence_timer != null) {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), self.sequence_timer, c.kCFRunLoopDefaultMode);
+    } else {
+        log.err("Failed to create hotkey-sequence timer", .{});
+        self.sequence_matcher.cancel(self.allocator);
+    }
+}
+
 inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     if (self.current_mode == null) {
         self.tracer.traceNoModeExit();
@@ -807,6 +888,41 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     }
 
     const eventkey = createEventKey(event);
+    if (self.sequence_matcher.candidates.items.len > 0 and
+        c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventAutorepeat) != 0)
+    {
+        return @ptrFromInt(0);
+    }
+
+    var sequence_dispatch = try dispatchSequence(
+        &self.sequence_matcher,
+        self.allocator,
+        self.current_mode.?.sequences.items,
+        eventkey,
+        process_name,
+    );
+    if (sequence_dispatch == .mismatch) {
+        self.cancelSequenceTimer();
+        sequence_dispatch = try dispatchSequence(
+            &self.sequence_matcher,
+            self.allocator,
+            self.current_mode.?.sequences.items,
+            eventkey,
+            process_name,
+        );
+    }
+    switch (sequence_dispatch) {
+        .pending => {
+            self.startSequenceTimer();
+            return @ptrFromInt(0);
+        },
+        .complete => |sequence| {
+            self.cancelSequenceTimer();
+            const result = try self.processMatchedHotkey(sequence.action, &eventkey, event, process_name, false);
+            return try self.handleHotkeyResult(result, event, eventkey, process_name);
+        },
+        .not_found, .mismatch => {},
+    }
     const result = try self.processHotkey(&eventkey, event, process_name);
     return try self.handleHotkeyResult(result, event, eventkey, process_name);
 }
@@ -1285,6 +1401,10 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
     self.tracer.traceHotkeyFound(true);
     const hotkey = found_hotkey.?;
 
+    return self.processMatchedHotkey(hotkey, eventkey, event, process_name, via_wildcard);
+}
+
+inline fn processMatchedHotkey(self: *Skhd, hotkey: *Hotkey, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8, via_wildcard: bool) !HotkeyResult {
     // Check for process-specific command/forward (includes wildcard fallback)
     if (hotkey.find_command_for_process(process_name)) |process_cmd| {
         switch (process_cmd) {
@@ -1321,6 +1441,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                     try forkAndExec(self.mappings.shell, activation_cmd, self.verbose);
                 }
                 log.debug("Activating mode '{s}'", .{act.mode_name});
+                self.cancelPendingSequence();
                 self.current_mode = self.mappings.mode_map.getPtr(act.mode_name);
                 if (self.current_mode) |_mode| {
                     if (_mode.command) |mode_cmd| {
@@ -1378,6 +1499,9 @@ pub fn reloadConfig(self: *Skhd) !void {
         }
         return err;
     };
+
+    // Pending sequence candidates borrow the current mappings.
+    self.cancelPendingSequence();
 
     // Swap old mappings with new ones
     self.mappings.deinit();
@@ -1778,4 +1902,23 @@ test "non-capture mode: wildcard does NOT fire" {
         const result = try skhd.processHotkey(&kp, mock_event, "test");
         try std.testing.expectEqual(HotkeyResult.not_found, result);
     }
+}
+
+test "sequence dispatch starts only for an applicable process and completes" {
+    const alloc = std.testing.allocator;
+    const chord = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
+    var action = try Hotkey.create(alloc);
+    errdefer action.destroy();
+    try action.add_process_command("Protected App", "quit");
+    var sequence = try Sequence.create(alloc, &.{ chord, chord }, action);
+    defer sequence.destroy();
+    const sequences = [_]*Sequence{sequence};
+
+    var matcher: Sequence.Matcher = .{};
+    defer matcher.cancel(alloc);
+    try std.testing.expectEqual(SequenceDispatch.not_found, try dispatchSequence(&matcher, alloc, &sequences, chord, "Other App"));
+    try std.testing.expectEqual(SequenceDispatch.pending, try dispatchSequence(&matcher, alloc, &sequences, chord, "Protected App"));
+    const completed = try dispatchSequence(&matcher, alloc, &sequences, chord, "Protected App");
+    try std.testing.expect(completed == .complete);
+    try std.testing.expectEqual(sequence, completed.complete);
 }

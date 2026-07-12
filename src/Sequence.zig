@@ -73,6 +73,7 @@ pub const Matcher = struct {
     ) !MatchResult {
         self.cancel(allocator);
         self.allocator = allocator;
+        errdefer self.cancelStored();
         for (sequences) |sequence| {
             if (sequence.action.find_command_for_process(process_name) == null) continue;
             if (!sequence.matchesStep(0, eventkey)) continue;

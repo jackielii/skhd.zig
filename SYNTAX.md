@@ -11,10 +11,12 @@ hotkey       = <mode> '<' <action> | <action>
 
 mode         = 'name of mode' | <mode> ',' <mode>
 
-action       = <keysym> '[' <proc_map_lst> ']'   | <keysym> '->' '[' <proc_map_lst> ']'
-               <keysym> ':' <command>            | <keysym> '->' ':' <command>
-               <keysym> ';' <mode_activation>    | <keysym> '->' ';' <mode_activation>
-               <keysym> '~'
+action       = <trigger> '[' <proc_map_lst> ']'   | <trigger> '->' '[' <proc_map_lst> ']'
+               <trigger> ':' <command>            | <trigger> '->' ':' <command>
+               <trigger> ';' <mode_activation>    | <trigger> '->' ';' <mode_activation>
+               <trigger> '~'
+
+trigger      = <keysym> | <keysym> ',' <keysym> (',' <keysym>)*
 
 keysym       = <mod> '-' <key> | <key>
 
@@ -66,6 +68,37 @@ mode_activation = <mode> | <mode> ':' <command>
 
 ~            = application is unbound and keypress is forwarded per usual
 ```
+
+## Hotkey Sequences
+
+A comma separates complete hotkey chords:
+
+```skhd
+cmd - q, cmd - q : echo "double Cmd-Q"
+cmd - k, cmd - c, alt - q : echo "three-chord sequence"
+```
+
+Every chord declares its own modifiers. Consecutive chords must arrive within
+300ms of each other. Modifier transitions are not sequence steps, so modifiers
+may be released and pressed again between chords.
+
+The first chord is consumed only when the current application has an applicable
+sequence action. This allows an application-specific safety binding while
+preserving the operating system's normal behavior elsewhere:
+
+```skhd
+cmd - q, cmd - q [
+    "Protected App" : echo "quit Protected App"
+]
+```
+
+In `Protected App`, the first `cmd-q` starts the sequence. In other applications,
+the binding does not apply and the first `cmd-q` passes through normally.
+
+An expired or mismatched prefix is not replayed. A single-chord binding and a
+longer sequence may share a prefix only when their explicit application scopes
+are disjoint. Wildcard (`*`) actions overlap every explicit application scope,
+so ambiguous wildcard prefixes are rejected when the configuration is parsed.
 
 ## Mode Activation
 

@@ -354,6 +354,27 @@ alt - space : echo "Alt+Space"
 shift - f1 : echo "Shift+F1"
 ```
 
+### Hotkey Sequences
+
+Separate complete chords with commas. Each step must follow the previous one
+within 300ms:
+
+```bash
+# Require two Cmd-Q presses in this application. Elsewhere Cmd-Q has no
+# matching skhd sequence, so macOS receives it normally.
+cmd - q, cmd - q [
+    "Protected App" : osascript -e 'tell application "Protected App" to quit'
+]
+
+# Complete modifiers are written on every chord.
+cmd - k, cmd - c : echo "sequence completed"
+```
+
+Sequence prefixes are consumed and are not replayed when the interval expires
+or a different chord is pressed. Prefixes may be reused by bindings whose
+explicit application scopes do not overlap; wildcard actions overlap all
+applications.
+
 ### Supported Modifiers
 
 ```bash

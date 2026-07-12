@@ -1023,12 +1023,23 @@ const Daemon = struct {
         }
     }
 
-    /// (Re-)arm the one-shot heartbeat deadline. No-op while sleeping —
+    /// (Re-)arm the heartbeat deadline. No-op while sleeping —
     /// heartbeats pause with the machine, and a deadline armed before
     /// sleep would fire spuriously on wake.
+    ///
+    /// The timer is created once and slid forward in place with
+    /// CFRunLoopTimerSetNextFireDate — this runs on every heartbeat
+    /// (~5s, forever), so no per-heartbeat create/destroy churn. It's
+    /// nominally repeating with an effectively-infinite interval so a
+    /// fire doesn't invalidate it; teardown is cancelVhiddDeadline.
     fn armVhiddDeadline(self: *Daemon, deadline_ms: u32) void {
         if (self.sleeping) return;
-        self.cancelVhiddDeadline();
+        const total_ms = deadline_ms + vhidd_deadline_grace_ms;
+        const fire_at = c.CFAbsoluteTimeGetCurrent() + @as(f64, @floatFromInt(total_ms)) / 1000.0;
+        if (self.vhidd_deadline_timer) |t| {
+            c.CFRunLoopTimerSetNextFireDate(t, fire_at);
+            return;
+        }
         var ctx: c.CFRunLoopTimerContext = .{
             .version = 0,
             .info = self,
@@ -1036,12 +1047,10 @@ const Daemon = struct {
             .release = null,
             .copyDescription = null,
         };
-        const total_ms = deadline_ms + vhidd_deadline_grace_ms;
-        const fire_at = c.CFAbsoluteTimeGetCurrent() + @as(f64, @floatFromInt(total_ms)) / 1000.0;
         const timer = c.CFRunLoopTimerCreate(
             c.kCFAllocatorDefault,
             fire_at,
-            0, // one-shot
+            1e9, // ~31 years — never actually repeats; keeps a fire from invalidating it
             0,
             0,
             vhiddDeadlineCallback,
@@ -1335,13 +1344,12 @@ fn vhiddWatchCallback(
 
 /// vhidd heartbeat deadline missed: the server session is presumed
 /// wedged (the confirmed silent-dead-keyboard cause) — full rebuild.
+/// The timer is nominally repeating (see armVhiddDeadline) so it stays
+/// valid after firing; recovery tears it down via stopVhiddWatch, and
+/// the early-return paths leave it parked ~31 years out until the next
+/// heartbeat slides it back.
 fn vhiddDeadlineCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const d: *Daemon = @ptrCast(@alignCast(info orelse return));
-    // One-shot: it fired, drop our reference.
-    if (d.vhidd_deadline_timer) |t| {
-        c.CFRelease(t);
-        d.vhidd_deadline_timer = null;
-    }
     if (d.sleeping or d.vhidd == null) return;
     log.warn("vhidd heartbeat deadline missed — connection presumed dead, rebuilding", .{});
     d.markVhiddBroken();

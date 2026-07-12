@@ -122,6 +122,10 @@ pub extern fn CFRunLoopTimerCreate(
     callout: CFRunLoopTimerCallBack,
     context: *CFRunLoopTimerContext,
 ) CFRunLoopTimerRef;
+/// Re-arm an existing (repeating) timer in place — the steady-state
+/// path of the vhidd heartbeat watchdog, avoiding a create/destroy
+/// cycle per heartbeat.
+pub extern fn CFRunLoopTimerSetNextFireDate(timer: CFRunLoopTimerRef, fireDate: CFAbsoluteTime) void;
 
 // IOKit / HID. IOHID*Ref are also opaque.
 pub const IOReturn = c_int;

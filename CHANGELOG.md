@@ -5,7 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.10...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.11...HEAD)
+
+## [0.1.11](https://github.com/jackielii/skhd.zig/compare/v0.1.10...v0.1.11) - 2026-07-12
+
+### Fixed
+- **Post-wake keyboard death where the device's IOKit registry ID did not change (mode-3 dead keyboard).** The 0.1.10 sleep-fix released and re-acquired the seize around every sleep transition; 0.1.9's DeviceNotify re-seized on re-enumeration. A third failure mode remained: after certain wake cycles the built-in keyboard's IOKit ID was unchanged — no re-enumeration event fired, the power-on path re-seized the same handle, yet keystrokes stopped flowing. The grabber now **verifies** the seize is live after every `kIOMessageSystemHasPoweredOn` by confirming event delivery; if the check times out it tears down and rebuilds the seize against the current device set. Closes the last documented dead-keyboard scenario without requiring a lid cycle or cord flip.
+- **Fix #50.**
+
+### Added
+- **vhidd heartbeat watchdog — replaces the unreliable wake ready-probe.** A recurring heartbeat tests the vhidd transport on a short interval and declares it broken on the first missed reply, triggering the existing fail-open + reconnect path. The prior approach (a one-shot probe immediately after `kIOMessageSystemHasPoweredOn`) fired only at the moment of wake; if vhidd stalled seconds later there was no detection until the next key event failed. The heartbeat timer is re-armed in-place on each successful reply — no timer-object churn per heartbeat.
+- **Master restore key — in-keyboard escape hatch for a dead grabber.** A configurable fn-key (observed without seizing, so it always reaches the OS) acts as a trigger: holding it for a short burst fires a full vhidd-connection + HID-seize teardown and rebuild — the same recovery as the lid-cycle + cord-flip sequence documented in `docs/`. The observer logs the full device set it holds at the observe stage so the chosen key is visible in the log. Provides a recovery path when SSH or a lid cycle is impractical.
+- **Recovery documentation.** `docs/` gains a recovery ladder covering the full sequence for an unresponsive keyboard (lid cycle → cord flip → master restore key) and calls out `skhd --restart-service` as the first step when recovering over SSH.
+
+### Changed
+- **Power and battery diagnostics expanded (Debug/ReleaseSafe builds).** The grabber now logs every IOKit power-source transition (battery → AC and back, percentage changes) and every raw IOKit power message, including non-sleep transitions that were previously invisible. The restore-key observer also logs the devices it holds at startup. All new lines are compiled out of ReleaseFast so production logs stay quiet.
 
 ## [0.1.10](https://github.com/jackielii/skhd.zig/compare/v0.1.9...v0.1.10) - 2026-06-24
 

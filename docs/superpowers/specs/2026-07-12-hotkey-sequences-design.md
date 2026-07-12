@@ -73,14 +73,22 @@ alt - x, ctrl + shift - y | cmd - z
 
 Every step uses the existing modifier and keysym grammar. A missing chord after a comma is a parse error with the comma's source location.
 
-Within one mode, a single-chord binding and a longer sequence may not share the complete single chord as a prefix. For example, these declarations conflict and parsing rejects them:
+Within one mode and overlapping application scopes, a single-chord binding and a longer sequence may not share the complete single chord as a prefix. For example, these declarations conflict and parsing rejects them because both apply to `Code`:
 
 ```skhd
-cmd - q : immediate-command
-cmd - q, cmd - q : delayed-command
+cmd - q [ "Code" : immediate-command ]
+cmd - q, cmd - q [ "Code" : delayed-command ]
 ```
 
-Likewise, one complete sequence may not be a prefix of another. Rejecting prefix ambiguity keeps ordinary hotkeys immediate and avoids waiting to discover whether a longer binding will follow.
+Explicit disjoint application scopes may reuse a prefix. A wildcard action overlaps every explicit process action. An ordinary operating-system behavior for which skhd has no binding does not create a conflict. This permits the motivating configuration:
+
+```skhd
+cmd - q, cmd - q [ "Protected App" : protected-quit-command ]
+```
+
+In `Protected App`, skhd consumes the first chord and begins the sequence. In every other application, no applicable sequence exists, so the first `cmd-q` passes through and macOS performs its normal Quit action.
+
+Likewise, one complete sequence may not be a prefix of another where their application scopes overlap. Rejecting prefix ambiguity keeps ordinary hotkeys immediate and avoids waiting to discover whether a longer binding will follow.
 
 Different longer sequences may share an incomplete prefix:
 
@@ -95,8 +103,8 @@ Existing duplicate-binding and process-action collision rules continue to apply 
 
 When no sequence is pending:
 
-1. Look up the chord in the current mode.
-2. If it starts one or more sequences, consume the event, capture the current mode and process identity, retain those candidates, and start the 300ms timer.
+1. Look up the chord in the current mode and filter sequence candidates to those with an action applicable to the frontmost process.
+2. If it starts one or more applicable sequences, consume the event, capture the current mode and process identity, retain those candidates, and start the 300ms timer.
 3. Otherwise, process it as an ordinary hotkey exactly as today.
 
 When a sequence is pending:
@@ -153,8 +161,11 @@ Parser and mapping tests cover:
 - process-specific sequence actions,
 - malformed commas and missing chords,
 - duplicate sequences,
-- single-hotkey/sequence prefix conflicts,
-- sequence/longer-sequence prefix conflicts,
+- single-hotkey/sequence prefix conflicts with overlapping process scopes,
+- sequence/longer-sequence prefix conflicts with overlapping process scopes,
+- valid reuse of prefixes across disjoint explicit process scopes,
+- wildcard process scopes conflicting with explicit scopes,
+- no applicable sequence allowing the first chord to pass through,
 - and valid shared incomplete prefixes.
 
 A timer-independent sequence matcher unit covers:

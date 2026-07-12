@@ -8,6 +8,7 @@
 // };
 const std = @import("std");
 const Hotkey = @import("Hotkey.zig");
+const Sequence = @import("Sequence.zig");
 const utils = @import("utils.zig");
 
 const Mode = @This();
@@ -19,6 +20,7 @@ command: ?[:0]const u8 = null,
 capture: bool = false,
 initialized: bool = false,
 hotkey_map: Hotkey.HotkeyMap = .empty,
+sequences: std.ArrayListUnmanaged(*Sequence) = .empty,
 
 pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
     return Mode{
@@ -33,6 +35,7 @@ pub fn deinit(self: *Mode) void {
     self.allocator.free(self.name);
     if (self.command) |cmd| self.allocator.free(cmd);
     self.hotkey_map.deinit(self.allocator);
+    self.sequences.deinit(self.allocator);
     self.* = undefined;
 }
 
@@ -70,7 +73,34 @@ pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
         }
     }
 
+    for (self.sequences.items) |sequence| {
+        if (Sequence.chordOverlapsHotkey(sequence.chords[0], hotkey) and
+            Hotkey.processScopesOverlap(sequence.action, hotkey))
+        {
+            return error.AmbiguousSequencePrefix;
+        }
+    }
+
     try self.hotkey_map.put(self.allocator, hotkey, {});
+}
+
+pub fn addSequence(self: *Mode, sequence: *Sequence) !void {
+    for (self.sequences.items) |existing| {
+        if (Sequence.onePrefixesOther(existing, sequence) and
+            Hotkey.processScopesOverlap(existing.action, sequence.action))
+        {
+            return error.AmbiguousSequencePrefix;
+        }
+    }
+    var it = self.hotkey_map.iterator();
+    while (it.next()) |entry| {
+        if (Sequence.chordOverlapsHotkey(sequence.chords[0], entry.key_ptr.*) and
+            Hotkey.processScopesOverlap(sequence.action, entry.key_ptr.*))
+        {
+            return error.AmbiguousSequencePrefix;
+        }
+    }
+    try self.sequences.append(self.allocator, sequence);
 }
 
 test "init" {

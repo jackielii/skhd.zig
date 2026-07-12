@@ -35,6 +35,22 @@ pub fn matchesStep(self: *const Sequence, index: usize, eventkey: Hotkey.KeyPres
     return chord.key == eventkey.key and Hotkey.hotkeyFlagsMatch(chord.flags, eventkey.flags);
 }
 
+pub fn chordOverlapsHotkey(chord: Hotkey.KeyPress, hotkey: *const Hotkey) bool {
+    if (chord.key != hotkey.key) return false;
+    return Hotkey.hotkeyFlagsMatch(chord.flags, hotkey.flags) or
+        Hotkey.hotkeyFlagsMatch(hotkey.flags, chord.flags);
+}
+
+pub fn onePrefixesOther(a: *const Sequence, b: *const Sequence) bool {
+    const common_len = @min(a.chords.len, b.chords.len);
+    for (a.chords[0..common_len], b.chords[0..common_len]) |a_chord, b_chord| {
+        if (a_chord.key != b_chord.key) return false;
+        if (!(Hotkey.hotkeyFlagsMatch(a_chord.flags, b_chord.flags) or
+            Hotkey.hotkeyFlagsMatch(b_chord.flags, a_chord.flags))) return false;
+    }
+    return true;
+}
+
 pub const MatchResult = union(enum) {
     none,
     pending,

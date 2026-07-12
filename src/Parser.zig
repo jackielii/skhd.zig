@@ -5,6 +5,7 @@ const Token = Tokenizer.Token;
 const Hotkey = @import("Hotkey.zig");
 const assert = std.debug.assert;
 const Mode = @import("Mode.zig");
+const Sequence = @import("Sequence.zig");
 const Mappings = @import("Mappings.zig");
 const Keycodes = @import("Keycodes.zig");
 const HidKeyMap = @import("HidKeyMap.zig");
@@ -256,7 +257,8 @@ fn handleProcessError(self: *Parser, err: anyerror, process_name: []const u8, op
 
 fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     var hotkey = try Hotkey.create(self.allocator);
-    errdefer hotkey.destroy();
+    var hotkey_owned = true;
+    errdefer if (hotkey_owned) hotkey.destroy();
 
     if (self.match(.Token_Identifier)) {
         try self.parse_mode(mappings, hotkey);
@@ -285,57 +287,21 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         };
     }
 
-    var found_modifier = false;
-    var key_consumed = false;
+    const first_chord = try self.parse_keypress();
+    hotkey.flags = first_chord.flags;
+    hotkey.key = first_chord.key;
 
-    if (self.peek_check(.Token_Alias)) {
-        const tok = self.peek().?;
-        const alias = try self.lookup_alias(tok);
-        switch (alias) {
-            .modifier => {
-                self.advance();
-                hotkey.flags = try self.parse_modifier();
-                found_modifier = true;
-            },
-            .key => |kp| {
-                self.advance();
-                try self.reject_key_alias_in_modifier_position(tok);
-                hotkey.flags = hotkey.flags.merge(kp.flags);
-                hotkey.key = kp.key;
-                key_consumed = true;
-            },
-        }
-    } else if (self.match(.Token_Modifier)) {
-        hotkey.flags = try self.parse_modifier();
-        found_modifier = true;
-    }
-
-    if (found_modifier) {
-        if (!self.match(.Token_Dash)) {
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '-' after modifier", self.current_file_path);
-            return error.ParseErrorOccurred;
-        }
-    }
-
-    if (!key_consumed) {
-        if (self.match(.Token_Key)) {
-            hotkey.key = try self.parse_key();
-        } else if (self.match(.Token_Key_Hex)) {
-            hotkey.key = try self.parse_key_hex();
-        } else if (self.match(.Token_Literal)) {
-            const keypress = try self.parse_key_literal();
-            hotkey.flags = hotkey.flags.merge(keypress.flags);
-            hotkey.key = keypress.key;
-        } else if (self.match(.Token_Alias)) {
-            const keypress = try self.resolve_key_alias(self.previous());
-            hotkey.flags = hotkey.flags.merge(keypress.flags);
-            hotkey.key = keypress.key;
-        } else {
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected key, key hex, or literal", self.current_file_path);
-            return error.ParseErrorOccurred;
-        }
+    var chords: std.ArrayListUnmanaged(Hotkey.KeyPress) = .empty;
+    defer chords.deinit(self.allocator);
+    try chords.append(self.allocator, first_chord);
+    while (self.match(.Token_Comma)) {
+        const comma = self.previous();
+        const chord = self.parse_keypress() catch |err| {
+            self.clearError();
+            self.error_info = try ParseError.fromToken(self.allocator, comma, "Expected complete hotkey chord after ','", self.current_file_path);
+            return err;
+        };
+        try chords.append(self.allocator, chord);
     }
 
     if (self.match(.Token_Arrow)) {
@@ -377,6 +343,20 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         try self.parse_proc_list(mappings, hotkey);
     }
 
+    if (chords.items.len > 1) {
+        const sequence = try Sequence.create(self.allocator, chords.items, hotkey);
+        hotkey_owned = false;
+        errdefer sequence.destroy();
+        mappings.add_sequence(sequence) catch |err| {
+            if (err == error.AmbiguousSequencePrefix) {
+                self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Ambiguous hotkey sequence prefix in overlapping application scope", self.current_file_path);
+                return error.ParseErrorOccurred;
+            }
+            return err;
+        };
+        return;
+    }
+
     mappings.add_hotkey(hotkey) catch |err| {
         if (err == error.DuplicateHotkeyInMode) {
             // Format the hotkey for the error message
@@ -402,6 +382,10 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             const key_token = self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, key_token, msg, self.current_file_path);
 
+            return error.ParseErrorOccurred;
+        }
+        if (err == error.AmbiguousSequencePrefix) {
+            self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Ambiguous hotkey sequence prefix in overlapping application scope", self.current_file_path);
             return error.ParseErrorOccurred;
         }
         return err;
@@ -1822,6 +1806,78 @@ test "double mode free" {
         \\ game, work < ctrl + shift - h: echo
     );
     // print("{s}\n", .{mappings});
+}
+
+test "parse application-scoped hotkey sequence" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+
+    try parser.parse(&mappings,
+        \\cmd - q, cmd - q [
+        \\    "Protected App" : echo quit
+        \\]
+    );
+    const mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), mode.sequences.items.len);
+    try std.testing.expectEqual(@as(usize, 2), mode.sequences.items[0].chords.len);
+}
+
+test "sequence prefix conflicts are scoped by application" {
+    const alloc = std.testing.allocator;
+
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings,
+            \\cmd - q [
+            \\    "Terminal" : echo terminal
+            \\]
+            \\cmd - q, cmd - q [
+            \\    "Protected App" : echo protected
+            \\]
+        );
+    }
+
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        const result = parser.parse(&mappings,
+            \\cmd - q : echo immediate
+            \\cmd - q, cmd - q [
+            \\    "Protected App" : echo protected
+            \\]
+        );
+        try std.testing.expectError(error.ParseErrorOccurred, result);
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Ambiguous hotkey sequence prefix"));
+    }
+}
+
+test "parse three-chord sequence and reject missing chord" {
+    const alloc = std.testing.allocator;
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings, "cmd - k, cmd - c, alt - q : echo sequence");
+        const mode = mappings.mode_map.get("default").?;
+        try std.testing.expectEqual(@as(usize, 3), mode.sequences.items[0].chords.len);
+    }
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, "cmd - q, : echo invalid"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Expected complete hotkey chord"));
+    }
 }
 
 test "load directive" {

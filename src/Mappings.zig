@@ -1,6 +1,7 @@
 const std = @import("std");
 const Mode = @import("Mode.zig");
 const Hotkey = @import("Hotkey.zig");
+const Sequence = @import("Sequence.zig");
 const utils = @import("utils.zig");
 const log = std.log.scoped(.mappings);
 
@@ -16,6 +17,7 @@ loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
 paths: std.ArrayListUnmanaged([]const u8) = .empty,
 // Track all hotkeys for cleanup (hotkeys can belong to multiple modes)
 hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
+sequences: std.ArrayListUnmanaged(*Sequence) = .empty,
 // Device aliases declared via `.device <name> <vendor> <product>`. Empty
 // when the user hasn't opted into per-device matching, in which case the
 // IOHIDManager monitor is never started.
@@ -95,6 +97,8 @@ pub fn deinit(self: *Mappings) void {
         hotkey.destroy();
     }
     self.hotkeys.deinit(self.allocator);
+    for (self.sequences.items) |sequence| sequence.destroy();
+    self.sequences.deinit(self.allocator);
 
     {
         var it = self.mode_map.iterator();
@@ -147,6 +151,14 @@ pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
 
     // Only track the hotkey after successful addition to all modes
     try self.hotkeys.append(self.allocator, hotkey);
+}
+
+pub fn add_sequence(self: *Mappings, sequence: *Sequence) !void {
+    var it = sequence.action.mode_list.iterator();
+    while (it.next()) |kv| {
+        try kv.key_ptr.*.addSequence(sequence);
+    }
+    try self.sequences.append(self.allocator, sequence);
 }
 
 pub fn set_shell(self: *Mappings, shell: []const u8) !void {
@@ -227,7 +239,6 @@ pub fn add_path(self: *Mappings, path: []const u8) !void {
     errdefer self.allocator.free(owned);
     try self.paths.append(self.allocator, owned);
 }
-
 
 pub fn format(self: Mappings, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.writeAll("Mappings {");

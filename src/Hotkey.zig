@@ -396,6 +396,27 @@ pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?
     return self.wildcard_command;
 }
 
+pub fn hasWildcardAction(self: *const Hotkey) bool {
+    return self.wildcard_command != null;
+}
+
+pub fn hasExplicitProcess(self: *const Hotkey, process_name: []const u8) bool {
+    var it = self.mappings.iterator();
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, process_name)) return true;
+    }
+    return false;
+}
+
+pub fn processScopesOverlap(a: *const Hotkey, b: *const Hotkey) bool {
+    if (a.hasWildcardAction() or b.hasWildcardAction()) return true;
+    var it = a.mappings.iterator();
+    while (it.next()) |entry| {
+        if (b.hasExplicitProcess(entry.key_ptr.*)) return true;
+    }
+    return false;
+}
+
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
     if (self.mode_list.contains(mode)) {
         return error.ModeAlreadyExistsInHotkey;
@@ -488,6 +509,29 @@ test "add_process returns error on duplicate" {
     const wildcard_cmd = hotkey.find_command_for_process("unknown_process");
     try std.testing.expect(wildcard_cmd != null);
     try std.testing.expectEqualStrings("echo wildcard", wildcard_cmd.?.command);
+}
+
+test "process scopes overlap for shared explicit app or wildcard" {
+    const alloc = std.testing.allocator;
+    var terminal = try Hotkey.create(alloc);
+    defer terminal.destroy();
+    try terminal.add_process_command("Terminal", "echo terminal");
+
+    var protected = try Hotkey.create(alloc);
+    defer protected.destroy();
+    try protected.add_process_command("Protected App", "echo protected");
+
+    var same_protected = try Hotkey.create(alloc);
+    defer same_protected.destroy();
+    try same_protected.add_process_command("protected app", "echo same");
+
+    var wildcard = try Hotkey.create(alloc);
+    defer wildcard.destroy();
+    try wildcard.add_process_command("*", "echo wildcard");
+
+    try testing.expect(!processScopesOverlap(terminal, protected));
+    try testing.expect(processScopesOverlap(protected, same_protected));
+    try testing.expect(processScopesOverlap(wildcard, protected));
 }
 
 test "ArrayHashMap performance characteristics" {

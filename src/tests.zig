@@ -1,4 +1,9 @@
 const std = @import("std");
+const Sequence = @import("Sequence.zig");
+
+comptime {
+    _ = Sequence;
+}
 const testing = std.testing;
 
 // Import our modules
@@ -11,7 +16,6 @@ const Skhd = @import("skhd.zig");
 const ParseError = @import("ParseError.zig").ParseError;
 const print = std.debug.print;
 const log = std.log.scoped(.tests);
-
 
 test "ModifierFlag basic operations" {
     // Test basic flag creation

@@ -934,6 +934,52 @@ test "chord overlap does not over-tighten" {
     try testing.expect(onePrefixesOther(cmd_x, cmd_x_2));
 }
 
+test "familyOverlap is symmetric and reflexive across the whole family state space" {
+    // Mode.add_hotkey relies on two properties of familyOverlap that aren't
+    // exercised by name elsewhere:
+    //
+    //   1. Symmetry: add_hotkey calls onePrefixesOther(existing, hotkey) in
+    //      one fixed order. If familyOverlap were asymmetric, conflict
+    //      detection would depend on config line order.
+    //   2. Reflexivity (self-overlap): eql-equal hotkeys have identical
+    //      family state per chord, so familyOverlap(a, a) being true for
+    //      every reachable state is exactly what makes `eql` imply
+    //      `onePrefixesOther` — which is what makes the identity gate in
+    //      add_hotkey (`if (Hotkey.eql(existing, hotkey)) return
+    //      error.DuplicateHotkeyInMode;`) reachable at all.
+    //
+    // A family's config state is the tuple (general, left, right) — 8
+    // combinations. Exhaust all 8 for the cmd family and check both
+    // properties over the full 8x8 state space.
+    var states: [8]ModifierFlag = undefined;
+    for (0..8) |i| {
+        states[i] = .{
+            .cmd = (i & 0b100) != 0,
+            .lcmd = (i & 0b010) != 0,
+            .rcmd = (i & 0b001) != 0,
+        };
+    }
+
+    var pairs_checked: usize = 0;
+    for (states) |a| {
+        for (states) |b| {
+            try testing.expectEqual(
+                familyOverlap(a, b, .cmd),
+                familyOverlap(b, a, .cmd),
+            );
+            pairs_checked += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 64), pairs_checked);
+
+    var self_checked: usize = 0;
+    for (states) |a| {
+        try testing.expect(familyOverlap(a, a, .cmd));
+        self_checked += 1;
+    }
+    try testing.expectEqual(@as(usize, 8), self_checked);
+}
+
 test "prefix lookup resolves complete vs pending and skips inapplicable scopes" {
     const alloc = std.testing.allocator;
     const cmd_q = KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };

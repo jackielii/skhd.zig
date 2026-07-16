@@ -168,7 +168,7 @@ else
 
 The identity gate is not a second rule — it is the data structure asserting itself. `HotkeyMap`'s context keys on `Hotkey.eql`, which compares chord lists and ignores process scope. Two hotkeys with *identical* chords are therefore the same key: `put` keeps the first and silently discards the second, whatever their process lists say. Rejecting that config is strictly better than accepting it and dropping a binding the user wrote. So identical chords conflict unconditionally, exactly as they do today.
 
-The gate must sit **before** the scope check or it never runs, and it is reachable precisely because `eql` implies `onePrefixesOther` (equal flags satisfy `hotkeyFlagsMatch` in both directions).
+The gate must sit **before** the scope check or it never runs, and it is reachable precisely because `eql` implies `onePrefixesOther`: `eql` forces every chord's modifier state to be identical family-by-family between the two hotkeys, and `familyOverlap` is reflexive — true whenever a config's state is compared against itself — so `chordsOverlap`, and hence `onePrefixesOther`, holds for eql-equal hotkeys.
 
 Two error names survive for message quality. Chords compare with **overlap** semantics — some one physical press could match both — resolved **per modifier family**:
 

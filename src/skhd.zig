@@ -1770,6 +1770,47 @@ test "hot reload refresh is deferred until maintenance turn" {
     try std.testing.expectEqual(@as(usize, 2), skhd.hotloader.?.watch_list.items.len);
 }
 
+test "reload resizes the sequence prefix buffer to the new max_chords" {
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // PID-qualified for the same reason as the hot reload test above.
+    const test_id = std.testing.random_seed;
+    const pid = std.c.getpid();
+    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_reload_resize_{d}_{d}.skhdrc", .{ test_id, pid });
+    defer allocator.free(config_path);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = "cmd - a : echo initial" });
+    defer std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
+
+    var skhd = try Skhd.init(allocator, io, config_path, false, false);
+    defer skhd.deinit();
+
+    // Baseline: no sequences, so one chord is the longest chord list.
+    try std.testing.expectEqual(@as(usize, 1), skhd.mappings.max_chords);
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix.len);
+
+    // Reload into a config whose longest chord list is longer. The buffer
+    // must grow with it: commitPrefix indexes it by sequence_prefix_len and
+    // trusts it to be sized for the *current* mappings, so a stale buffer is
+    // an out-of-bounds write (assert in Debug/ReleaseSafe, silent in
+    // ReleaseFast).
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = config_path,
+        .data =
+        \\cmd - a : echo reloaded
+        \\cmd - k, cmd - c : echo seq
+        ,
+    });
+    try skhd.reloadConfig();
+
+    try std.testing.expectEqual(@as(usize, 2), skhd.mappings.max_chords);
+    try std.testing.expectEqual(skhd.mappings.max_chords, skhd.sequence_prefix.len);
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+}
+
 test "processHotkey respects passthrough in capture mode" {
     const alloc = std.testing.allocator;
 

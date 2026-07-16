@@ -60,9 +60,11 @@ pub fn format(self: Mode, writer: *std.Io.Writer) std.Io.Writer.Error!void {
 
 pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
     // Two hotkeys conflict iff one's chord list prefixes the other's AND
-    // their process scopes overlap. That guarantees at most one hotkey
-    // matches any (mode, prefix, process) — the property PrefixLookupContext
-    // relies on to make probe order unobservable.
+    // their process scopes overlap. Chords compare with per-family overlap
+    // semantics, so "prefixes" covers every pair a single physical press
+    // could match both of. That guarantees at most one hotkey matches any
+    // (mode, prefix, process) — the property PrefixLookupContext relies on
+    // to make probe order unobservable.
     //
     // A bare hotkey is wildcard-scoped, so scopes always overlap for it and
     // today's duplicate detection is unchanged.

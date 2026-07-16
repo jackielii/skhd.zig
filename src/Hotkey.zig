@@ -22,9 +22,10 @@ allocator: std.mem.Allocator,
 /// The chords that must be pressed in order to fire this hotkey.
 /// Owned. Invariant: len >= 1. chords[0] is the trigger.
 chords: []const KeyPress,
-/// `->`: run the action but still deliver the keypress. A property of
-/// the binding, not of any one chord — Task 2 makes `flags` per-chord,
-/// and passthrough must not live inside chord 0's modifier set.
+/// `->`: run the action but still deliver the keypress. A property of the
+/// binding, not of any one chord: each chord carries its own modifiers, so
+/// storing passthrough in a chord's modifier set would leave it undefined
+/// for every chord but the first. Applies to the final chord only.
 passthrough: bool = false,
 wildcard_command: ?ProcessCommand = null,
 // Use ArrayHashMap for process name -> command mapping
@@ -91,17 +92,76 @@ pub fn eql(a: *Hotkey, b: *Hotkey) bool {
     return true;
 }
 
-/// True when either chord could match the same physical key press.
+/// True when some one physical key press could match both chords.
+///
+/// This resolves per modifier family, not whole-set: the direction the
+/// overlap needs can differ between families. `cmd + lshift - x` and
+/// `lcmd + shift - x` overlap on a physical lcmd+lshift+x press, yet
+/// neither whole-set `hotkeyFlagsMatch` direction holds — cmd needs
+/// x-as-config, shift needs y-as-config.
 fn chordsOverlap(x: KeyPress, y: KeyPress) bool {
-    return x.key == y.key and
-        (hotkeyFlagsMatch(x.flags, y.flags) or hotkeyFlagsMatch(y.flags, x.flags));
+    if (x.key != y.key) return false;
+    return familyOverlap(x.flags, y.flags, .alt) and
+        familyOverlap(x.flags, y.flags, .cmd) and
+        familyOverlap(x.flags, y.flags, .control) and
+        familyOverlap(x.flags, y.flags, .shift) and
+        x.flags.@"fn" == y.flags.@"fn" and
+        x.flags.nx == y.flags.nx;
+}
+
+/// Could one physical press satisfy this modifier family's requirement in
+/// both configs? Derived from the per-family semantics `hotkeyFlagsMatch`
+/// encodes, as the intersection of the keyboard states each config accepts:
+///
+///   - general bit set  -> accepts any event with general, left, or right
+///                         (side bits in the config are ignored)
+///   - general clear    -> accepts exactly the event whose left/right bits
+///                         equal the config's, with general clear
+///
+/// So, writing ANY for a general config, L/R/LR for the side-bit configs
+/// and NONE for an absent family:
+///
+///   ANY  vs ANY   -> true   (an event with the general bit matches both)
+///   ANY  vs L/R/LR-> true   (that exact side state satisfies ANY too)
+///   ANY  vs NONE  -> false  (NONE accepts only "family absent"; ANY needs it)
+///   L    vs L     -> true   (same single accepted state)
+///   L    vs R     -> false  (disjoint single states)
+///   L    vs LR    -> false  (LR needs rcmd too; L needs it clear)
+///   L/R/LR vs NONE-> false  (NONE needs the family absent)
+///   NONE vs NONE  -> true   (both accept "family absent")
+fn familyOverlap(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd, control, shift }) bool {
+    const general_field, const left_field, const right_field = switch (mod) {
+        .alt => .{ "alt", "lalt", "ralt" },
+        .cmd => .{ "cmd", "lcmd", "rcmd" },
+        .control => .{ "control", "lcontrol", "rcontrol" },
+        .shift => .{ "shift", "lshift", "rshift" },
+    };
+
+    const a_general = @field(a, general_field);
+    const b_general = @field(b, general_field);
+    const a_left = @field(a, left_field);
+    const a_right = @field(a, right_field);
+    const b_left = @field(b, left_field);
+    const b_right = @field(b, right_field);
+
+    if (a_general and b_general) return true;
+    // One side is general: it accepts any event carrying this family, so the
+    // other's accepted state qualifies iff it names a side at all.
+    if (a_general) return b_left or b_right;
+    if (b_general) return a_left or a_right;
+    // Neither is general: each accepts exactly one keyboard state.
+    return a_left == b_left and a_right == b_right;
 }
 
 /// True when one hotkey's chord list is a prefix of the other's (equal
-/// length counts). Combined with processScopesOverlap this is the whole
-/// conflict rule: it guarantees at most one hotkey matches any
-/// (mode, prefix, process), which is what makes probe order in
-/// PrefixLookupContext unobservable.
+/// length counts), comparing chords with overlap semantics — chords that
+/// some one physical press could match both of.
+///
+/// Combined with processScopesOverlap this is the whole conflict rule, and
+/// because chordsOverlap resolves per modifier family it is exact: any two
+/// configs a single press could both match are rejected. That is what makes
+/// "at most one hotkey matches any (mode, prefix, process)" true, and hence
+/// probe order in PrefixLookupContext unobservable.
 pub fn onePrefixesOther(a: *const Hotkey, b: *const Hotkey) bool {
     const n = @min(a.chords.len, b.chords.len);
     for (a.chords[0..n], b.chords[0..n]) |x, y| {
@@ -822,6 +882,56 @@ test "onePrefixesOther detects prefix relationships with overlap semantics" {
     try testing.expect(!onePrefixesOther(single, other));
     // Overlap, not equality: a physical lcmd-q press matches both.
     try testing.expect(onePrefixesOther(single, specific));
+}
+
+test "chord overlap resolves per modifier family, not whole-set" {
+    const alloc = std.testing.allocator;
+    const x_key: u32 = 0x07;
+    const y_key: u32 = 0x10;
+
+    // The direction the overlap needs differs per family: cmd needs
+    // general-vs-specific one way, shift needs it the other way. A whole-set
+    // hotkeyFlagsMatch in either direction misses this, yet one physical
+    // lcmd+lshift+x press matches both configs.
+    var cmd_lshift = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true, .lshift = true }, .key = x_key }});
+    defer cmd_lshift.destroy();
+    var lcmd_shift_seq = try Hotkey.create(alloc, &.{
+        .{ .flags = .{ .lcmd = true, .shift = true }, .key = x_key },
+        .{ .flags = .{ .cmd = true }, .key = y_key },
+    });
+    defer lcmd_shift_seq.destroy();
+
+    try testing.expect(onePrefixesOther(cmd_lshift, lcmd_shift_seq));
+    try testing.expect(onePrefixesOther(lcmd_shift_seq, cmd_lshift));
+}
+
+test "chord overlap does not over-tighten" {
+    const alloc = std.testing.allocator;
+    const x_key: u32 = 0x07;
+
+    var lcmd_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .lcmd = true }, .key = x_key }});
+    defer lcmd_x.destroy();
+    var rcmd_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .rcmd = true }, .key = x_key }});
+    defer rcmd_x.destroy();
+    var cmd_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true }, .key = x_key }});
+    defer cmd_x.destroy();
+    var bare_x = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = x_key }});
+    defer bare_x.destroy();
+    var cmd_shift_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true, .shift = true }, .key = x_key }});
+    defer cmd_shift_x.destroy();
+    var cmd_x_2 = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true }, .key = x_key }});
+    defer cmd_x_2.destroy();
+
+    // No physical press carries lcmd and rcmd-without-lcmd at once.
+    try testing.expect(!onePrefixesOther(lcmd_x, rcmd_x));
+    // A general modifier still requires the family to be present.
+    try testing.expect(!onePrefixesOther(cmd_x, bare_x));
+    // An absent family requires the event to lack it entirely.
+    try testing.expect(!onePrefixesOther(cmd_x, cmd_shift_x));
+
+    // Genuine overlaps stay overlaps.
+    try testing.expect(onePrefixesOther(cmd_x, lcmd_x));
+    try testing.expect(onePrefixesOther(cmd_x, cmd_x_2));
 }
 
 test "prefix lookup resolves complete vs pending and skips inapplicable scopes" {

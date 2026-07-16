@@ -170,14 +170,33 @@ The identity gate is not a second rule — it is the data structure asserting it
 
 The gate must sit **before** the scope check or it never runs, and it is reachable precisely because `eql` implies `onePrefixesOther` (equal flags satisfy `hotkeyFlagsMatch` in both directions).
 
-Two error names survive for message quality. Chords compare with **overlap** semantics — either could match the same physical press — which is the old `triggersOverlap` generalized over a list:
+Two error names survive for message quality. Chords compare with **overlap** semantics — some one physical press could match both — resolved **per modifier family**:
 
 ```zig
 fn chordsOverlap(x: KeyPress, y: KeyPress) bool {
-    return x.key == y.key and
-        (hotkeyFlagsMatch(x.flags, y.flags) or hotkeyFlagsMatch(y.flags, x.flags));
+    if (x.key != y.key) return false;
+    return familyOverlap(x.flags, y.flags, .alt) and
+        familyOverlap(x.flags, y.flags, .cmd) and
+        familyOverlap(x.flags, y.flags, .control) and
+        familyOverlap(x.flags, y.flags, .shift) and
+        x.flags.@"fn" == y.flags.@"fn" and
+        x.flags.nx == y.flags.nx;
 }
 ```
+
+Per-family is load-bearing, and it is where the old `triggersOverlap` was wrong. `triggersOverlap` asked `hotkeyFlagsMatch(x, y) or hotkeyFlagsMatch(y, x)` — whole-set, one direction at a time. But which config is the "general" one can differ **per family**, and then neither whole-set direction holds:
+
+```skhd
+# Both accepted by the old whole-set predicate; one physical
+# lcmd+lshift+x press matches both. cmd needs x-as-config,
+# shift needs y-as-config, so no single direction sees it.
+cmd + lshift - x : echo A
+lcmd + shift - x, cmd - y : echo B
+```
+
+`familyOverlap` instead intersects the keyboard states each config accepts for that family, reading the semantics straight off `hotkeyFlagsMatch`: a config's general bit (`cmd`) accepts an event carrying general, left, or right; a specific bit (`lcmd`) accepts exactly that side; an absent family requires the event to lack it entirely. So a general config overlaps any config that names the family at all, two specific configs overlap iff their side bits are equal, and an absent family overlaps only another absent family.
+
+The accepted consequence: configs mixing general and specific modifiers across families in two overlapping rules now error where they previously parsed. They were already nondeterministic — probe order decided which one fired — so this converts a silent coin flip into a config error.
 
 This rule exists to guarantee a property the runtime depends on:
 

@@ -120,7 +120,7 @@ binding:
 
 ```skhd
 cmd - k, cmd - c -> : echo "chord 1 is consumed; chord 2 fires and passes through"
-cmd - k, cmd - c ~   # chord 1 is consumed; chord 2 is unbound and passes through
+cmd - k, cmd - u ~   # chord 1 is consumed; chord 2 is unbound and passes through
 ```
 
 A single-chord hotkey is its own final chord, so this changes nothing for

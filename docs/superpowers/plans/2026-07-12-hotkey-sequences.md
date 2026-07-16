@@ -316,17 +316,82 @@ Run `zig build test` repeatedly and fix what it reports. The mechanical transfor
 
 Specific non-obvious sites:
 
-- `src/Parser.zig:259` constructs the hotkey *before* chords are parsed, which the new `create` signature forbids. Task 4 restructures `parse_hotkey` properly. For now, construct with a placeholder and overwrite after parsing:
+- `src/Parser.zig:258-296` — `parse_hotkey` constructs the hotkey *before* chords are parsed, which the new `create` signature forbids. Restructure the prologue now: collect modes into a local list, parse all chords, then construct. This is independent of the `Sequence` deletion — the `if (chords.items.len > 1) { … Sequence.create … }` block sits *later* in the function and keeps working off `chords.items` and the constructed `hotkey`, as does `hotkey_owned`. Task 4 deletes that block; this task only moves construction after parsing.
+
+  Change `parse_mode` to collect into a list rather than write to a hotkey that does not exist yet:
   ```zig
-      var hotkey = try Hotkey.create(self.allocator, &.{.{ .flags = .{}, .key = 0 }});
+  fn parse_mode(self: *Parser, mappings: *Mappings, modes: *std.ArrayListUnmanaged(*Mode)) !void {
   ```
-  and where lines 290-292 assigned `hotkey.flags`/`hotkey.key`, replace with:
+  Inside, replace the `hotkey.add_mode(mode) catch |err| { … }` block with:
   ```zig
-      // TEMPORARY: Task 4 restructures parse_hotkey to build chords first.
-      self.allocator.free(hotkey.chords);
-      hotkey.chords = try self.allocator.dupe(Hotkey.KeyPress, chords.items);
+      for (modes.items) |existing| {
+          if (existing == mode) {
+              const msg = try std.fmt.allocPrint(self.allocator, "Mode '{s}' listed twice", .{name});
+              defer self.allocator.free(msg);
+              self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+              return error.ParseErrorOccurred;
+          }
+      }
+      try modes.append(self.allocator, mode);
   ```
-  Note this must move *below* the comma loop that fills `chords`. Leave the comment — it is not the intended design.
+  and update the recursive call to pass `modes`.
+
+  Then replace `parse_hotkey`'s prologue (lines 258-296) with:
+  ```zig
+  fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
+      var modes: std.ArrayListUnmanaged(*Mode) = .empty;
+      defer modes.deinit(self.allocator);
+
+      if (self.match(.Token_Identifier)) {
+          try self.parse_mode(mappings, &modes);
+      }
+
+      if (modes.items.len > 0) {
+          if (!self.match(.Token_Insert)) {
+              const token = self.peek() orelse self.previous();
+              self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '<' after mode identifier", self.current_file_path);
+              return error.ParseErrorOccurred;
+          }
+      } else {
+          const default_mode = mappings.get_mode_or_create_default("default") catch |err| {
+              const msg = try std.fmt.allocPrint(self.allocator, "Failed to get or create default mode: {s}", .{@errorName(err)});
+              defer self.allocator.free(msg);
+              const token = self.peek() orelse self.previous();
+              self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+              return error.ParseErrorOccurred;
+          } orelse unreachable;
+          try modes.append(self.allocator, default_mode);
+      }
+
+      // Chords are parsed before the hotkey exists: Hotkey.create enforces
+      // len >= 1 structurally, so it cannot be constructed empty.
+      var chords: std.ArrayListUnmanaged(Hotkey.KeyPress) = .empty;
+      defer chords.deinit(self.allocator);
+      try chords.append(self.allocator, try self.parse_keypress());
+      while (self.match(.Token_Comma)) {
+          const comma = self.previous();
+          const chord = self.parse_keypress() catch |err| {
+              self.clearError();
+              self.error_info = try ParseError.fromToken(self.allocator, comma, "Expected complete hotkey chord after ','", self.current_file_path);
+              return err;
+          };
+          try chords.append(self.allocator, chord);
+      }
+
+      var hotkey = try Hotkey.create(self.allocator, chords.items);
+      var hotkey_owned = true;
+      errdefer if (hotkey_owned) hotkey.destroy();
+      for (modes.items) |mode| {
+          hotkey.add_mode(mode) catch |err| {
+              const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ mode.name, @errorName(err) });
+              defer self.allocator.free(msg);
+              const token = self.peek() orelse self.previous();
+              self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+              return error.ParseErrorOccurred;
+          };
+      }
+  ```
+  Everything below this point in `parse_hotkey` — the arrow/action parsing, the `Sequence.create` block, `mappings.add_hotkey` — is unchanged in this task.
 - `src/Parser.zig:364` — `formatKeyPressBuffer(&buf, hotkey.flags, hotkey.key)` → `formatKeyPressBuffer(&buf, hotkey.chords[0].flags, hotkey.chords[0].key)`.
 - `src/synthesize.zig:48,51,54,57,59` — all become `hotkey.chords[0].…`.
 - `src/benchmark.zig:146` — `HotkeyOriginal.create(allocator)` → `HotkeyOriginal.create(allocator, &.{.{ .flags = .{}, .key = 0x35 }})`.
@@ -793,84 +858,16 @@ test "every action form works on a sequence" {
 Run: `zig build test`
 Expected: FAIL — `mappings.max_chords` does not exist, and `mode.hotkey_map.count()` is 0 for sequences (they still go to `mode.sequences`).
 
-- [ ] **Step 3: Restructure parse_hotkey**
+- [ ] **Step 3: Drop the Sequence branch from parse_hotkey**
 
-Change `parse_mode` to collect into a list rather than write to a hotkey that does not exist yet:
-```zig
-fn parse_mode(self: *Parser, mappings: *Mappings, modes: *std.ArrayListUnmanaged(*Mode)) !void {
-```
-Inside, replace the `hotkey.add_mode(mode) catch |err| { … }` block with:
-```zig
-    for (modes.items) |existing| {
-        if (existing == mode) {
-            const msg = try std.fmt.allocPrint(self.allocator, "Mode '{s}' listed twice", .{name});
-            defer self.allocator.free(msg);
-            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
-            return error.ParseErrorOccurred;
-        }
-    }
-    try modes.append(self.allocator, mode);
-```
-and update the recursive call to pass `modes`.
+Task 2 already restructured the prologue (modes into a local list, chords parsed before `Hotkey.create`). This step only removes the `Sequence` detour.
 
-Replace `parse_hotkey`'s prologue (lines 258-296, through the comma loop) with:
-```zig
-fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
-    var modes: std.ArrayListUnmanaged(*Mode) = .empty;
-    defer modes.deinit(self.allocator);
+Delete from `src/Parser.zig`:
+- the whole `if (chords.items.len > 1) { … Sequence.create … mappings.add_sequence(sequence) … return; }` block,
+- the `hotkey_owned` flag, replacing `errdefer if (hotkey_owned) hotkey.destroy();` with plain `errdefer hotkey.destroy();`,
+- `const Sequence = @import("Sequence.zig");`.
 
-    if (self.match(.Token_Identifier)) {
-        try self.parse_mode(mappings, &modes);
-    }
-
-    if (modes.items.len > 0) {
-        if (!self.match(.Token_Insert)) {
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '<' after mode identifier", self.current_file_path);
-            return error.ParseErrorOccurred;
-        }
-    } else {
-        const default_mode = mappings.get_mode_or_create_default("default") catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "Failed to get or create default mode: {s}", .{@errorName(err)});
-            defer self.allocator.free(msg);
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
-            return error.ParseErrorOccurred;
-        } orelse unreachable;
-        try modes.append(self.allocator, default_mode);
-    }
-
-    // Chords are parsed before the hotkey exists: Hotkey.create enforces
-    // len >= 1 structurally, so it cannot be constructed empty.
-    var chords: std.ArrayListUnmanaged(Hotkey.KeyPress) = .empty;
-    defer chords.deinit(self.allocator);
-    try chords.append(self.allocator, try self.parse_keypress());
-    while (self.match(.Token_Comma)) {
-        const comma = self.previous();
-        const chord = self.parse_keypress() catch |err| {
-            self.clearError();
-            self.error_info = try ParseError.fromToken(self.allocator, comma, "Expected complete hotkey chord after ','", self.current_file_path);
-            return err;
-        };
-        try chords.append(self.allocator, chord);
-    }
-
-    var hotkey = try Hotkey.create(self.allocator, chords.items);
-    errdefer hotkey.destroy();
-    for (modes.items) |mode| {
-        hotkey.add_mode(mode) catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ mode.name, @errorName(err) });
-            defer self.allocator.free(msg);
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
-            return error.ParseErrorOccurred;
-        };
-    }
-```
-
-Then delete: the `hotkey_owned` flag and its conditional `errdefer`, the Task 2 temporary `hotkey.chords` reassignment, the whole `if (chords.items.len > 1) { … Sequence.create … mappings.add_sequence … return; }` block, and `const Sequence = @import("Sequence.zig");`.
-
-The function now ends with the single existing `mappings.add_hotkey(hotkey) catch |err| { … }`. It already has an `AmbiguousSequencePrefix` arm from the branch — keep it.
+`parse_hotkey` now ends with the single existing `mappings.add_hotkey(hotkey) catch |err| { … }`, which already has an `AmbiguousSequencePrefix` arm from the branch — keep it. Sequences and one-chord hotkeys travel the same path from here.
 
 - [ ] **Step 4: Apply the uniqueness rule in Mode**
 
@@ -1087,32 +1084,43 @@ Two behaviors the spec calls out that currently hold only by accident of stateme
 
 - [ ] **Step 1: Write the failing tests**
 
-`src/skhd.zig` already has parser-backed runtime tests — see `"processHotkey respects passthrough in capture mode"` (`:1750`) for the established setup pattern. Factor that setup into a `testSkhd(alloc, config) !Skhd` helper and reuse it. Add:
+`src/skhd.zig` already has parser-backed runtime tests. **Reuse the existing `createTestSkhdFromConfig(alloc, io, config)` helper** — do not write a new one. Follow the setup in `"processHotkey respects passthrough in capture mode"` (`:1750`) exactly: build `std.Io.Threaded` for `io`, and use a mock event pointer, since `processHotkey` never dereferences it on these paths:
+
+```zig
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+```
+
+The `"self-generated events"` test is the exception — it needs a **real** CGEvent, because it asserts on `kCGEventSourceUserData`, which a fake pointer cannot carry.
+
+Add:
 
 ```zig
 test "sequence completes on a forward of its own trigger" {
     const alloc = std.testing.allocator;
-    var skhd = try testSkhd(alloc,
+    var skhd = try createTestSkhdFromConfig(alloc, io, 
         \\cmd - q, cmd - q [ "Protected App" | cmd - q ]
     );
     defer skhd.deinit();
 
     const cmd_q = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
 
-    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, null, "Protected App"));
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
     try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
 
     // Second press completes and forwards. forwardKey no-ops under test.
-    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, null, "Protected App"));
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
     try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
 
     // Elsewhere the sequence does not apply, so cmd-q passes through to macOS.
-    try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_q, null, "Firefox"));
+    try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_q, mock_event, "Firefox"));
 }
 
 test "passthrough applies to the final chord only" {
     const alloc = std.testing.allocator;
-    var skhd = try testSkhd(alloc, "cmd - k, cmd - c -> : echo hi");
+    var skhd = try createTestSkhdFromConfig(alloc, io, "cmd - k, cmd - c -> : echo hi");
     defer skhd.deinit();
 
     const cmd_k = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x28 };
@@ -1120,14 +1128,14 @@ test "passthrough applies to the final chord only" {
 
     // Chord 1 is consumed — completion isn't known yet, so delivering it
     // would send a cmd-k the user never meant to send.
-    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, null, "Any"));
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Any"));
     // Chord 2 completes: action fires and the key still goes through.
-    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&cmd_c, null, "Any"));
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&cmd_c, mock_event, "Any"));
 }
 
 test "mismatch mid-sequence reprocesses the chord from the root" {
     const alloc = std.testing.allocator;
-    var skhd = try testSkhd(alloc,
+    var skhd = try createTestSkhdFromConfig(alloc, io, 
         \\cmd - k, cmd - c : echo seq
         \\cmd - x : echo unrelated
     );
@@ -1136,16 +1144,16 @@ test "mismatch mid-sequence reprocesses the chord from the root" {
     const cmd_k = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x28 };
     const cmd_x = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x07 };
 
-    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, null, "Any"));
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Any"));
     // cmd-x doesn't continue the sequence, but must still fire its own rule
     // rather than being swallowed.
-    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_x, null, "Any"));
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_x, mock_event, "Any"));
     try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
 }
 
 test "process change cancels a pending sequence" {
     const alloc = std.testing.allocator;
-    var skhd = try testSkhd(alloc,
+    var skhd = try createTestSkhdFromConfig(alloc, io, 
         \\cmd - k, cmd - c [ "App A" : echo a ]
     );
     defer skhd.deinit();
@@ -1153,21 +1161,21 @@ test "process change cancels a pending sequence" {
     const cmd_k = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x28 };
     const cmd_c = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x08 };
 
-    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, null, "App A"));
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "App A"));
     // A sequence must not begin in one app and execute against another.
-    try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_c, null, "App B"));
+    try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_c, mock_event, "App B"));
     try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
 }
 
 test "self-generated events never touch pending sequence state" {
     const alloc = std.testing.allocator;
-    var skhd = try testSkhd(alloc,
+    var skhd = try createTestSkhdFromConfig(alloc, io, 
         \\cmd - q, cmd - q : echo quit
     );
     defer skhd.deinit();
 
     const cmd_q = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
-    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, null, "Any"));
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Any"));
     try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
 
     // A marked event must return before any sequence handling. If the
@@ -1191,7 +1199,7 @@ Note `handleKeyDown` reads the frontmost app via `self.carbon_event.getProcessNa
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `zig build test`
-Expected: FAIL — `testSkhd` does not exist yet. After adding it, `"passthrough applies to the final chord only"` should be the one that exercises real logic; if it fails, `processMatchedHotkey` is being reached on a pending chord.
+Expected: FAIL. `"passthrough applies to the final chord only"` is the one exercising real logic — if it fails, `processMatchedHotkey` is being reached on a pending chord rather than only on the completing one.
 
 - [ ] **Step 3: Make the invariants explicit in the code**
 

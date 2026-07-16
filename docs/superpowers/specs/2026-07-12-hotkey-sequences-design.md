@@ -152,20 +152,25 @@ The full existing grammar works on every chord and with every action form. Chord
 
 ### The uniqueness rule
 
-Within a mode, two hotkeys conflict **iff** one's chord list is a prefix of the other's **and** their process scopes overlap.
+Within a mode, two hotkeys conflict when one's chord list is a prefix of the other's **and** their process scopes overlap — plus one case the scope gate cannot cover:
 
 ```zig
-if (Hotkey.onePrefixesOther(existing, hotkey) and
-    Hotkey.processScopesOverlap(existing, hotkey))
-{
-    return if (existing.chords.len == hotkey.chords.len)
-        error.DuplicateHotkeyInMode
-    else
-        error.AmbiguousSequencePrefix;
-}
+if (!Hotkey.onePrefixesOther(existing, hotkey)) continue;
+// HotkeyMap keys on chords alone, so eql-equal hotkeys cannot coexist
+// regardless of process scope — put() would silently drop one.
+if (Hotkey.eql(existing, hotkey)) return error.DuplicateHotkeyInMode;
+if (!Hotkey.processScopesOverlap(existing, hotkey)) continue;
+return if (existing.chords.len == hotkey.chords.len)
+    error.DuplicateHotkeyInMode
+else
+    error.AmbiguousSequencePrefix;
 ```
 
-Two error names survive for message quality; there is one rule behind them. Chords compare with **overlap** semantics — either could match the same physical press — which is the old `triggersOverlap` generalized over a list:
+The identity gate is not a second rule — it is the data structure asserting itself. `HotkeyMap`'s context keys on `Hotkey.eql`, which compares chord lists and ignores process scope. Two hotkeys with *identical* chords are therefore the same key: `put` keeps the first and silently discards the second, whatever their process lists say. Rejecting that config is strictly better than accepting it and dropping a binding the user wrote. So identical chords conflict unconditionally, exactly as they do today.
+
+The gate must sit **before** the scope check or it never runs, and it is reachable precisely because `eql` implies `onePrefixesOther` (equal flags satisfy `hotkeyFlagsMatch` in both directions).
+
+Two error names survive for message quality. Chords compare with **overlap** semantics — either could match the same physical press — which is the old `triggersOverlap` generalized over a list:
 
 ```zig
 fn chordsOverlap(x: KeyPress, y: KeyPress) bool {
@@ -182,18 +187,45 @@ Probe order in an `ArrayHashMap` is Robin Hood order, not config order. Without 
 
 Consequences, in each direction:
 
+Note the process-list examples below use the multi-line form. A `:` command lexes to end-of-line, so `[ "Terminal" : echo t ]` on one line swallows the closing `]`. A `|` forward has no such problem — `[ "Terminal" | cmd - q ]` is fine inline.
+
 ```skhd
-# ERROR — identical chords, both wildcard-scoped, scopes overlap
+# ERROR — identical chords, both wildcard-scoped
 cmd - a : echo first
 cmd - a : echo second
 
-# ERROR — cmd-q in Terminal would match both
-cmd - q          [ "Terminal" : echo now ]
-cmd - q, cmd - q [ "Terminal" : echo later ]
+# ERROR — identical chords. Disjoint apps do NOT help: HotkeyMap keys on
+# chords alone, so the second could only be dropped, never bound.
+# Write this as ONE hotkey with a two-entry process list instead.
+cmd - a [
+    "Terminal" : echo terminal
+]
+cmd - a [
+    "Firefox" : echo firefox
+]
 
-# OK — disjoint apps; each press has exactly one answer
-cmd - q          [ "Terminal" : echo t ]
-cmd - q, cmd - q [ "XYZ"      : quit-command ]
+# OK — chords overlap but are not identical (alt vs lalt), scopes disjoint.
+# Both are stored as distinct keys; the lookup picks by frontmost app.
+alt - a [
+    "Terminal" : echo terminal
+]
+lalt - a [
+    "Firefox" : echo firefox
+]
+
+# ERROR — cmd-q in Terminal would match both
+cmd - q [
+    "Terminal" : echo now
+]
+cmd - q, cmd - q [
+    "Terminal" : echo later
+]
+
+# OK — different chord lengths, disjoint apps; each press has one answer
+cmd - q [
+    "Terminal" : echo t
+]
+cmd - q, cmd - q [ "XYZ" | cmd - q ]
 
 # OK — shared incomplete prefix, disambiguated by the second chord
 cmd - k, cmd - c : comment-command
@@ -202,7 +234,7 @@ cmd - k, cmd - u : uncomment-command
 
 A bare hotkey (no process list) is stored with a wildcard process scope, and `processScopesOverlap` returns true whenever either side is wildcard. Every existing duplicate-detection case is therefore still an error, and no configuration that parses today changes meaning.
 
-The rule is strictly more permissive in exactly one situation: two separately-declared hotkeys with identical chords and disjoint *explicit* process lists, which errors today and would now parse. This is not a practical concern — that intent is written as one hotkey with one process list, which marshals into a single `Hotkey` with two entries in `mappings` and never reaches the conflict check. Uniqueness still holds if someone writes the split form anyway, since the two can never both apply.
+The rule is more permissive than today's in exactly one shape: chords that **overlap without being identical** (`alt - a` vs `lalt - a`) with disjoint explicit process lists. Those are distinct `HotkeyMap` keys, so both are genuinely stored, and `PrefixLookupContext` selects one per frontmost app. Identical chords stay an error however their scopes are written, because the map cannot represent both.
 
 ## Runtime Semantics
 

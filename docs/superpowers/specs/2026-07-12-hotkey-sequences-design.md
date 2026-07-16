@@ -10,8 +10,10 @@ Add application-aware, comma-separated hotkey sequences without moving ordinary 
 The motivating request (issue: "cmd - q closes any other app but cmd - qq is required to close app XYZ") is a safety binding that requires two `cmd-q` chords within a short interval before quitting a chosen application, while every other application keeps the ordinary macOS Quit:
 
 ```skhd
-cmd - q, cmd - q [ "XYZ" : quit-command ]
+cmd - q, cmd - q [ "XYZ" | cmd - q ]
 ```
+
+The action is a **forward of the original chord**, so the second press hands a real `cmd-q` to the application and it quits natively — no shell command required. A single press is consumed and dropped 300ms later, which is the safety behavior being asked for. `[ "XYZ" : quit-command ]` works equally well if a command is wanted instead.
 
 In applications with no declared binding, skhd does not match `cmd-q` at all, so it passes through and macOS quits normally. No extra rule is needed to get that.
 
@@ -60,6 +62,9 @@ allocator: std.mem.Allocator,
 /// The chords that must be pressed in order to fire this hotkey.
 /// Owned. Invariant: len >= 1. chords[0] is the trigger.
 chords: []const KeyPress,
+/// `->`: run the action but still deliver the keypress. A property of
+/// the binding, not of any one chord. Applies to the final chord only.
+passthrough: bool = false,
 wildcard_command: ?ProcessCommand = null,
 mappings: std.StringArrayHashMapUnmanaged(ProcessCommand) = .empty,
 mode_list: std.AutoArrayHashMapUnmanaged(*Mode, void) = .empty,
@@ -70,6 +75,18 @@ pub fn isSequence(self: *const Hotkey) bool {
 ```
 
 `flags` and `key` are removed; every reader uses `chords[0].flags` / `chords[0].key`. `Hotkey.create` takes the chords and dupes them, making `len >= 1` structural rather than a convention. `destroy` frees them.
+
+### Hoisting `passthrough` out of `ModifierFlag`
+
+`passthrough` is currently a bit inside `ModifierFlag` (`Keycodes.zig:38`), set by merging it into `hotkey.flags` (`Parser.zig:308`) and read as `hotkey.flags.passthrough` (`skhd.zig:1431`). It is not a modifier — it is a routing marker, and `ModifierFlag.isEmpty` already has to zero it out to avoid it gating wildcard matching (`Keycodes.zig:68-73`).
+
+This design forces the issue: once `flags` means `chords[0].flags`, a whole-binding property would be stored inside the first chord's modifier set, and `chords[1].flags.passthrough` would be undefined nonsense. So it moves to a `Hotkey` field and leaves `ModifierFlag` a pure modifier set:
+
+- `ModifierFlag.passthrough` is removed; `isEmpty` loses its special case and becomes a plain zero test.
+- `Parser` sets `hotkey.passthrough = true` on `->`.
+- `skhd.zig` reads `hotkey.passthrough`.
+
+This is a contained cleanup directly forced by the work, not unrelated refactoring.
 
 ### Ownership
 
@@ -111,6 +128,27 @@ alt - x, ctrl + shift - y | cmd - z
 Every step uses the existing modifier and keysym grammar. A missing chord after a comma is a parse error with the comma's source location.
 
 `parse_hotkey` collects modes into a local list and parses all chords **before** constructing the hotkey, then adds the modes and parses the action. This is required by the `len >= 1` invariant — the hotkey cannot exist before its chords are known — and it removes the conditional `errdefer`.
+
+### Grammar coverage
+
+The full existing grammar works on every chord and with every action form. Chords are parsed by `parse_keypress`, which already handles alias-modifiers, alias-keys, `modifier - key`, named keys, hex keycodes, and literals; calling it per chord is what makes each chord carry the complete grammar.
+
+| Form | Example | Notes |
+| --- | --- | --- |
+| Command | `cmd - k, cmd - c : echo hi` | |
+| Forward | `cmd - q, cmd - q \| cmd - q` | See "Forwarding a chord the sequence starts with". |
+| Unbound | `cmd - k, cmd - c ~` | Final chord passes through. |
+| Mode activation | `cmd - k, cmd - m ; winmode : cmd` | Activation cancels pending state; the prefix is already clear. |
+| Passthrough | `cmd - k, cmd - c -> : echo hi` | Final chord only — see below. |
+| Process list | `cmd - k, cmd - c [ "Code" : cmd ]` | |
+| Process group | `cmd - k, cmd - c [ @native_apps \| end ]` | |
+| Command reference | `cmd - k, cmd - c : @name("arg")` | Resolved at parse time; orthogonal. |
+| Multi-mode | `winmode, fn_layer < cmd - k, cmd - c : cmd` | No comma ambiguity — see below. |
+| Hex / literal / alias chords | `cmd - 0x1B, alt - return` | Per-chord via `parse_keypress`. |
+
+**No comma ambiguity with multi-mode.** `parse_hotkey` enters mode parsing only when the declaration starts with a `Token_Identifier`, and mode parsing consumes its comma-separated list and requires `<`. Chord parsing begins after that. Key tokens (`a`, `1`) lex as `Token_Key`, not `Token_Identifier` (`Tokenizer.zig:361`), so a sequence can never be mistaken for a mode list.
+
+**Passthrough applies to the final chord.** Earlier chords are always consumed: when chord 1 of `cmd - k, cmd - c -> : echo hi` arrives, it is not yet known whether the sequence will complete, so it cannot be delivered. Passing it through and *also* firing on completion would deliver a `cmd-k` the user never meant to send. So `->` (and `~`) affect only the chord that completes the binding. This matters solely for sequences; a one-chord hotkey is its own final chord and behaves exactly as today.
 
 ### The uniqueness rule
 
@@ -214,6 +252,21 @@ In Firefox, `cmd+h` does **not** become `cmd - left`. The `cmd - h` rule claimed
 The alternative — falling through to `h | left` — would make the outcome of `cmd+h` depend on the process scoping of a *different* rule, which is not something a reader of the config could predict. Explicitness beats the extra convenience. This preserves today's behavior exactly; it is not a new rule, just one that now needs stating because the applicable-hotkey query no longer enforces it as a side effect.
 
 The precedence this establishes — an explicit rule beats a transparent one — is the same principle a future modifier-transparency feature needs. See "Interaction With Modifier Transparency".
+
+### Forwarding a chord the sequence starts with
+
+```skhd
+cmd - q, cmd - q [ "Terminal" | cmd - q ]
+```
+
+The event tap is head-inserted at `kCGSessionEventTap` (`EventTap.zig:27`) and `forwardKey` posts to the same tap (`skhd.zig:1152`), so a forwarded event re-enters our own handler. The forward is tagged with `SKHD_EVENT_MARKER` (`skhd.zig:1148`) and `handleKeyDown` returns early on it (`skhd.zig:874-879`).
+
+Two ordering rules make this binding work, and both must be stated rather than left to luck:
+
+1. **The marker check runs before any sequence handling.** Otherwise the forwarded `cmd-q` would re-enter, match its own sequence's first chord, go pending, and be swallowed — the application would never receive the quit, and the binding would silently do nothing.
+2. **A self-generated event neither advances nor cancels a pending prefix.** It returns before touching the state. Our own synthesis is not user input and must not participate in matching.
+
+Both hold in the current code by accident of statement order. They become invariants here, with tests.
 
 ### Lookup flow
 
@@ -337,7 +390,7 @@ Parser and mapping tests cover:
 
 - two- and three-chord parsing,
 - complete modifiers on every chord,
-- all existing action forms,
+- every action form in the grammar-coverage table, including multi-mode declarations with sequence chords and per-chord hex/literal/alias forms,
 - process-specific sequence actions,
 - malformed commas and missing chords,
 - the uniqueness rule in each direction: identical chords with overlapping scopes, prefix conflicts with overlapping scopes, valid prefix reuse across disjoint explicit scopes, wildcard scopes conflicting with explicit scopes,
@@ -354,6 +407,14 @@ Lookup tests cover, without a timer:
 - mismatch reprocessing from the root,
 - auto-repeat suppression,
 - and process and mode changes.
+
+Re-entrancy tests pin the forward-your-own-trigger binding:
+
+- `cmd - q, cmd - q [ "Terminal" | cmd - q ]` delivers exactly one `cmd-q` to the application on the second press, and the forwarded event does not restart the sequence,
+- a self-generated event arriving while a prefix is pending leaves the prefix untouched — neither advanced nor cancelled,
+- and a single press followed by the timeout delivers nothing.
+
+Passthrough tests cover `->` on a sequence firing the action while delivering only the final chord, and the existing one-chord passthrough tests must pass unchanged after the flag moves off `ModifierFlag`.
 
 Capture-mode fallback tests pin the claim gate, which is the part most at risk of silent regression:
 

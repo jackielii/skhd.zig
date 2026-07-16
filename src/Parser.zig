@@ -1206,6 +1206,15 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected shell path after 'shell'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
+    } else if (std.mem.eql(u8, option, "sequence_timeout")) {
+        const number_token = self.peek() orelse self.previous();
+        const ms = try self.parse_duration_ms();
+        if (ms == 0) {
+            self.error_info = try ParseError.fromToken(self.allocator, number_token, "sequence timeout must be greater than zero (0 would expire every sequence instantly)", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        // Last wins, like `.shell`.
+        mappings.sequence_timeout_ms = ms;
     } else if (std.mem.eql(u8, option, "device")) {
         try self.parse_device_decl(mappings);
     } else if (std.mem.eql(u8, option, "remap")) {
@@ -1620,11 +1629,30 @@ fn parse_duration_ms(self: *Parser) !u32 {
         self.error_info = try ParseError.fromToken(self.allocator, num_token, msg, self.current_file_path);
         return error.ParseErrorOccurred;
     };
-    // Optional `ms` unit suffix. Accepted-and-ignored (timeouts already
-    // in ms). Reserved for future seconds support.
-    if (self.peek_check(.Token_Identifier)) {
-        if (self.peek()) |t| {
-            if (std.mem.eql(u8, t.text, "ms")) _ = self.advance();
+    // Optional unit suffix: `ms` (no-op, timeouts are already ms) or `s`.
+    //
+    // The suffix must sit on the same line as the number. Newlines are not
+    // tokens, and `resolveIdentifierType` lexes ANY single character as a
+    // Token_Key — so a bare `s` starting the next line is otherwise
+    // indistinguishable from a seconds suffix. Without the line check,
+    //
+    //     .sequence_timeout 500
+    //     s : echo hi
+    //
+    // would parse as 500 SECONDS and orphan `: echo hi`.
+    if (self.peek()) |t| {
+        if (t.line == num_token.line) {
+            if (t.type == .Token_Identifier and std.mem.eql(u8, t.text, "ms")) {
+                _ = self.advance();
+            } else if (t.type == .Token_Key and std.mem.eql(u8, t.text, "s")) {
+                _ = self.advance();
+                return std.math.mul(u32, value, 1000) catch {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Duration '{s}s' overflows the millisecond range", .{num_token.text});
+                    defer self.allocator.free(msg);
+                    self.error_info = try ParseError.fromToken(self.allocator, num_token, msg, self.current_file_path);
+                    return error.ParseErrorOccurred;
+                };
+            }
         }
     }
     return value;
@@ -2164,6 +2192,121 @@ test "shell directive" {
 
     // Verify shell was updated
     try std.testing.expectEqualStrings("/bin/zsh", mappings.shell);
+}
+
+test "sequence_timeout directive" {
+    const alloc = std.testing.allocator;
+
+    // Default when the directive is absent.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try parser.parse(&mappings, "cmd - k, cmd - c : echo seq");
+        try std.testing.expectEqual(@as(u32, 300), mappings.sequence_timeout_ms);
+    }
+
+    // Bare number, explicit ms, and seconds all land in milliseconds.
+    const cases = [_]struct { src: []const u8, want: u32 }{
+        .{ .src = ".sequence_timeout 500", .want = 500 },
+        .{ .src = ".sequence_timeout 500ms", .want = 500 },
+        .{ .src = ".sequence_timeout 1s", .want = 1000 },
+    };
+    for (cases) |case| {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try parser.parse(&mappings, case.src);
+        try std.testing.expectEqual(case.want, mappings.sequence_timeout_ms);
+    }
+
+    // Last wins, like .shell.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try parser.parse(&mappings,
+            \\.sequence_timeout 400
+            \\.sequence_timeout 700
+        );
+        try std.testing.expectEqual(@as(u32, 700), mappings.sequence_timeout_ms);
+    }
+}
+
+test "sequence_timeout rejects zero and garbage" {
+    const alloc = std.testing.allocator;
+
+    // 0 would expire the prefix instantly, making every sequence unreachable
+    // while permanently swallowing its first chord.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, ".sequence_timeout 0"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "must be greater than zero"));
+    }
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, ".sequence_timeout"));
+    }
+}
+
+test "tap-hold timeout accepts ms and s suffixes" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+
+    // parse_duration_ms is shared with .sequence_timeout, so seconds support
+    // lands here too — which is what SYNTAX.md's grammar already promised.
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] {
+        \\    tap     : escape
+        \\    hold    : lctrl
+        \\    timeout : 1s
+        \\}
+        \\.remap space [device builtin] {
+        \\    tap     : space
+        \\    hold    : lalt
+        \\    timeout : 250ms
+        \\}
+    );
+    try std.testing.expectEqual(@as(usize, 2), mappings.tapholds.items.len);
+    try std.testing.expectEqual(@as(u32, 1000), mappings.tapholds.items[0].timeout_ms);
+    try std.testing.expectEqual(@as(u32, 250), mappings.tapholds.items[1].timeout_ms);
+}
+
+test "duration suffix must be on the same line as the number" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+
+    // The tokenizer drops newlines and lexes any single character as a
+    // Token_Key, so a bare `s` on the next line is indistinguishable from a
+    // seconds suffix without comparing line numbers. Consuming it here would
+    // silently mean 500 SECONDS and orphan `: echo hi`.
+    try parser.parse(&mappings,
+        \\.sequence_timeout 500
+        \\s : echo hi
+    );
+    try std.testing.expectEqual(@as(u32, 500), mappings.sequence_timeout_ms);
+
+    const mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), mode.hotkey_map.count());
+    var it = mode.hotkey_map.iterator();
+    const hk = it.next().?.key_ptr.*;
+    try std.testing.expectEqual(@as(u32, c.kVK_ANSI_S), hk.chords[0].key);
 }
 
 test "shell directive with spaces" {
@@ -3078,3 +3221,4 @@ test "mouse button - parses as a literal with synthetic keycode" {
     try std.testing.expect(saw_m1);
     try std.testing.expect(saw_m3);
 }
+

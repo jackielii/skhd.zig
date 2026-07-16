@@ -38,8 +38,6 @@ const HotkeyResult = enum {
     not_found, // No matching hotkey
 };
 
-const sequence_interval_ms: u32 = 300;
-
 allocator: std.mem.Allocator,
 io: std.Io,
 mappings: Mappings,
@@ -855,7 +853,7 @@ fn sequenceTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c)
 fn startSequenceTimer(self: *Skhd) void {
     self.cancelSequenceTimer();
     const fire_date = c.CFAbsoluteTimeGetCurrent() +
-        @as(f64, @floatFromInt(sequence_interval_ms)) / 1000.0;
+        @as(f64, @floatFromInt(self.mappings.sequence_timeout_ms)) / 1000.0;
     var context: c.CFRunLoopTimerContext = .{
         .version = 0,
         .info = self,

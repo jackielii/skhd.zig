@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c.zig");
 const Parser = @import("Parser.zig");
 const Mappings = @import("Mappings.zig");
@@ -29,8 +30,26 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, io: std.Io, key_string: []con
     const key_with_command = try std.fmt.allocPrint(allocator, "{s} : __dummy__", .{key_string});
     defer allocator.free(key_with_command);
 
-    // Parse the key specification with dummy command
-    try parser.parse(&mappings, key_with_command);
+    // Parse the key specification with dummy command.
+    //
+    // `-k` takes a keyspec, not text, so prose lands here as a parse failure —
+    // typically deep inside parse_mode, since a leading word lexes as an
+    // identifier and reads as a mode name. Surface the parser's own diagnostic
+    // and return a typed error; a bare `try` would give the caller
+    // error.ParseErrorOccurred and a Zig backtrace instead.
+    parser.parse(&mappings, key_with_command) catch |err| {
+        if (err != error.ParseErrorOccurred) return err;
+        // Diagnostics are the point of this path, but they would pollute test
+        // output — the tests assert on the returned error, not the text.
+        if (!builtin.is_test) {
+            std.debug.print("skhd: '{s}' is not a valid keyspec for -k/--key.\n", .{key_string});
+            if (parser.error_info) |parse_err| {
+                std.debug.print("  {f}\n", .{parse_err});
+            }
+            std.debug.print("  hint: -k expects a key combination (e.g. 'cmd - q'). To type text, use -t/--text.\n", .{});
+        }
+        return error.InvalidKeySpec;
+    };
 
     // Find the first hotkey that was parsed
     var mode_iter = mappings.mode_map.iterator();
@@ -58,10 +77,13 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, io: std.Io, key_string: []con
 
             std.log.scoped(.synthesize).debug("Synthesized key: {any} + {s}", .{ hotkey.chords[0].flags, Keycodes.getKeyString(hotkey.chords[0].key) });
         } else {
-            std.debug.print("Error: Failed to parse key specification: {s}\n", .{key_string});
+            // Parsed, but produced no hotkey — nothing to synthesize.
+            if (!builtin.is_test) std.debug.print("skhd: '{s}' did not resolve to a key for -k/--key.\n", .{key_string});
+            return error.InvalidKeySpec;
         }
     } else {
-        std.debug.print("Error: Failed to parse key specification: {s}\n", .{key_string});
+        std.debug.print("skhd: '{s}' did not resolve to a key for -k/--key.\n", .{key_string});
+        return error.InvalidKeySpec;
     }
 }
 
@@ -137,6 +159,23 @@ fn synthesizeModifiers(flags: ModifierFlag, pressed: bool) void {
     if (flags.@"fn") {
         createAndPostKeyEvent(Modifier_Keycode_Fn, pressed);
     }
+}
+
+test "synthesizeKey reports a bad keyspec instead of leaking a parse error" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // `-k` takes a keyspec, not prose. "hello" lexes as an identifier, so the
+    // parser reads it as a mode name and fails deep inside parse_mode. Callers
+    // must get a typed error they can report, not error.ParseErrorOccurred
+    // plus a Zig backtrace. (`-t/--text` is the tool for text.)
+    try testing.expectError(error.InvalidKeySpec, synthesizeKey(allocator, io, "hello world"));
+
+    // Empty spec is the same class of mistake.
+    try testing.expectError(error.InvalidKeySpec, synthesizeKey(allocator, io, ""));
 }
 
 test "synthesize key parsing" {

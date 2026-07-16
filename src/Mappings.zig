@@ -19,6 +19,10 @@ hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
 /// Longest chord list across all hotkeys. Sizes the runtime prefix
 /// buffer, so a pending sequence can never out-run it.
 max_chords: usize = 1,
+/// Maximum gap between consecutive chords of a sequence, from
+/// `.sequence_timeout`. Rides the mappings swap, so hot reload picks up a
+/// new value for free.
+sequence_timeout_ms: u32 = 300,
 // Device aliases declared via `.device <name> <vendor> <product>`. Empty
 // when the user hasn't opted into per-device matching, in which case the
 // IOHIDManager monitor is never started.

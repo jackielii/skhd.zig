@@ -83,10 +83,20 @@ cmd - k, cmd - c, alt - q : echo "three-chord sequence"
 
 Every chord declares its own complete modifier set — modifiers are never
 inherited from the previous chord. Consecutive chords must arrive within
-300ms of each other or the pending prefix expires. Modifier transitions
-themselves are not sequence steps, so modifiers may be released and pressed
-again between chords, as long as each chord's own modifiers are present when
-that chord's key goes down.
+300ms of each other or the pending prefix expires; `.sequence_timeout`
+changes that budget. Modifier transitions themselves are not sequence steps,
+so modifiers may be released and pressed again between chords, as long as
+each chord's own modifiers are present when that chord's key goes down.
+
+```
+.sequence_timeout 500ms     # default 300ms; also accepts `500` or `1s`
+```
+
+The budget applies between each pair of chords, not to the sequence as a
+whole, and is global — every sequence shares it. A pending prefix is never
+replayed: when it expires, the chords already consumed stay consumed. The
+value must be greater than zero, since `0` would expire every prefix
+instantly while still swallowing its first chord.
 
 An explicit rule claims its chord in whichever application it applies to. A
 chord with no applicable rule for the frontmost application is not consumed,
@@ -312,6 +322,7 @@ Configuration directives follow this syntax:
 directive = '.shell' <string> |
             '.blacklist' '[' <string_list> ']' |
             '.load' <string> |
+            '.sequence_timeout' <duration> |
             '.path' <string> | '.path' '[' <string_list> ']' |
             '.define' <identifier> '[' <string_list> ']' |
             '.define' <identifier> ':' <command_template> |
@@ -329,7 +340,9 @@ taphold_attr    = 'tap'                ':' <hid_key>
                 | 'hold_on_other_key_press' ':' ('on' | 'off')
                 | 'retro_tap'          ':' ('on' | 'off')
 hid_key_or_layer = <hid_key> | <mode_identifier>   // mode = layer hold
-duration         = <integer> ('ms' | 's')
+duration         = <integer> ('ms' | 's')?   // bare integer = milliseconds.
+                                             // The unit must be on the same
+                                             // line as the integer.
 
 string_list = <string> | <string> ',' <string_list>
 ```

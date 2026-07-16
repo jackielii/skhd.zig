@@ -68,7 +68,7 @@ pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
     // process list.
     var it = self.hotkey_map.iterator();
     while (it.next()) |entry| {
-        if (Hotkey.triggersOverlap(entry.key_ptr.*, hotkey)) {
+        if (Hotkey.onePrefixesOther(entry.key_ptr.*, hotkey)) {
             return error.DuplicateHotkeyInMode;
         }
     }

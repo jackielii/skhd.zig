@@ -91,10 +91,23 @@ pub fn eql(a: *Hotkey, b: *Hotkey) bool {
     return true;
 }
 
-pub fn triggersOverlap(a: *Hotkey, b: *Hotkey) bool {
-    if (a.chords[0].key != b.chords[0].key) return false;
-    return hotkeyFlagsMatch(a.chords[0].flags, b.chords[0].flags) or
-        hotkeyFlagsMatch(b.chords[0].flags, a.chords[0].flags);
+/// True when either chord could match the same physical key press.
+fn chordsOverlap(x: KeyPress, y: KeyPress) bool {
+    return x.key == y.key and
+        (hotkeyFlagsMatch(x.flags, y.flags) or hotkeyFlagsMatch(y.flags, x.flags));
+}
+
+/// True when one hotkey's chord list is a prefix of the other's (equal
+/// length counts). Combined with processScopesOverlap this is the whole
+/// conflict rule: it guarantees at most one hotkey matches any
+/// (mode, prefix, process), which is what makes probe order in
+/// PrefixLookupContext unobservable.
+pub fn onePrefixesOther(a: *const Hotkey, b: *const Hotkey) bool {
+    const n = @min(a.chords.len, b.chords.len);
+    for (a.chords[0..n], b.chords[0..n]) |x, y| {
+        if (!chordsOverlap(x, y)) return false;
+    }
+    return true;
 }
 
 fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd, control, shift }) bool {
@@ -145,6 +158,40 @@ pub const KeyboardLookupContext = struct {
     }
 };
 
+/// Looks a chord prefix up against a mode's hotkeys.
+///
+/// The caller reads the result's chord count to decide what happened:
+///   chords.len == prefix.len -> complete, fire it
+///   chords.len >  prefix.len -> pending, consume and arm the timer
+///   null                     -> nothing applicable
+///
+/// Enumerating candidates is unnecessary: when two sequences share a
+/// prefix, either one proves "pending" and the next chord disambiguates.
+pub const PrefixLookupContext = struct {
+    /// Frontmost process, or null to match structurally — ignoring
+    /// whether the hotkey has an action that applies here. The null form
+    /// answers "did any rule claim this chord?", which gates the
+    /// capture-mode fallback.
+    process_name: ?[]const u8,
+
+    pub fn hash(_: @This(), prefix: []const KeyPress) u32 {
+        return prefix[0].key;
+    }
+
+    pub fn eql(self: @This(), prefix: []const KeyPress, config: *Hotkey, _: usize) bool {
+        if (config.chords.len < prefix.len) return false;
+        for (prefix, config.chords[0..prefix.len]) |ev, cfg| {
+            if (cfg.key != ev.key) return false;
+            if (!hotkeyFlagsMatch(cfg.flags, ev.flags)) return false;
+        }
+        // Skipping inapplicable hotkeys during probing is what lets a
+        // `cmd - q ["Terminal"]` entry not shadow a
+        // `cmd - q, cmd - q ["XYZ"]` entry while XYZ is frontmost.
+        const proc = self.process_name orelse return true;
+        return config.find_command_for_process(proc) != null;
+    }
+};
+
 /// Wildcard-modifier lookup context for capture-mode layer rules.
 /// Matches a config hotkey by key code alone, ignoring the keyboard
 /// event's modifier flags — but ONLY if the config rule itself has
@@ -152,12 +199,18 @@ pub const KeyboardLookupContext = struct {
 /// exact match elsewhere). The caller is expected to OR the user's
 /// modifiers into the forward target after a wildcard match.
 pub const WildcardLookupContext = struct {
+    process_name: []const u8,
+
     pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
         return key.key;
     }
 
-    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
-        return config.chords[0].key == keyboard.key and config.chords[0].flags.isEmpty();
+    pub fn eql(self: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
+        // len == 1: the fallback must never fire a sequence off one chord.
+        if (config.chords.len != 1) return false;
+        if (config.chords[0].key != keyboard.key) return false;
+        if (!config.chords[0].flags.isEmpty()) return false;
+        return config.find_command_for_process(self.process_name) != null;
     }
 };
 
@@ -761,6 +814,126 @@ test "wildcard duplicate handling" {
     try hotkey4.add_process_activation("*", "mode", "cmd");
     const result4 = hotkey4.add_process_activation("*", "mode", "cmd");
     try std.testing.expectError(error.WildcardCommandAlreadyExists, result4);
+}
+
+test "onePrefixesOther detects prefix relationships with overlap semantics" {
+    const alloc = std.testing.allocator;
+    const cmd_q = KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
+    const lcmd_q = KeyPress{ .flags = .{ .lcmd = true }, .key = 0x0C };
+    const cmd_a = KeyPress{ .flags = .{ .cmd = true }, .key = 0x00 };
+
+    var single = try Hotkey.create(alloc, &.{cmd_q});
+    defer single.destroy();
+    var double = try Hotkey.create(alloc, &.{ cmd_q, cmd_q });
+    defer double.destroy();
+    var other = try Hotkey.create(alloc, &.{cmd_a});
+    defer other.destroy();
+    var specific = try Hotkey.create(alloc, &.{lcmd_q});
+    defer specific.destroy();
+
+    try testing.expect(onePrefixesOther(single, double));
+    try testing.expect(onePrefixesOther(double, single));
+    try testing.expect(!onePrefixesOther(single, other));
+    // Overlap, not equality: a physical lcmd-q press matches both.
+    try testing.expect(onePrefixesOther(single, specific));
+}
+
+test "prefix lookup resolves complete vs pending and skips inapplicable scopes" {
+    const alloc = std.testing.allocator;
+    const cmd_q = KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
+
+    var immediate = try Hotkey.create(alloc, &.{cmd_q});
+    defer immediate.destroy();
+    try immediate.add_process_command("Terminal", "echo t");
+
+    var sequence = try Hotkey.create(alloc, &.{ cmd_q, cmd_q });
+    defer sequence.destroy();
+    try sequence.add_process_command("Protected App", "echo p");
+
+    var map: HotkeyMap = .empty;
+    defer map.deinit(alloc);
+    try map.put(alloc, immediate, {});
+    try map.put(alloc, sequence, {});
+
+    const prefix: []const KeyPress = &.{cmd_q};
+
+    // Terminal: the one-chord rule applies -> complete.
+    try testing.expectEqual(immediate, map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = "Terminal",
+    }).?);
+
+    // Protected App: the one-chord rule is skipped during probing, so the
+    // sequence is reachable -> pending (chords.len > prefix.len).
+    const in_protected = map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = "Protected App",
+    }).?;
+    try testing.expectEqual(sequence, in_protected);
+    try testing.expect(in_protected.chords.len > prefix.len);
+
+    // Firefox: neither applies -> cmd-q passes through to macOS.
+    try testing.expect(map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = "Firefox",
+    }) == null);
+
+    // Process-blind: something claimed the chord, regardless of scope.
+    try testing.expect(map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = null,
+    }) != null);
+}
+
+test "prefix lookup narrows a shared prefix on the second chord" {
+    const alloc = std.testing.allocator;
+    const cmd_k = KeyPress{ .flags = .{ .cmd = true }, .key = 0x28 };
+    const cmd_c = KeyPress{ .flags = .{ .cmd = true }, .key = 0x08 };
+    const cmd_u = KeyPress{ .flags = .{ .cmd = true }, .key = 0x20 };
+
+    var comment = try Hotkey.create(alloc, &.{ cmd_k, cmd_c });
+    defer comment.destroy();
+    try comment.add_process_command("*", "comment");
+    var uncomment = try Hotkey.create(alloc, &.{ cmd_k, cmd_u });
+    defer uncomment.destroy();
+    try uncomment.add_process_command("*", "uncomment");
+
+    var map: HotkeyMap = .empty;
+    defer map.deinit(alloc);
+    try map.put(alloc, comment, {});
+    try map.put(alloc, uncomment, {});
+
+    // [cmd-k] matches both; either proves "pending". We don't care which.
+    const step1: []const KeyPress = &.{cmd_k};
+    const pending = map.getKeyAdapted(step1, PrefixLookupContext{ .process_name = "Code" }).?;
+    try testing.expect(pending.chords.len > step1.len);
+
+    // The second chord disambiguates.
+    const step2: []const KeyPress = &.{ cmd_k, cmd_u };
+    const done = map.getKeyAdapted(step2, PrefixLookupContext{ .process_name = "Code" }).?;
+    try testing.expectEqual(uncomment, done);
+    try testing.expectEqual(step2.len, done.chords.len);
+}
+
+test "wildcard context rejects sequences and inapplicable scopes" {
+    const alloc = std.testing.allocator;
+    const h = KeyPress{ .flags = .{}, .key = 0x04 };
+
+    var transparent = try Hotkey.create(alloc, &.{h});
+    defer transparent.destroy();
+    try transparent.add_process_command("*", "left");
+
+    var seq = try Hotkey.create(alloc, &.{ h, h });
+    defer seq.destroy();
+    try seq.add_process_command("*", "nope");
+
+    var map: HotkeyMap = .empty;
+    defer map.deinit(alloc);
+    try map.put(alloc, seq, {});
+    try map.put(alloc, transparent, {});
+
+    // The fallback must never fire a sequence off a single chord.
+    const found = map.getKeyAdapted(
+        Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x04 },
+        WildcardLookupContext{ .process_name = "Firefox" },
+    );
+    try testing.expectEqual(transparent, found.?);
 }
 
 test "create dupes chords and reports sequence-ness" {

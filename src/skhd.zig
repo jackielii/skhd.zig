@@ -1353,9 +1353,10 @@ pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey
 /// to get QMK-style layer transparency: `fn_layer < h | left` should
 /// also fire for `shift+h`, `ctrl+h`, etc., with the user's actual
 /// modifiers carried through to the forwarded keystroke.
-pub inline fn findWildcardHotkey(_: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-    const ctx = Hotkey.WildcardLookupContext{};
-    return mode.hotkey_map.getKeyAdapted(eventkey, ctx);
+pub inline fn findWildcardHotkey(_: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress, process_name: []const u8) ?*Hotkey {
+    return mode.hotkey_map.getKeyAdapted(eventkey, Hotkey.WildcardLookupContext{
+        .process_name = process_name,
+    });
 }
 
 /// Process a hotkey - single lookup that handles both forwarding and execution
@@ -1373,7 +1374,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
     // → `lctrl+left`.
     var via_wildcard = false;
     if (found_hotkey == null and mode.capture) {
-        found_hotkey = self.findWildcardHotkey(mode, eventkey.*);
+        found_hotkey = self.findWildcardHotkey(mode, eventkey.*, process_name);
         via_wildcard = (found_hotkey != null);
     }
 

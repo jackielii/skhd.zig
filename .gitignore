@@ -19,3 +19,8 @@ zig-out/
 /docgen_tmp/
 /.claude/settings.local.json
 zig-pkg
+
+# Superpowers workflow artifacts — specs, plans, and the subagent-driven
+# development ledger. Working notes, not project docs.
+/docs/superpowers/
+/.superpowers/

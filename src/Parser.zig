@@ -133,6 +133,46 @@ pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
     try self.parseWithPath(mappings, content, null);
 }
 
+/// Parse a bare keyspec — `"cmd - q"`, `"f19"`, `"0x0C"` — into one chord.
+///
+/// Deliberately NOT the config grammar: no modes, no process lists, no
+/// actions, no trailing anything. `skhd -k` synthesizes a keypress, so its
+/// diagnostics must talk about keys. Routing it through `parse()` (by
+/// wrapping the spec in a fake `<spec> : __dummy__` config line) made a
+/// leading word lex as an identifier and read as a mode name, so
+/// `skhd -k "hello world"` answered "Mode 'hello' not found. Did you forget
+/// to declare it with '::hello'?" — an implementation detail leaking as
+/// advice. It also meant `-k` silently accepted process lists.
+pub fn parseKeySpec(self: *Parser, spec: []const u8) !Hotkey.KeyPress {
+    self.content = spec;
+    self.tokenizer = try Tokenizer.init(spec);
+    self.current_file_path = null;
+    _ = self.advance();
+
+    const first = self.peek() orelse {
+        // No token at all — nothing to point `fromToken` at.
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            .{ .type = .Token_Key, .text = spec, .line = 1, .cursor = 1 },
+            "Expected a key combination (e.g. 'cmd - q')",
+            null,
+        );
+        return error.ParseErrorOccurred;
+    };
+    _ = first;
+
+    const chord = try self.parse_keypress();
+
+    if (self.peek()) |extra| {
+        const msg = try std.fmt.allocPrint(self.allocator, "Unexpected '{s}' after the key combination", .{extra.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, extra, msg, null);
+        return error.ParseErrorOccurred;
+    }
+
+    return chord;
+}
+
 pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, file_path: ?[]const u8) !void {
     self.content = content;
     self.tokenizer = try Tokenizer.init(content);
@@ -2192,6 +2232,57 @@ test "shell directive" {
 
     // Verify shell was updated
     try std.testing.expectEqualStrings("/bin/zsh", mappings.shell);
+}
+
+test "parseKeySpec accepts a bare chord" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { spec: []const u8, flags: ModifierFlag, key: u32 }{
+        .{ .spec = "cmd - q", .flags = .{ .cmd = true }, .key = c.kVK_ANSI_Q },
+        .{ .spec = "f19", .flags = .{ .@"fn" = true }, .key = c.kVK_F19 },
+        .{ .spec = "cmd + shift - a", .flags = .{ .cmd = true, .shift = true }, .key = c.kVK_ANSI_A },
+        .{ .spec = "0x0C", .flags = .{}, .key = 0x0C },
+    };
+    for (cases) |case| {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        const chord = try parser.parseKeySpec(case.spec);
+        try std.testing.expectEqual(case.key, chord.key);
+        try std.testing.expectEqual(@as(u32, @bitCast(case.flags)), @as(u32, @bitCast(chord.flags)));
+    }
+}
+
+test "parseKeySpec rejects config grammar and talks about keys, not modes" {
+    const alloc = std.testing.allocator;
+
+    // A keyspec is not a config line. Routing `-k` through parse() made a
+    // leading word read as a mode name, so `skhd -k "hello world"` reported
+    // "Mode 'hello' not found" — nonsense to someone synthesizing a keypress.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parseKeySpec("hello world"));
+        const msg = parser.error_info.?.message;
+        try std.testing.expect(!std.mem.containsAtLeast(u8, msg, 1, "Mode"));
+        try std.testing.expect(!std.mem.containsAtLeast(u8, msg, 1, "::"));
+    }
+
+    // Modes, process lists and actions are all config-file concepts that a
+    // keyspec must not accept.
+    const rejected = [_][]const u8{
+        "cmd - q [ \"Finder\" : echo x ]",
+        "cmd - q : echo hi",
+        "cmd - q | cmd - w",
+        "hello world",
+        "",
+        "cmd -",
+        "cmd - zzz",
+    };
+    for (rejected) |spec| {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parseKeySpec(spec));
+        try std.testing.expect(parser.error_info != null);
+    }
 }
 
 test "sequence_timeout directive" {

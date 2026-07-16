@@ -70,6 +70,9 @@ pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
     while (it.next()) |entry| {
         const existing = entry.key_ptr.*;
         if (!Hotkey.onePrefixesOther(existing, hotkey)) continue;
+        // HotkeyMap keys on chords alone, so eql-equal hotkeys cannot coexist
+        // regardless of process scope — put() would silently drop one.
+        if (Hotkey.eql(existing, hotkey)) return error.DuplicateHotkeyInMode;
         if (!Hotkey.processScopesOverlap(existing, hotkey)) continue;
         return if (existing.chords.len == hotkey.chords.len)
             error.DuplicateHotkeyInMode

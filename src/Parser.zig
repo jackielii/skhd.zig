@@ -1877,6 +1877,46 @@ test "uniqueness rule gates prefix conflicts on process scope" {
         );
         try std.testing.expectError(error.ParseErrorOccurred, result);
     }
+
+    // Identical chords + disjoint explicit scopes: HotkeyMap keys on chords
+    // alone, so this must still be rejected as a duplicate even though the
+    // scopes don't overlap — otherwise put() silently drops the second entry.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        const result = parser.parse(&mappings,
+            \\cmd - a [
+            \\    "Terminal" : echo terminal
+            \\]
+            \\cmd - a [
+            \\    "Firefox" : echo firefox
+            \\]
+        );
+        try std.testing.expectError(error.ParseErrorOccurred, result);
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Duplicate hotkey"));
+    }
+
+    // Overlapping-but-not-identical chords (flags differ) + disjoint explicit
+    // scopes: must still parse as two distinct entries, disambiguated at
+    // runtime by PrefixLookupContext.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings,
+            \\alt - a [
+            \\    "Terminal" : echo terminal
+            \\]
+            \\lalt - a [
+            \\    "Firefox" : echo firefox
+            \\]
+        );
+        const default_mode = mappings.mode_map.get("default").?;
+        try std.testing.expectEqual(@as(usize, 2), default_mode.hotkey_map.count());
+    }
 }
 
 test "shared incomplete prefixes are allowed" {

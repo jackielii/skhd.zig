@@ -1502,10 +1502,23 @@ pub fn reloadConfig(self: *Skhd) !void {
     // Pending sequence candidates borrow the current mappings.
     self.cancelPendingSequence();
 
+    // Allocate the new prefix buffer before committing the mappings swap,
+    // so a reload is all-or-nothing: reloadConfig's error is only logged
+    // while the daemon keeps running, so if this alloc failed after the
+    // swap, self.mappings would already point at new_mappings while
+    // sequence_prefix stayed sized for the old (possibly smaller)
+    // max_chords — a later commitPrefix() could then write past the end
+    // of the buffer (assert-caught in Debug/ReleaseSafe, silent
+    // out-of-bounds write in ReleaseFast).
+    const new_prefix = try self.allocator.alloc(Hotkey.KeyPress, new_mappings.max_chords);
+
     // Swap old mappings with new ones
     self.mappings.deinit();
     self.mappings = new_mappings;
-    try self.allocSequencePrefix();
+
+    self.allocator.free(self.sequence_prefix);
+    self.sequence_prefix = new_prefix;
+    self.sequence_prefix_len = 0;
 
     // Reset to default mode
     if (self.mappings.mode_map.getPtr("default")) |default_mode| {

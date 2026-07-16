@@ -13,7 +13,9 @@
 ## Global Constraints
 
 - Zig 0.16.0. Build/test with `zig build test` (single-file `zig test` does not work — module tests need `build_options`/`grabber_protocol`/`plist` imports). Use `ZIG_PROGRESS=0 zig build test` if it hangs.
-- `zig build bench` must keep compiling — `src/benchmark.zig` constructs hotkeys.
+- `zig build test` exits 0 at baseline. Its output already contains two `failed command: ./.zig-cache/o/.../test …` lines, benchmark timings, and two `[hidutil] (warn):` lines — pre-existing Zig 0.16 noise from steps that write to stderr. **Judge by exit code.**
+- **`zig build bench` is broken independently of this work and is NOT a gate.** It fails identically at the merge-base with `main`: `src/benchmark.zig:9` uses `std.heap.GeneralPurposeAllocator`, removed in Zig 0.16 (there is also a stale `Skhd.init` signature). Do not fix it here — out of scope. Consequence to be aware of: `build.zig:423` wires `src/benchmark.zig` into the `bench` step only, so `zig build test` never compiles it and **changes to that file are not compiler-verified**. Migrate it by hand and by inspection.
+- `zig build` (the main binary) must succeed. That is the real compile gate.
 - The event loop must perform **zero allocations** in release builds. No `dupe`/`append` on any key-down path.
 - Every existing test must pass unchanged unless a task explicitly says otherwise. The existing duplicate-detection tests are the evidence that the uniqueness rule generalizes rather than relaxes current behavior.
 - No configuration that parses today may change meaning.
@@ -400,7 +402,7 @@ Specific non-obvious sites:
 
 - [ ] **Step 7: Run the full suite and the benchmark build**
 
-Run: `zig build test && zig build bench`
+Run: `zig build test && zig build` (bench is pre-existing broken — see Global Constraints)
 Expected: both succeed.
 
 - [ ] **Step 8: Commit**
@@ -1051,7 +1053,7 @@ Then remove its references: `grep -rn "Sequence" src/ build.zig` and clean up wh
 
 - [ ] **Step 9: Run the full suite**
 
-Run: `zig build test && zig build bench`
+Run: `zig build test && zig build` (bench is pre-existing broken — see Global Constraints)
 Expected: PASS, including every pre-existing duplicate-detection test at `src/tests.zig:1055-1190`. Those use bare hotkeys, which are wildcard-scoped, so `processScopesOverlap` returns true and they still error. **If any of them now passes where it used to fail, the uniqueness rule is wired wrong** — most likely `processScopesOverlap` is inverted or the wildcard case is not returning true.
 
 - [ ] **Step 10: Commit**
@@ -1264,7 +1266,7 @@ grep -rn "flags\.passthrough\|hotkey\.flags\b\|hotkey\.key\b" src/ ; echo "--- e
 
 - [ ] **Step 4: Full build and suite**
 
-Run: `zig build test && zig build bench && zig build`
+Run: `zig build test && zig build` (bench is pre-existing broken — see Global Constraints)
 Expected: all pass.
 
 - [ ] **Step 5: Parse the real config**

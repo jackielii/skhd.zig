@@ -71,20 +71,27 @@ mode_activation = <mode> | <mode> ':' <command>
 
 ## Hotkey Sequences
 
-A comma separates complete hotkey chords:
+A sequence is not a separate construct — **it is a hotkey whose `trigger` has
+more than one chord.** Every action form (`:`, `|`, `~`, `->`, `;`, process
+lists, process groups, command references, multi-mode declarations) works on
+a sequence exactly as it does on a single-chord hotkey:
 
 ```skhd
 cmd - q, cmd - q : echo "double Cmd-Q"
 cmd - k, cmd - c, alt - q : echo "three-chord sequence"
 ```
 
-Every chord declares its own modifiers. Consecutive chords must arrive within
-300ms of each other. Modifier transitions are not sequence steps, so modifiers
-may be released and pressed again between chords.
+Every chord declares its own complete modifier set — modifiers are never
+inherited from the previous chord. Consecutive chords must arrive within
+300ms of each other or the pending prefix expires. Modifier transitions
+themselves are not sequence steps, so modifiers may be released and pressed
+again between chords, as long as each chord's own modifiers are present when
+that chord's key goes down.
 
-The first chord is consumed only when the current application has an applicable
-sequence action. This allows an application-specific safety binding while
-preserving the operating system's normal behavior elsewhere:
+An explicit rule claims its chord in whichever application it applies to. A
+chord with no applicable rule for the frontmost application is not consumed,
+so a sequence can express an application-specific safety binding while every
+other application keeps the operating system's normal behavior for that key:
 
 ```skhd
 cmd - q, cmd - q [
@@ -92,13 +99,98 @@ cmd - q, cmd - q [
 ]
 ```
 
-In `Protected App`, the first `cmd-q` starts the sequence. In other applications,
-the binding does not apply and the first `cmd-q` passes through normally.
+In `Protected App`, the first `cmd-q` starts the sequence. In every other
+application this binding does not apply, so the first `cmd-q` is never
+consumed and passes straight through to macOS.
 
-An expired or mismatched prefix is not replayed. A single-chord binding and a
-longer sequence may share a prefix only when their explicit application scopes
-are disjoint. Wildcard (`*`) actions overlap every explicit application scope,
-so ambiguous wildcard prefixes are rejected when the configuration is parsed.
+**Note:** a `:` command reads to end of line, so the process-list body above
+must be written on its own line(s) — `[ "Protected App" : echo "..." ]` on
+one line would swallow the closing `]` as part of the shell command and fail
+to parse. A `|` forward has no such problem and is fine inline:
+`cmd - q, cmd - q [ "Protected App" | cmd - q ]`.
+
+### `->` and `~` apply to the final chord only
+
+Earlier chords in a sequence are always consumed, because when an early
+chord arrives it is not yet known whether the sequence will go on to
+complete. Delivering it and *also* firing the action on completion would
+send the application a keypress the user never triggered. So `->`
+(passthrough) and `~` (unbound) only affect the chord that completes the
+binding:
+
+```skhd
+cmd - k, cmd - c -> : echo "chord 1 is consumed; chord 2 fires and passes through"
+cmd - k, cmd - c ~   # chord 1 is consumed; chord 2 is unbound and passes through
+```
+
+A single-chord hotkey is its own final chord, so this changes nothing for
+ordinary hotkeys.
+
+### The uniqueness rule
+
+Within a mode, two hotkeys conflict if one's chord list is a prefix of the
+other's (or they're equal length and equal) **and** their process scopes
+overlap — with one exception that scope cannot override: **identical chord
+lists always conflict, regardless of process scope.** `HotkeyMap` keys on
+chords alone (ignoring scope), so two hotkeys with identical chords are the
+same map key; the second `put` would silently discard the first one's
+binding. Rejecting that configuration at parse time is strictly better than
+silently dropping a binding the user wrote.
+
+```skhd
+# ERROR — identical chords, both wildcard-scoped.
+cmd - a : echo first
+cmd - a : echo second
+
+# ERROR — identical chords. Disjoint apps do NOT help: HotkeyMap keys on
+# chords alone, so the second could only be dropped, never bound. Write
+# this as ONE hotkey with a two-entry process list instead.
+cmd - a [
+    "Terminal" : echo terminal
+]
+cmd - a [
+    "Firefox" : echo firefox
+]
+
+# OK — chords overlap (same physical key) but are not identical (alt vs
+# lalt), and scopes are disjoint. Both are stored as distinct map keys;
+# the lookup picks one by frontmost app.
+alt - a [
+    "Terminal" : echo terminal
+]
+lalt - a [
+    "Firefox" : echo firefox
+]
+
+# ERROR — cmd-q in Terminal would match both entries.
+cmd - q [
+    "Terminal" : echo now
+]
+cmd - q, cmd - q [
+    "Terminal" : echo later
+]
+
+# OK — different chord lengths, disjoint apps; each press has one answer.
+cmd - q [
+    "Terminal" : echo t
+]
+cmd - q, cmd - q [ "XYZ" | cmd - q ]
+
+# OK — shared incomplete prefix, disambiguated by the second chord.
+cmd - k, cmd - c : echo comment-command
+cmd - k, cmd - u : echo uncomment-command
+```
+
+A bare hotkey (no process list) has wildcard process scope, and a wildcard
+scope overlaps every explicit scope — so every duplicate case that is an
+error today stays an error. The rule is more permissive than before in
+exactly one shape: chords that **overlap without being identical** with
+disjoint explicit process lists, as in the `alt - a` / `lalt - a` example
+above.
+
+An expired or mismatched prefix is never replayed — its consumed key events
+stay consumed, which matters for safety bindings like `cmd-q` where delayed
+replay could quit an application unexpectedly.
 
 ## Mode Activation
 

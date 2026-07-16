@@ -356,24 +356,27 @@ shift - f1 : echo "Shift+F1"
 
 ### Hotkey Sequences
 
-Separate complete chords with commas. Each step must follow the previous one
-within 300ms:
+A sequence is just a hotkey whose trigger has more than one comma-separated
+chord — every action form (commands, forwarding, process lists, modes, `->`,
+`~`) works on it exactly as it does on a single-chord hotkey. Each step must
+follow the previous one within 300ms, or the pending chord expires and is
+dropped (never replayed).
 
 ```bash
-# Require two Cmd-Q presses in this application. Elsewhere Cmd-Q has no
-# matching skhd sequence, so macOS receives it normally.
-cmd - q, cmd - q [
-    "Protected App" : osascript -e 'tell application "Protected App" to quit'
-]
+# Require two Cmd-Q presses to quit a protected app. Everywhere else the
+# first Cmd-Q has no skhd binding, so it passes through and macOS quits
+# normally. The second press forwards a real Cmd-Q.
+cmd - q, cmd - q [ "Protected App" | cmd - q ]
 
 # Complete modifiers are written on every chord.
 cmd - k, cmd - c : echo "sequence completed"
 ```
 
-Sequence prefixes are consumed and are not replayed when the interval expires
-or a different chord is pressed. Prefixes may be reused by bindings whose
-explicit application scopes do not overlap; wildcard actions overlap all
-applications.
+`->` and `~` apply only to the **final** chord — earlier chords are always
+consumed, since completion isn't known until the sequence finishes. See
+[SYNTAX.md](SYNTAX.md#hotkey-sequences) for the full grammar and the
+uniqueness rule that governs when a sequence may share a prefix with another
+hotkey.
 
 ### Supported Modifiers
 

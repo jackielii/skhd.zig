@@ -1867,7 +1867,7 @@ test "sequence prefix buffer: pending, completion, mismatch retry, process chang
     try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
 }
 
-test "sequence completes on a forward of its own trigger" {
+test "process-scoped sequence completes and does not apply elsewhere" {
     // `cmd - q, cmd - q ["Protected App" | cmd - q]`: the completing chord
     // forwards cmd-q back out. That forward re-enters our own tap (it's
     // head-inserted at kCGSessionEventTap and marked SKHD_EVENT_MARKER), but

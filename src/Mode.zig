@@ -8,7 +8,6 @@
 // };
 const std = @import("std");
 const Hotkey = @import("Hotkey.zig");
-const Sequence = @import("Sequence.zig");
 const utils = @import("utils.zig");
 
 const Mode = @This();
@@ -20,7 +19,6 @@ command: ?[:0]const u8 = null,
 capture: bool = false,
 initialized: bool = false,
 hotkey_map: Hotkey.HotkeyMap = .empty,
-sequences: std.ArrayListUnmanaged(*Sequence) = .empty,
 
 pub fn init(allocator: std.mem.Allocator, name: []const u8) !Mode {
     return Mode{
@@ -35,7 +33,6 @@ pub fn deinit(self: *Mode) void {
     self.allocator.free(self.name);
     if (self.command) |cmd| self.allocator.free(cmd);
     self.hotkey_map.deinit(self.allocator);
-    self.sequences.deinit(self.allocator);
     self.* = undefined;
 }
 
@@ -62,45 +59,25 @@ pub fn format(self: Mode, writer: *std.Io.Writer) std.Io.Writer.Error!void {
 }
 
 pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
-    // Config-time duplicates are about overlapping triggers in the same
-    // mode. Commands/process mappings are payload, not part of the lookup
-    // key; users express process-specific variants inside one hotkey's
-    // process list.
+    // Two hotkeys conflict iff one's chord list prefixes the other's AND
+    // their process scopes overlap. That guarantees at most one hotkey
+    // matches any (mode, prefix, process) — the property PrefixLookupContext
+    // relies on to make probe order unobservable.
+    //
+    // A bare hotkey is wildcard-scoped, so scopes always overlap for it and
+    // today's duplicate detection is unchanged.
     var it = self.hotkey_map.iterator();
     while (it.next()) |entry| {
-        if (Hotkey.onePrefixesOther(entry.key_ptr.*, hotkey)) {
-            return error.DuplicateHotkeyInMode;
-        }
-    }
-
-    for (self.sequences.items) |sequence| {
-        if (Sequence.chordOverlapsHotkey(sequence.chords[0], hotkey) and
-            Hotkey.processScopesOverlap(sequence.action, hotkey))
-        {
-            return error.AmbiguousSequencePrefix;
-        }
+        const existing = entry.key_ptr.*;
+        if (!Hotkey.onePrefixesOther(existing, hotkey)) continue;
+        if (!Hotkey.processScopesOverlap(existing, hotkey)) continue;
+        return if (existing.chords.len == hotkey.chords.len)
+            error.DuplicateHotkeyInMode
+        else
+            error.AmbiguousSequencePrefix;
     }
 
     try self.hotkey_map.put(self.allocator, hotkey, {});
-}
-
-pub fn addSequence(self: *Mode, sequence: *Sequence) !void {
-    for (self.sequences.items) |existing| {
-        if (Sequence.onePrefixesOther(existing, sequence) and
-            Hotkey.processScopesOverlap(existing.action, sequence.action))
-        {
-            return error.AmbiguousSequencePrefix;
-        }
-    }
-    var it = self.hotkey_map.iterator();
-    while (it.next()) |entry| {
-        if (Sequence.chordOverlapsHotkey(sequence.chords[0], entry.key_ptr.*) and
-            Hotkey.processScopesOverlap(sequence.action, entry.key_ptr.*))
-        {
-            return error.AmbiguousSequencePrefix;
-        }
-    }
-    try self.sequences.append(self.allocator, sequence);
 }
 
 test "init" {

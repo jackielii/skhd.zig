@@ -5,7 +5,6 @@ const Token = Tokenizer.Token;
 const Hotkey = @import("Hotkey.zig");
 const assert = std.debug.assert;
 const Mode = @import("Mode.zig");
-const Sequence = @import("Sequence.zig");
 const Mappings = @import("Mappings.zig");
 const Keycodes = @import("Keycodes.zig");
 const HidKeyMap = @import("HidKeyMap.zig");
@@ -296,8 +295,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     }
 
     var hotkey = try Hotkey.create(self.allocator, chords.items);
-    var hotkey_owned = true;
-    errdefer if (hotkey_owned) hotkey.destroy();
+    errdefer hotkey.destroy();
     for (modes.items) |mode| {
         hotkey.add_mode(mode) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ mode.name, @errorName(err) });
@@ -345,20 +343,6 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         };
     } else if (self.match(.Token_BeginList)) {
         try self.parse_proc_list(mappings, hotkey);
-    }
-
-    if (chords.items.len > 1) {
-        const sequence = try Sequence.create(self.allocator, chords.items, hotkey);
-        hotkey_owned = false;
-        errdefer sequence.destroy();
-        mappings.add_sequence(sequence) catch |err| {
-            if (err == error.AmbiguousSequencePrefix) {
-                self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Ambiguous hotkey sequence prefix in overlapping application scope", self.current_file_path);
-                return error.ParseErrorOccurred;
-            }
-            return err;
-        };
-        return;
     }
 
     mappings.add_hotkey(hotkey) catch |err| {
@@ -1815,7 +1799,7 @@ test "double mode free" {
     // print("{s}\n", .{mappings});
 }
 
-test "parse application-scoped hotkey sequence" {
+test "sequences live in hotkey_map as ordinary hotkeys" {
     const alloc = std.testing.allocator;
     var mappings = try Mappings.init(alloc, std.testing.io);
     defer mappings.deinit();
@@ -1824,17 +1808,28 @@ test "parse application-scoped hotkey sequence" {
 
     try parser.parse(&mappings,
         \\cmd - q, cmd - q [
-        \\    "Protected App" : echo quit
+        \\    "Protected App" | cmd - q
         \\]
     );
     const mode = mappings.mode_map.get("default").?;
-    try std.testing.expectEqual(@as(usize, 1), mode.sequences.items.len);
-    try std.testing.expectEqual(@as(usize, 2), mode.sequences.items[0].chords.len);
+    try std.testing.expectEqual(@as(usize, 1), mode.hotkey_map.count());
+
+    var it = mode.hotkey_map.iterator();
+    const hk = it.next().?.key_ptr.*;
+    try std.testing.expect(hk.isSequence());
+    try std.testing.expectEqual(@as(usize, 2), hk.chords.len);
+    try std.testing.expectEqual(@as(usize, 2), mappings.max_chords);
+    // Mappings owns it, like every other hotkey.
+    try std.testing.expectEqual(@as(usize, 1), mappings.hotkeys.items.len);
 }
 
-test "sequence prefix conflicts are scoped by application" {
+test "uniqueness rule gates prefix conflicts on process scope" {
     const alloc = std.testing.allocator;
 
+    // Commands lex to end-of-line, so process lists carrying a `:` action
+    // must put the closing ']' on its own line.
+
+    // Disjoint scopes: decidable, so allowed.
     {
         var mappings = try Mappings.init(alloc, std.testing.io);
         defer mappings.deinit();
@@ -1850,6 +1845,25 @@ test "sequence prefix conflicts are scoped by application" {
         );
     }
 
+    // Overlapping scopes: cmd-q in Terminal would match both.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        const result = parser.parse(&mappings,
+            \\cmd - q [
+            \\    "Terminal" : echo now
+            \\]
+            \\cmd - q, cmd - q [
+            \\    "Terminal" : echo later
+            \\]
+        );
+        try std.testing.expectError(error.ParseErrorOccurred, result);
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Ambiguous hotkey sequence prefix"));
+    }
+
+    // A bare hotkey is wildcard-scoped, so it overlaps every explicit scope.
     {
         var mappings = try Mappings.init(alloc, std.testing.io);
         defer mappings.deinit();
@@ -1862,8 +1876,20 @@ test "sequence prefix conflicts are scoped by application" {
             \\]
         );
         try std.testing.expectError(error.ParseErrorOccurred, result);
-        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Ambiguous hotkey sequence prefix"));
     }
+}
+
+test "shared incomplete prefixes are allowed" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    try parser.parse(&mappings,
+        \\cmd - k, cmd - c : echo comment
+        \\cmd - k, cmd - u : echo uncomment
+    );
+    try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
 }
 
 test "parse three-chord sequence and reject missing chord" {
@@ -1874,8 +1900,9 @@ test "parse three-chord sequence and reject missing chord" {
         var parser = try Parser.init(alloc, std.testing.io);
         defer parser.deinit();
         try parser.parse(&mappings, "cmd - k, cmd - c, alt - q : echo sequence");
-        const mode = mappings.mode_map.get("default").?;
-        try std.testing.expectEqual(@as(usize, 3), mode.sequences.items[0].chords.len);
+        var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
+        try std.testing.expectEqual(@as(usize, 3), it.next().?.key_ptr.*.chords.len);
+        try std.testing.expectEqual(@as(usize, 3), mappings.max_chords);
     }
     {
         var mappings = try Mappings.init(alloc, std.testing.io);
@@ -1884,6 +1911,55 @@ test "parse three-chord sequence and reject missing chord" {
         defer parser.deinit();
         try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, "cmd - q, : echo invalid"));
         try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Expected complete hotkey chord"));
+    }
+}
+
+test "multi-mode declaration with sequence chords" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    // Mode-list commas and chord commas cannot collide: mode lists require
+    // '<', and key tokens lex as Token_Key rather than Token_Identifier.
+    try parser.parse(&mappings,
+        \\:: alpha
+        \\:: beta
+        \\alpha, beta < cmd - k, cmd - c : echo both
+    );
+    try std.testing.expectEqual(@as(usize, 1), mappings.mode_map.get("alpha").?.hotkey_map.count());
+    try std.testing.expectEqual(@as(usize, 1), mappings.mode_map.get("beta").?.hotkey_map.count());
+    // One hotkey, two modes — not two hotkeys.
+    try std.testing.expectEqual(@as(usize, 1), mappings.hotkeys.items.len);
+}
+
+test "every action form works on a sequence" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+
+    // The spec's grammar-coverage table, in one config: process group,
+    // command reference with a placeholder, unbound, mode activation,
+    // per-chord hex/literal/alias forms.
+    try parser.parse(&mappings,
+        \\:: winmode
+        \\.define native_apps ["Finder", "Terminal"]
+        \\.define notify : echo {{1}}
+        \\cmd - k, cmd - c [ @native_apps | end ]
+        \\cmd - k, cmd - n : @notify("hi")
+        \\cmd - k, cmd - u ~
+        \\cmd - k, cmd - m ; winmode : echo entering
+        \\cmd - 0x1B, alt - return : echo mixed
+    );
+
+    const mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 5), mode.hotkey_map.count());
+    try std.testing.expectEqual(@as(usize, 5), mappings.hotkeys.items.len);
+    for (mappings.hotkeys.items) |hk| {
+        try std.testing.expect(hk.isSequence());
+        try std.testing.expectEqual(@as(usize, 2), hk.chords.len);
     }
 }
 
@@ -2173,9 +2249,9 @@ test "command definition without placeholders" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify command expanded correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x30 }; // tab key
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --focus recent || yabai -m space --focus recent", cmd.command);
 }
@@ -2205,13 +2281,13 @@ test "command definition with single placeholder" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify hotkeys expand to correct commands
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .lcmd = true }, .key = c.kVK_ANSI_H };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --focus west || yabai -m display --focus west", cmd1.command);
     const keypress2 = Hotkey.KeyPress{ .flags = .{ .lcmd = true }, .key = c.kVK_ANSI_J };
-    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress2, ctx).?;
+    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress2}, ctx).?;
     const cmd2 = hotkey2.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --focus south || yabai -m display --focus south", cmd2.command);
 }
@@ -2241,14 +2317,14 @@ test "command definition with multiple placeholders" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify commands expanded correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .shift = true }, .key = c.kVK_ANSI_H };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --swap west || yabai -m display --swap west", cmd1.command);
 
     const keypress2 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .shift = true }, .key = c.kVK_ANSI_J };
-    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress2, ctx).?;
+    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress2}, ctx).?;
     const cmd2 = hotkey2.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --swap south || yabai -m display --swap south", cmd2.command);
 }
@@ -2275,9 +2351,9 @@ test "command definition with repeated placeholders" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify placeholder replaced correctly in both locations
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_N };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "osascript -e 'display notification \"Test Message\" with title \"Test Message\"'", cmd.command);
 }
@@ -2410,9 +2486,9 @@ test "command definition with escape sequences" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify escape sequences are processed correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_N };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "osascript -e 'display notification \"Message with \"quotes\"\" with title \"Test\"'", cmd.command);
 }
@@ -2438,14 +2514,14 @@ test "command definition with comma-separated arguments" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify commands expanded correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .control = true, .shift = true }, .key = c.kVK_ANSI_K };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --resize top:0:-10", cmd1.command);
 
     const keypress2 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .control = true, .shift = true }, .key = c.kVK_ANSI_J };
-    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress2, ctx).?;
+    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress2}, ctx).?;
     const cmd2 = hotkey2.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --resize bottom:0:10", cmd2.command);
 }
@@ -2471,9 +2547,9 @@ test "command definition with whitespace handling" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify whitespace is trimmed from arguments
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .ralt = true }, .key = c.kVK_ANSI_M };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --toggle YT Music || open -a \"YT Music\"", cmd1.command);
 }
@@ -2498,9 +2574,9 @@ test "command definition complex placeholders" {
     try std.testing.expectEqual(@as(u8, 3), cmd_def.max_placeholder);
 
     // Verify placeholders expanded in correct order
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_C };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "echo third first third second", cmd.command);
 }
@@ -2528,9 +2604,9 @@ test "process group in hotkey with command expansion" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify commands expanded for different processes
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_A };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
 
     const firefox_cmd = hotkey.find_command_for_process("firefox").?;
     try std.testing.expectEqualSlices(u8, "open -a \"Firefox\"", firefox_cmd.command);
@@ -2612,9 +2688,9 @@ test "valid process group in process list" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify commands are set for all browsers
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_B };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
 
     const firefox_cmd = hotkey.find_command_for_process("Firefox").?;
     try std.testing.expectEqualSlices(u8, "echo \"Browser hotkey\"", firefox_cmd.command);

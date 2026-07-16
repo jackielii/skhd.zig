@@ -143,21 +143,6 @@ fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd,
     return a_general == b_general and a_left == b_left and a_right == b_right;
 }
 
-// Context for looking up hotkeys from keyboard events
-// This uses our custom modifier matching logic
-pub const KeyboardLookupContext = struct {
-    pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
-        // Must match the hash function used by HotkeyMap for lookup to work
-        return key.key;
-    }
-
-    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
-        // Match keyboard event against config hotkey
-        return config.chords[0].key == keyboard.key and
-            hotkeyFlagsMatch(config.chords[0].flags, keyboard.flags);
-    }
-};
-
 /// Looks a chord prefix up against a mode's hotkeys.
 ///
 /// The caller reads the result's chord count to decide what happened:
@@ -175,6 +160,7 @@ pub const PrefixLookupContext = struct {
     process_name: ?[]const u8,
 
     pub fn hash(_: @This(), prefix: []const KeyPress) u32 {
+        std.debug.assert(prefix.len >= 1);
         return prefix[0].key;
     }
 

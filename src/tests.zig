@@ -1,9 +1,4 @@
 const std = @import("std");
-const Sequence = @import("Sequence.zig");
-
-comptime {
-    _ = Sequence;
-}
 const testing = std.testing;
 
 // Import our modules
@@ -653,7 +648,8 @@ test "modifier matching - general modifiers match specific ones" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
+        const prefix: []const Hotkey.KeyPress = &.{keyboard_key};
+        const found = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{ .process_name = null });
 
         try testing.expect(found != null);
         try testing.expect(found.?.chords[0].flags.alt);
@@ -668,7 +664,8 @@ test "modifier matching - general modifiers match specific ones" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
+        const prefix: []const Hotkey.KeyPress = &.{keyboard_key};
+        const found = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{ .process_name = null });
 
         try testing.expect(found == null);
     }
@@ -681,7 +678,8 @@ test "modifier matching - general modifiers match specific ones" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
+        const prefix: []const Hotkey.KeyPress = &.{keyboard_key};
+        const found = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{ .process_name = null });
 
         try testing.expect(found != null);
         try testing.expect(found.?.chords[0].flags.cmd);
@@ -714,7 +712,8 @@ test "keyboard lalt should match config alt" {
         };
 
         // Find matching hotkey using our lookup abstraction
-        const found = skhd.findHotkeyInMode(&mode, keyboard_key);
+        const prefix: []const Hotkey.KeyPress = &.{keyboard_key};
+        const found = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{ .process_name = null });
 
         if (found == null) {
             std.debug.print("Test failed: Could not find hotkey for lalt - a\n", .{});
@@ -738,8 +737,8 @@ test "keyboard lalt should match config alt" {
             .key = 0, // 'a' key
         };
 
-        const ctx = Hotkey.KeyboardLookupContext{};
-        const found = mode.hotkey_map.getKeyAdapted(keyboard_key, ctx);
+        const prefix: []const Hotkey.KeyPress = &.{keyboard_key};
+        const found = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{ .process_name = null });
 
         try testing.expect(found != null);
         try testing.expect(found.?.chords[0].flags.alt);
@@ -753,8 +752,8 @@ test "keyboard lalt should match config alt" {
             .key = 0, // 'a' key
         };
 
-        const ctx = Hotkey.KeyboardLookupContext{};
-        const found = mode.hotkey_map.getKeyAdapted(keyboard_key, ctx);
+        const prefix: []const Hotkey.KeyPress = &.{keyboard_key};
+        const found = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{ .process_name = null });
 
         try testing.expect(found != null);
         try testing.expect(found.?.chords[0].flags.alt);

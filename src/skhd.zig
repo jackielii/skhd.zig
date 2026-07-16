@@ -886,7 +886,14 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
         return event;
     }
 
-    // Skip events that we generated ourselves to avoid loops
+    // Skip events we generated ourselves. This MUST stay above all
+    // sequence handling: `cmd - q, cmd - q ["Terminal" | cmd - q]` forwards
+    // a cmd-q that re-enters this tap (head-inserted at kCGSessionEventTap;
+    // forwardKey posts to the same tap). If this check ran below, the
+    // forward would match the sequence's own first chord, go pending, and be
+    // swallowed — the app would never receive the quit. Returning here also
+    // means a self-generated event never advances or cancels a pending
+    // prefix, which is correct: our own synthesis is not user input.
     const marker = c.CGEventGetIntegerValueField(event, c.kCGEventSourceUserData);
     if (marker == SKHD_EVENT_MARKER) {
         self.tracer.traceSelfGeneratedExit();
@@ -1857,6 +1864,112 @@ test "sequence prefix buffer: pending, completion, mismatch retry, process chang
     // cmd-c alone matches nothing once the prefix is dropped.
     try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "test"));
     try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_c, mock_event, "Other App"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+}
+
+test "sequence completes on a forward of its own trigger" {
+    // `cmd - q, cmd - q ["Protected App" | cmd - q]`: the completing chord
+    // forwards cmd-q back out. That forward re-enters our own tap (it's
+    // head-inserted at kCGSessionEventTap and marked SKHD_EVENT_MARKER), but
+    // by then the sequence has already completed and the prefix is empty, so
+    // the marker check (handleKeyDown) is what stops it from being
+    // re-matched as a fresh first chord. See "self-generated events never
+    // touch pending sequence state" below for that half of the invariant.
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\cmd - q, cmd - q ["Protected App" | cmd - q]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    const cmd_q = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_Q };
+
+    // First press: pending, consumed, prefix retained.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+
+    // Second press completes the sequence and forwards cmd-q back out.
+    // forwardKey no-ops under builtin.is_test, so the only observable
+    // effects are the result and the cleared prefix.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+
+    // Elsewhere the sequence does not apply, so cmd-q passes through to macOS.
+    try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_q, mock_event, "Firefox"));
+}
+
+test "passthrough applies to the final chord only" {
+    // `cmd - k, cmd - c -> : echo hi`: chord 1 can't be delivered before
+    // completion is known (we don't yet know whether the user is mid-sequence
+    // or just pressed an unrelated key), so it must be .consumed regardless
+    // of the `->` on the binding. Only the completing chord reads `->`/`~`
+    // (see the comment in processHotkey's pending arm).
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, "cmd - k, cmd - c -> : echo hi");
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    const cmd_k = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_K };
+    const cmd_c = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_C };
+
+    // Chord 1 is consumed — completion isn't known yet, so delivering it
+    // would send a cmd-k the user never meant to send.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Any"));
+    // Chord 2 completes: action fires and the key still goes through.
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&cmd_c, mock_event, "Any"));
+}
+
+test "self-generated events never touch pending sequence state" {
+    // The marker check in handleKeyDown must run before any sequence
+    // handling and must return early without touching sequence_prefix_len.
+    // If it ever moved below sequence handling (or stopped returning
+    // early), a forward of `cmd - q, cmd - q`'s own trigger would re-enter
+    // the tap, match the sequence's own first chord, go pending, and the
+    // app would never receive the keypress.
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\cmd - q, cmd - q : echo quit
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    const cmd_q = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_Q };
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Any"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+
+    // A mock pointer can't carry kCGEventSourceUserData, so this needs a
+    // real CGEvent mirroring forwardKey's own construction.
+    const marked = c.CGEventCreateKeyboardEvent(null, c.kVK_ANSI_Q, true);
+    defer c.CFRelease(marked);
+    c.CGEventSetFlags(marked, c.kCGEventFlagMaskCommand);
+    c.CGEventSetIntegerValueField(marked, c.kCGEventSourceUserData, SKHD_EVENT_MARKER);
+
+    const returned = try skhd.handleKeyDown(marked);
+    // Passed through untouched, and the prefix is exactly as it was.
+    try std.testing.expectEqual(marked, returned);
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+
+    // The prefix length alone can coincidentally read as 1 even if the
+    // marked event above WAS processed as a phantom chord (mismatch on
+    // process -> cancel -> re-match as a fresh pending first chord also
+    // lands on length 1). The real tell is whether the *originally*
+    // pending sequence (captured under process "Any") can still be
+    // completed afterward. If the marker check ran after sequence
+    // handling, the marked event's carbon_event process ("unknown" in
+    // tests) would not match "Any", cancelling and restarting the
+    // sequence under process "unknown" instead — so this completing
+    // press from "Any" would mismatch *again* and merely go pending a
+    // second time (prefix_len == 1), rather than complete (prefix_len == 0).
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Any"));
     try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
 }
 

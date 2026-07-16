@@ -1317,7 +1317,7 @@ test "Unbound action - with passthrough" {
     const entry = it.next().?;
     const hotkey = entry.key_ptr.*;
 
-    try testing.expect(hotkey.flags.passthrough);
+    try testing.expect(hotkey.passthrough);
     if (hotkey.find_command_for_process("*")) |cmd| {
         try testing.expect(cmd == .unbound);
     }

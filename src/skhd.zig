@@ -1428,7 +1428,7 @@ inline fn processMatchedHotkey(self: *Skhd, hotkey: *Hotkey, eventkey: *const Ho
                 log.debug("Executing command '{s}' for process {s}", .{ cmd, process_name });
                 self.tracer.traceCommandExecuted();
                 try forkAndExec(self.mappings.shell, cmd, self.verbose);
-                return if (hotkey.flags.passthrough) .passthrough else .consumed;
+                return if (hotkey.passthrough) .passthrough else .consumed;
             },
             .unbound => {
                 log.debug("Unbound key for process {s}", .{process_name});

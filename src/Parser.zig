@@ -305,7 +305,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     }
 
     if (self.match(.Token_Arrow)) {
-        hotkey.flags = hotkey.flags.merge(.{ .passthrough = true });
+        hotkey.passthrough = true;
     }
 
     if (self.match(.Token_Activate)) {
@@ -2948,7 +2948,7 @@ test "mouse button - parses as a literal with synthetic keycode" {
             try std.testing.expect(!hk.flags.@"fn");
         } else if (hk.key == Keycodes.mouseButtonCode(3)) {
             saw_m3 = true;
-            try std.testing.expect(hk.flags.passthrough);
+            try std.testing.expect(hk.passthrough);
             try std.testing.expect(!hk.flags.nx);
         }
     }

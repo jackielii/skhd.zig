@@ -16,6 +16,10 @@ pub const ProcessCommandError = error{
 allocator: std.mem.Allocator,
 flags: ModifierFlag = .{},
 key: u32 = 0,
+/// `->`: run the action but still deliver the keypress. A property of
+/// the binding, not of any one chord — Task 2 makes `flags` per-chord,
+/// and passthrough must not live inside chord 0's modifier set.
+passthrough: bool = false,
 wildcard_command: ?ProcessCommand = null,
 // Use ArrayHashMap for process name -> command mapping
 mappings: std.StringArrayHashMapUnmanaged(ProcessCommand) = .empty,

@@ -256,15 +256,14 @@ fn handleProcessError(self: *Parser, err: anyerror, process_name: []const u8, op
 }
 
 fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
-    var hotkey = try Hotkey.create(self.allocator);
-    var hotkey_owned = true;
-    errdefer if (hotkey_owned) hotkey.destroy();
+    var modes: std.ArrayListUnmanaged(*Mode) = .empty;
+    defer modes.deinit(self.allocator);
 
     if (self.match(.Token_Identifier)) {
-        try self.parse_mode(mappings, hotkey);
+        try self.parse_mode(mappings, &modes);
     }
 
-    if (hotkey.mode_list.count() > 0) {
+    if (modes.items.len > 0) {
         if (!self.match(.Token_Insert)) {
             const token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '<' after mode identifier", self.current_file_path);
@@ -278,22 +277,14 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
             return error.ParseErrorOccurred;
         } orelse unreachable;
-        hotkey.add_mode(default_mode) catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "Failed to add default mode to hotkey: {s}", .{@errorName(err)});
-            defer self.allocator.free(msg);
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
-            return error.ParseErrorOccurred;
-        };
+        try modes.append(self.allocator, default_mode);
     }
 
-    const first_chord = try self.parse_keypress();
-    hotkey.flags = first_chord.flags;
-    hotkey.key = first_chord.key;
-
+    // Chords are parsed before the hotkey exists: Hotkey.create enforces
+    // len >= 1 structurally, so it cannot be constructed empty.
     var chords: std.ArrayListUnmanaged(Hotkey.KeyPress) = .empty;
     defer chords.deinit(self.allocator);
-    try chords.append(self.allocator, first_chord);
+    try chords.append(self.allocator, try self.parse_keypress());
     while (self.match(.Token_Comma)) {
         const comma = self.previous();
         const chord = self.parse_keypress() catch |err| {
@@ -302,6 +293,19 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             return err;
         };
         try chords.append(self.allocator, chord);
+    }
+
+    var hotkey = try Hotkey.create(self.allocator, chords.items);
+    var hotkey_owned = true;
+    errdefer if (hotkey_owned) hotkey.destroy();
+    for (modes.items) |mode| {
+        hotkey.add_mode(mode) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ mode.name, @errorName(err) });
+            defer self.allocator.free(msg);
+            const token = self.peek() orelse self.previous();
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        };
     }
 
     if (self.match(.Token_Arrow)) {
@@ -361,7 +365,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         if (err == error.DuplicateHotkeyInMode) {
             // Format the hotkey for the error message
             var buf: [256]u8 = undefined;
-            const key_str = try Keycodes.formatKeyPressBuffer(&buf, hotkey.flags, hotkey.key);
+            const key_str = try Keycodes.formatKeyPressBuffer(&buf, hotkey.chords[0].flags, hotkey.chords[0].key);
 
             // Get the mode(s) where we're trying to add this hotkey
             var mode_names: std.ArrayList(u8) = .empty;
@@ -392,7 +396,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
     };
 }
 
-fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
+fn parse_mode(self: *Parser, mappings: *Mappings, modes: *std.ArrayListUnmanaged(*Mode)) !void {
     const token: Token = self.previous();
     assert(token.type == .Token_Identifier);
 
@@ -408,15 +412,18 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
         return error.ParseErrorOccurred;
     };
-    hotkey.add_mode(mode) catch |err| {
-        const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ name, @errorName(err) });
-        defer self.allocator.free(msg);
-        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
-        return error.ParseErrorOccurred;
-    };
+    for (modes.items) |existing| {
+        if (existing == mode) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Mode '{s}' listed twice", .{name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+    }
+    try modes.append(self.allocator, mode);
     if (self.match(.Token_Comma)) {
         if (self.match(.Token_Identifier)) {
-            try self.parse_mode(mappings, hotkey);
+            try self.parse_mode(mappings, modes);
         } else {
             const error_token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, error_token, "Expected mode identifier after comma", self.current_file_path);
@@ -2000,7 +2007,7 @@ test "load directive shares aliases with included files" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .control = true, .shift = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "config duplicate detection allows disjoint side-specific modifiers" {
@@ -2719,7 +2726,7 @@ test "modifier alias - basic definition and use" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .control = true, .shift = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "modifier alias - combined with extra modifiers" {
@@ -2739,7 +2746,7 @@ test "modifier alias - combined with extra modifiers" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .shift = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "modifier alias - nested alias" {
@@ -2760,7 +2767,7 @@ test "modifier alias - nested alias" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .shift = true, .control = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "modifier alias - undefined alias errors" {
@@ -2825,9 +2832,9 @@ test "key alias - hex code in key position" {
     const default = mappings.mode_map.get("default").?;
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
-    try std.testing.expectEqual(@as(u32, 0x32), hk.key);
+    try std.testing.expectEqual(@as(u32, 0x32), hk.chords[0].key);
     const expected = ModifierFlag{ .control = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "key alias - literal carries implicit flags (e.g., delete -> fn)" {
@@ -2847,8 +2854,8 @@ test "key alias - literal carries implicit flags (e.g., delete -> fn)" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     // delete is a fn-implicit literal; flags should include both cmd and fn
-    try std.testing.expect(hk.flags.cmd);
-    try std.testing.expect(hk.flags.@"fn");
+    try std.testing.expect(hk.chords[0].flags.cmd);
+    try std.testing.expect(hk.chords[0].flags.@"fn");
 }
 
 test "key alias - standalone without modifiers" {
@@ -2917,7 +2924,7 @@ test "alias - key alias inherits kind from referenced alias" {
     const default = mappings.mode_map.get("default").?;
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
-    try std.testing.expectEqual(@as(u32, 0x32), hk.key);
+    try std.testing.expectEqual(@as(u32, 0x32), hk.chords[0].key);
 }
 
 test "mouse button - parses as a literal with synthetic keycode" {
@@ -2940,16 +2947,16 @@ test "mouse button - parses as a literal with synthetic keycode" {
     var it = default.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hk = entry.key_ptr.*;
-        if (hk.key == Keycodes.mouseButtonCode(1)) {
+        if (hk.chords[0].key == Keycodes.mouseButtonCode(1)) {
             saw_m1 = true;
-            try std.testing.expect(hk.flags.cmd);
+            try std.testing.expect(hk.chords[0].flags.cmd);
             // Mouse buttons must NOT pick up the implicit nx flag.
-            try std.testing.expect(!hk.flags.nx);
-            try std.testing.expect(!hk.flags.@"fn");
-        } else if (hk.key == Keycodes.mouseButtonCode(3)) {
+            try std.testing.expect(!hk.chords[0].flags.nx);
+            try std.testing.expect(!hk.chords[0].flags.@"fn");
+        } else if (hk.chords[0].key == Keycodes.mouseButtonCode(3)) {
             saw_m3 = true;
             try std.testing.expect(hk.passthrough);
-            try std.testing.expect(!hk.flags.nx);
+            try std.testing.expect(!hk.chords[0].flags.nx);
         }
     }
     try std.testing.expect(saw_m1);

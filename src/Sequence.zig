@@ -36,9 +36,9 @@ pub fn matchesStep(self: *const Sequence, index: usize, eventkey: Hotkey.KeyPres
 }
 
 pub fn chordOverlapsHotkey(chord: Hotkey.KeyPress, hotkey: *const Hotkey) bool {
-    if (chord.key != hotkey.key) return false;
-    return Hotkey.hotkeyFlagsMatch(chord.flags, hotkey.flags) or
-        Hotkey.hotkeyFlagsMatch(hotkey.flags, chord.flags);
+    if (chord.key != hotkey.chords[0].key) return false;
+    return Hotkey.hotkeyFlagsMatch(chord.flags, hotkey.chords[0].flags) or
+        Hotkey.hotkeyFlagsMatch(hotkey.chords[0].flags, chord.flags);
 }
 
 pub fn onePrefixesOther(a: *const Sequence, b: *const Sequence) bool {
@@ -136,7 +136,7 @@ test "sequence owns chords and matches complete steps" {
         .{ .flags = .{ .cmd = true }, .key = 0x0C },
         .{ .flags = .{ .cmd = true }, .key = 0x0C },
     };
-    var action = try Hotkey.create(std.testing.allocator);
+    var action = try Hotkey.create(std.testing.allocator, &.{.{ .flags = .{}, .key = 0 }});
     errdefer action.destroy();
     var sequence = try Sequence.create(std.testing.allocator, &chords, action);
     defer sequence.destroy();
@@ -151,13 +151,13 @@ test "matcher filters by process and narrows a shared prefix" {
     const comment = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x08 };
     const uncomment = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x20 };
 
-    var comment_action = try Hotkey.create(alloc);
+    var comment_action = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     errdefer comment_action.destroy();
     try comment_action.add_process_command("Code", "comment");
     var comment_sequence = try Sequence.create(alloc, &.{ prefix, comment }, comment_action);
     defer comment_sequence.destroy();
 
-    var uncomment_action = try Hotkey.create(alloc);
+    var uncomment_action = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     errdefer uncomment_action.destroy();
     try uncomment_action.add_process_command("Code", "uncomment");
     var uncomment_sequence = try Sequence.create(alloc, &.{ prefix, uncomment }, uncomment_action);
@@ -177,7 +177,7 @@ test "matcher filters by process and narrows a shared prefix" {
 test "matcher reports mismatch and process change" {
     const alloc = std.testing.allocator;
     const first = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
-    var action = try Hotkey.create(alloc);
+    var action = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     errdefer action.destroy();
     try action.add_process_command("Protected App", "quit");
     var sequence = try Sequence.create(alloc, &.{ first, first }, action);

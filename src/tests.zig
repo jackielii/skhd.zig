@@ -62,42 +62,33 @@ test "Hotkey creation and equality" {
     const allocator = testing.allocator;
 
     // Create two identical hotkeys
-    var hotkey1 = try Hotkey.create(allocator);
+    var hotkey1 = try Hotkey.create(allocator, &.{.{ .flags = ModifierFlag{ .cmd = true }, .key = 0x31 }}); // '1' key
     defer hotkey1.destroy();
-    hotkey1.key = 0x31; // '1' key
-    hotkey1.flags = ModifierFlag{ .cmd = true };
 
-    var hotkey2 = try Hotkey.create(allocator);
+    var hotkey2 = try Hotkey.create(allocator, &.{.{ .flags = ModifierFlag{ .cmd = true }, .key = 0x31 }}); // '1' key
     defer hotkey2.destroy();
-    hotkey2.key = 0x31; // '1' key
-    hotkey2.flags = ModifierFlag{ .cmd = true };
 
     // Test equality
     try testing.expect(Hotkey.eql(hotkey1, hotkey2));
 
-    // Change one and test inequality
-    hotkey2.key = 0x32; // '2' key
-    try testing.expect(!Hotkey.eql(hotkey1, hotkey2));
+    // A different key means inequality
+    var hotkey3 = try Hotkey.create(allocator, &.{.{ .flags = ModifierFlag{ .cmd = true }, .key = 0x32 }}); // '2' key
+    defer hotkey3.destroy();
+    try testing.expect(!Hotkey.eql(hotkey1, hotkey3));
 }
 
 test "Hotkey left/right modifier comparison" {
     const allocator = testing.allocator;
 
     // Test that general modifier matches specific modifiers
-    var general_cmd = try Hotkey.create(allocator);
+    var general_cmd = try Hotkey.create(allocator, &.{.{ .flags = ModifierFlag{ .cmd = true }, .key = 0x31 }});
     defer general_cmd.destroy();
-    general_cmd.key = 0x31;
-    general_cmd.flags = ModifierFlag{ .cmd = true };
 
-    var left_cmd = try Hotkey.create(allocator);
+    var left_cmd = try Hotkey.create(allocator, &.{.{ .flags = ModifierFlag{ .lcmd = true }, .key = 0x31 }});
     defer left_cmd.destroy();
-    left_cmd.key = 0x31;
-    left_cmd.flags = ModifierFlag{ .lcmd = true };
 
-    var right_cmd = try Hotkey.create(allocator);
+    var right_cmd = try Hotkey.create(allocator, &.{.{ .flags = ModifierFlag{ .rcmd = true }, .key = 0x31 }});
     defer right_cmd.destroy();
-    right_cmd.key = 0x31;
-    right_cmd.flags = ModifierFlag{ .rcmd = true };
 
     // General modifier should NOT match specific modifiers in config comparison
     // (This is different from keyboard event matching)
@@ -223,13 +214,13 @@ test "Left/right modifier parsing" {
 
     while (hotkey_iter.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.flags.lcmd and !hotkey.flags.rcmd and !hotkey.flags.cmd) {
+        if (hotkey.chords[0].flags.lcmd and !hotkey.chords[0].flags.rcmd and !hotkey.chords[0].flags.cmd) {
             found_lcmd = true;
         }
-        if (hotkey.flags.rcmd and !hotkey.flags.lcmd and !hotkey.flags.cmd) {
+        if (hotkey.chords[0].flags.rcmd and !hotkey.chords[0].flags.lcmd and !hotkey.chords[0].flags.cmd) {
             found_rcmd = true;
         }
-        if (hotkey.flags.lalt and hotkey.flags.rshift) {
+        if (hotkey.chords[0].flags.lalt and hotkey.chords[0].flags.rshift) {
             found_mixed = true;
         }
     }
@@ -665,8 +656,8 @@ test "modifier matching - general modifiers match specific ones" {
         const found = skhd.findHotkeyInMode(&mode, keyboard_key);
 
         try testing.expect(found != null);
-        try testing.expect(found.?.flags.alt);
-        try testing.expect(!found.?.flags.lalt);
+        try testing.expect(found.?.chords[0].flags.alt);
+        try testing.expect(!found.?.chords[0].flags.lalt);
     }
 
     // Test 2: Config "lalt - b" should NOT be found with keyboard "ralt - b"
@@ -693,8 +684,8 @@ test "modifier matching - general modifiers match specific ones" {
         const found = skhd.findHotkeyInMode(&mode, keyboard_key);
 
         try testing.expect(found != null);
-        try testing.expect(found.?.flags.cmd);
-        try testing.expect(found.?.flags.shift);
+        try testing.expect(found.?.chords[0].flags.cmd);
+        try testing.expect(found.?.chords[0].flags.shift);
     }
 }
 
@@ -732,12 +723,12 @@ test "keyboard lalt should match config alt" {
             var it = mode.hotkey_map.iterator();
             while (it.next()) |entry| {
                 const hotkey = entry.key_ptr.*;
-                std.debug.print("  config hotkey: flags={any}, key={d}\n", .{ hotkey.flags, hotkey.key });
+                std.debug.print("  config hotkey: flags={any}, key={d}\n", .{ hotkey.chords[0].flags, hotkey.chords[0].key });
             }
         }
         try testing.expect(found != null);
-        try testing.expect(found.?.flags.alt);
-        try testing.expect(!found.?.flags.lalt);
+        try testing.expect(found.?.chords[0].flags.alt);
+        try testing.expect(!found.?.chords[0].flags.lalt);
     }
 
     // Also test ralt should match
@@ -751,8 +742,8 @@ test "keyboard lalt should match config alt" {
         const found = mode.hotkey_map.getKeyAdapted(keyboard_key, ctx);
 
         try testing.expect(found != null);
-        try testing.expect(found.?.flags.alt);
-        try testing.expect(!found.?.flags.ralt);
+        try testing.expect(found.?.chords[0].flags.alt);
+        try testing.expect(!found.?.chords[0].flags.ralt);
     }
 
     // And general alt should also match
@@ -766,7 +757,7 @@ test "keyboard lalt should match config alt" {
         const found = mode.hotkey_map.getKeyAdapted(keyboard_key, ctx);
 
         try testing.expect(found != null);
-        try testing.expect(found.?.flags.alt);
+        try testing.expect(found.?.chords[0].flags.alt);
     }
 }
 
@@ -774,7 +765,7 @@ test "find_command_for_process function with process matching" {
     const allocator = std.testing.allocator;
 
     // Create a hotkey with some process names
-    var hotkey = try Hotkey.create(allocator);
+    var hotkey = try Hotkey.create(allocator, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     try hotkey.add_process_command("chrome", "echo chrome");
@@ -858,13 +849,13 @@ test "multiple process groups and reuse" {
 
         // Check if terminal apps have unbound action
         if (hotkey.find_command_for_process("kitty")) |cmd| {
-            if (hotkey.key == 0x33 or hotkey.key == 0x7B) { // backspace or left
+            if (hotkey.chords[0].key == 0x33 or hotkey.chords[0].key == 0x7B) { // backspace or left
                 try testing.expect(cmd == .unbound);
             }
         }
 
         // Check if chrome has unbound action for home key
-        if (hotkey.key == 0x73) { // home
+        if (hotkey.chords[0].key == 0x73) { // home
             if (hotkey.find_command_for_process("chrome")) |cmd| {
                 try testing.expect(cmd == .unbound);
             }
@@ -906,11 +897,11 @@ test "Command definitions - single placeholder" {
         // Since these hotkeys don't have process-specific mappings, they should have wildcard commands
         const cmd = hotkey.find_command_for_process("*");
 
-        if (hotkey.key == 4) { // 'h' key
+        if (hotkey.chords[0].key == 4) { // 'h' key
             try testing.expect(cmd != null);
             try testing.expectEqualStrings("yabai -m window --focus west", cmd.?.command);
             hotkey_count += 1;
-        } else if (hotkey.key == 37) { // 'l' key
+        } else if (hotkey.chords[0].key == 37) { // 'l' key
             try testing.expect(cmd != null);
             try testing.expectEqualStrings("yabai -m window --focus east", cmd.?.command);
             hotkey_count += 1;
@@ -1236,7 +1227,7 @@ test "Unbound action - simple syntax" {
     var found_unbound = false;
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.key == 0x00) { // a key
+        if (hotkey.chords[0].key == 0x00) { // a key
             found_unbound = true;
             // Check it has unbound command
             if (hotkey.find_command_for_process("*")) |cmd| {
@@ -1272,7 +1263,7 @@ test "Unbound action - with modes" {
     var it = test_mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.key == 0x07) { // x key
+        if (hotkey.chords[0].key == 0x07) { // x key
             found_mode_unbound = true;
             if (hotkey.find_command_for_process("*")) |cmd| {
                 try testing.expect(cmd == .unbound);
@@ -1287,7 +1278,7 @@ test "Unbound action - with modes" {
     it = default_mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.key == 0x06) { // z key
+        if (hotkey.chords[0].key == 0x06) { // z key
             found_default_unbound = true;
             if (hotkey.find_command_for_process("*")) |cmd| {
                 try testing.expect(cmd == .unbound);
@@ -1349,11 +1340,11 @@ test "Unbound action - mixed with process lists" {
     var it = default_mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.key == 0x31) { // space key
+        if (hotkey.chords[0].key == 0x31) { // space key
             if (hotkey.find_command_for_process("*")) |cmd| {
                 try testing.expect(cmd == .unbound);
             }
-        } else if (hotkey.key == 0x30) { // tab key
+        } else if (hotkey.chords[0].key == 0x30) { // tab key
             // Check terminal is unbound
             if (hotkey.find_command_for_process("terminal")) |cmd| {
                 try testing.expect(cmd == .unbound);
@@ -1394,7 +1385,7 @@ test "mode activation uses activation variant" {
     var found_activation = false;
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.key == 0x0D and hotkey.flags.cmd) { // cmd - w
+        if (hotkey.chords[0].key == 0x0D and hotkey.chords[0].flags.cmd) { // cmd - w
             const process_cmd = hotkey.find_command_for_process("*");
             try std.testing.expect(process_cmd != null);
             switch (process_cmd.?) {
@@ -1437,7 +1428,7 @@ test "mode activation with command" {
 
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.key == 0x0D and hotkey.flags.cmd) { // cmd - w
+        if (hotkey.chords[0].key == 0x0D and hotkey.chords[0].flags.cmd) { // cmd - w
             const process_cmd = hotkey.find_command_for_process("*");
             try std.testing.expect(process_cmd != null);
             switch (process_cmd.?) {
@@ -1449,7 +1440,7 @@ test "mode activation with command" {
                 },
                 else => return error.WrongCommandType,
             }
-        } else if (hotkey.key == 0x35) { // escape
+        } else if (hotkey.chords[0].key == 0x35) { // escape
             const process_cmd = hotkey.find_command_for_process("*");
             try std.testing.expect(process_cmd != null);
             switch (process_cmd.?) {
@@ -1492,7 +1483,7 @@ test "mode activation with command reference" {
     var found_activation = false;
     while (it.next()) |entry| {
         const hotkey = entry.key_ptr.*;
-        if (hotkey.key == 0x0D and hotkey.flags.cmd) { // cmd - w
+        if (hotkey.chords[0].key == 0x0D and hotkey.chords[0].flags.cmd) { // cmd - w
             const process_cmd = hotkey.find_command_for_process("*");
             try std.testing.expect(process_cmd != null);
             switch (process_cmd.?) {
@@ -1538,7 +1529,7 @@ test "mode activation in process list" {
     var hotkey: ?*Hotkey = null;
     while (it.next()) |entry| {
         const hk = entry.key_ptr.*;
-        if (hk.key == 0x2E) { // m key
+        if (hk.chords[0].key == 0x2E) { // m key
             hotkey = hk;
             break;
         }
@@ -1622,14 +1613,14 @@ test "process group command reference parsing" {
     var it = default_mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hk = entry.key_ptr.*;
-        if (hk.key == 0x00 and hk.flags.cmd) { // A key
+        if (hk.chords[0].key == 0x00 and hk.chords[0].flags.cmd) { // A key
             // Check firefox mapping
             const firefox_cmd = hk.find_command_for_process("firefox").?.command;
             try std.testing.expectEqualStrings("echo \"hello\"", firefox_cmd);
             // Check chrome mapping
             const chrome_cmd = hk.find_command_for_process("chrome").?.command;
             try std.testing.expectEqualStrings("echo \"hello\"", chrome_cmd);
-        } else if (hk.key == 0x0B and hk.flags.cmd) { // B key
+        } else if (hk.chords[0].key == 0x0B and hk.chords[0].flags.cmd) { // B key
             // Check that @ symbol is preserved in regular command
             const firefox_cmd = hk.find_command_for_process("firefox").?.command;
             try std.testing.expectEqualStrings("echo @not_a_reference", firefox_cmd);
@@ -1667,9 +1658,9 @@ test "empty command token with reference" {
     var it = default_mode.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hk = entry.key_ptr.*;
-        if (hk.key == 0x00 and hk.flags.cmd) { // A key
+        if (hk.chords[0].key == 0x00 and hk.chords[0].flags.cmd) { // A key
             cmd_a = hk.wildcard_command.?.command;
-        } else if (hk.key == 0x0B and hk.flags.cmd) { // B key
+        } else if (hk.chords[0].key == 0x0B and hk.chords[0].flags.cmd) { // B key
             cmd_b = hk.wildcard_command.?.command;
         }
     }
@@ -1774,7 +1765,7 @@ test "mode activation with process groups" {
     var hotkey: ?*Hotkey = null;
     while (it.next()) |entry| {
         const hk = entry.key_ptr.*;
-        if (hk.key == 0x2E) { // m key
+        if (hk.chords[0].key == 0x2E) { // m key
             hotkey = hk;
             break;
         }
@@ -1845,7 +1836,7 @@ test "NX media key forwarding" {
         const hotkey = entry.key_ptr.*;
 
         // delete in skhd config maps to kVK_ForwardDelete = 117 (0x75)
-        if (hotkey.key == 0x75) {
+        if (hotkey.chords[0].key == 0x75) {
             // delete | next
             const cmd = hotkey.find_command_for_process("*");
             try std.testing.expect(cmd != null);
@@ -1854,7 +1845,7 @@ test "NX media key forwarding" {
             try std.testing.expect(cmd.?.forwarded.key == c.NX_KEYTYPE_NEXT);
             try std.testing.expect(cmd.?.forwarded.flags.nx == true);
             found_delete = true;
-        } else if (hotkey.key == 0x2A) {
+        } else if (hotkey.chords[0].key == 0x2A) {
             // backslash | previous
             const cmd = hotkey.find_command_for_process("*");
             try std.testing.expect(cmd != null);
@@ -1863,7 +1854,7 @@ test "NX media key forwarding" {
             try std.testing.expect(cmd.?.forwarded.key == c.NX_KEYTYPE_PREVIOUS);
             try std.testing.expect(cmd.?.forwarded.flags.nx == true);
             found_backslash = true;
-        } else if (hotkey.key == 0x23 and hotkey.flags.cmd) {
+        } else if (hotkey.chords[0].key == 0x23 and hotkey.chords[0].flags.cmd) {
             // cmd - p | play
             const cmd = hotkey.find_command_for_process("*");
             try std.testing.expect(cmd != null);

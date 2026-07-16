@@ -1907,7 +1907,7 @@ test "non-capture mode: wildcard does NOT fire" {
 test "sequence dispatch starts only for an applicable process and completes" {
     const alloc = std.testing.allocator;
     const chord = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
-    var action = try Hotkey.create(alloc);
+    var action = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     errdefer action.destroy();
     try action.add_process_command("Protected App", "quit");
     var sequence = try Sequence.create(alloc, &.{ chord, chord }, action);

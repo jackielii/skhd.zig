@@ -108,7 +108,7 @@ test "init" {
     var mode = try Mode.init(alloc, "default");
     defer mode.deinit();
 
-    var key = try Hotkey.create(alloc);
+    var key = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer key.destroy();
     try key.add_process_command("notepad.exe", "echo notepad");
     try key.add_mode(&mode);

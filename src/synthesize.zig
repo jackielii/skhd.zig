@@ -45,18 +45,18 @@ pub fn synthesizeKey(allocator: std.mem.Allocator, io: std.Io, key_string: []con
             _ = c.CGEnableEventStateCombining(false);
 
             // Press modifiers down
-            synthesizeModifiers(hotkey.flags, true);
+            synthesizeModifiers(hotkey.chords[0].flags, true);
 
             // Press the main key down
-            createAndPostKeyEvent(@intCast(hotkey.key), true);
+            createAndPostKeyEvent(@intCast(hotkey.chords[0].key), true);
 
             // Release the main key
-            createAndPostKeyEvent(@intCast(hotkey.key), false);
+            createAndPostKeyEvent(@intCast(hotkey.chords[0].key), false);
 
             // Release modifiers
-            synthesizeModifiers(hotkey.flags, false);
+            synthesizeModifiers(hotkey.chords[0].flags, false);
 
-            std.log.scoped(.synthesize).debug("Synthesized key: {any} + {s}", .{ hotkey.flags, Keycodes.getKeyString(hotkey.key) });
+            std.log.scoped(.synthesize).debug("Synthesized key: {any} + {s}", .{ hotkey.chords[0].flags, Keycodes.getKeyString(hotkey.chords[0].key) });
         } else {
             std.debug.print("Error: Failed to parse key specification: {s}\n", .{key_string});
         }

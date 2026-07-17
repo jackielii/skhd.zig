@@ -81,65 +81,49 @@ cmd - q, cmd - q : echo "double Cmd-Q"
 cmd - k, cmd - c, alt - q : echo "three-chord sequence"
 ```
 
-Every chord declares its own complete modifier set — modifiers are never
-inherited from the previous chord. Consecutive chords must arrive within
-300ms of each other or the pending prefix expires; `.sequence_timeout`
-changes that budget. Modifier transitions themselves are not sequence steps,
-so modifiers may be released and pressed again between chords, as long as
-each chord's own modifiers are present when that chord's key goes down.
+Every chord declares its own complete modifiers — nothing is inherited from
+the previous chord. Modifiers may be released and re-pressed between chords,
+as long as each chord's own modifiers are down when its key goes down.
 
 ```
 .sequence_timeout 500ms     # default 300ms; also accepts `500` or `1s`
 ```
 
-The budget applies between each pair of chords, not to the sequence as a
-whole, and is global — every sequence shares it. The value must be greater
-than zero, since `0` would expire every prefix instantly while still
-swallowing its first chord.
+Applies between each pair of chords, not to the sequence as a whole. Global,
+and must be greater than zero.
 
 ### Fallback: a shorter binding under a sequence
 
-A binding may be both complete on its own and the prefix of a longer
-sequence. When the sequence doesn't complete, the shorter binding fires:
+Like Vim's `timeoutlen`: a binding can be both a command and the prefix of a
+longer one. If the sequence doesn't complete, the shorter one fires.
 
 ```
-lcmd - k : yabai -m window --focus north     # everywhere
+lcmd - k : yabai -m window --focus north
 cmd - k, cmd - k [
-    "Google Chrome" | cmd - k                # Chrome's own Cmd-K
+    "Google Chrome" | cmd - k
 ]
 ```
 
-In Chrome, one `Cmd-K` runs the yabai command once the timeout expires; two
-in quick succession send Chrome its own `Cmd-K`. In every other application
-`Cmd-K` fires yabai **immediately** — the sequence isn't applicable there, so
-there is no longer match to wait for. That is how a global binding and an
-application's native shortcut can share one chord.
+| press | in Chrome | elsewhere |
+| --- | --- | --- |
+| `Cmd-K` | yabai, after the timeout | yabai, **instantly** |
+| `Cmd-K` `Cmd-K` | Chrome's own Cmd-K | — |
 
-**This is Vim's `timeoutlen`.** Vim lets `j` be both a command and the prefix
-of `jk`: press `j` alone and it waits, then runs the shorter match. Two
-differences are worth knowing:
+Only Chrome waits: the sequence doesn't apply elsewhere, so there's nothing
+to wait for. That's how a global binding and an app's native shortcut share
+one chord.
 
-- **Vim's wait is unconditional; skhd's is scoped.** The delay exists only
-  where a longer sequence actually applies — above, only in Chrome.
-- **Vim replays the raw keys; skhd fires a declared binding.** skhd never
-  invents an action. The operating system's own `Cmd-Q` is not an skhd
-  binding, so it is never a fallback:
+Unlike Vim, skhd fires a *declared binding*, never the raw key. So a lone
+safety binding still swallows the first press:
 
 ```
 cmd - q, cmd - q [
-    "Protected App" | cmd - q
+    "Protected App" | cmd - q     # nothing shorter -> one Cmd-Q does nothing
 ]
 ```
 
-Nothing shorter is declared, so a single `Cmd-Q` is consumed and discarded —
-the safety binding still protects you. A prefix is only ever replaced by a
-binding you wrote, never by the key itself.
-
-Because a prefix chord is consumed the moment it arrives, `~` and `->` cannot
-be a fallback — by the time it would run, there is no keypress left to pass
-through. A hotkey using either that is also the prefix of a longer sequence
-in the same application scope is a parse error. Use `:` or `|` instead; a
-forward synthesizes a fresh event.
+`~` and `->` can't be a fallback — the chord is consumed when the sequence
+starts, so there's no keypress left to release. Parse error; use `:` or `|`.
 
 An explicit rule claims its chord in whichever application it applies to. A
 chord with no applicable rule for the frontmost application is not consumed,
@@ -181,23 +165,18 @@ ordinary hotkeys.
 
 ### The uniqueness rule
 
-Within a mode, two hotkeys conflict if one's chord list is a prefix of the
-other's (or they're equal length and equal) **and** their process scopes
-overlap — with one exception that scope cannot override: **identical chord
-lists always conflict, regardless of process scope.** `HotkeyMap` keys on
-chords alone (ignoring scope), so two hotkeys with identical chords are the
-same map key; the second `put` would silently discard the first one's
-binding. Rejecting that configuration at parse time is strictly better than
-silently dropping a binding the user wrote.
+Two hotkeys in a mode conflict when the same press could match both:
+**identical chord lists always**, and **equal-length overlapping chords**
+when their process scopes also overlap. Different lengths never conflict —
+the shorter is the longer's [fallback](#fallback-a-shorter-binding-under-a-sequence).
 
 ```skhd
-# ERROR — identical chords, both wildcard-scoped.
+# ERROR — identical chords.
 cmd - a : echo first
 cmd - a : echo second
 
-# ERROR — identical chords. Disjoint apps do NOT help: HotkeyMap keys on
-# chords alone, so the second could only be dropped, never bound. Write
-# this as ONE hotkey with a two-entry process list instead.
+# ERROR — identical chords. Disjoint apps do NOT help: hotkeys are keyed by
+# chords alone, so the second could only be dropped. Use one process list.
 cmd - a [
     "Terminal" : echo terminal
 ]
@@ -205,9 +184,7 @@ cmd - a [
     "Firefox" : echo firefox
 ]
 
-# OK — chords overlap (same physical key) but are not identical (alt vs
-# lalt), and scopes are disjoint. Both are stored as distinct map keys;
-# the lookup picks one by frontmost app.
+# OK — same key, different modifiers (alt vs lalt), disjoint apps.
 alt - a [
     "Terminal" : echo terminal
 ]
@@ -215,7 +192,8 @@ lalt - a [
     "Firefox" : echo firefox
 ]
 
-# ERROR — cmd-q in Terminal would match both entries.
+# OK — different lengths: `echo now` is the fallback. Cmd-Q in Terminal runs
+# it once the timeout expires; twice runs `echo later`.
 cmd - q [
     "Terminal" : echo now
 ]
@@ -223,23 +201,13 @@ cmd - q, cmd - q [
     "Terminal" : echo later
 ]
 
-# OK — different chord lengths, disjoint apps; each press has one answer.
-cmd - q [
-    "Terminal" : echo t
-]
-cmd - q, cmd - q [ "XYZ" | cmd - q ]
-
-# OK — shared incomplete prefix, disambiguated by the second chord.
-cmd - k, cmd - c : echo comment-command
-cmd - k, cmd - u : echo uncomment-command
+# OK — shared prefix, disambiguated by the second chord.
+cmd - k, cmd - c : echo comment
+cmd - k, cmd - u : echo uncomment
 ```
 
-A bare hotkey (no process list) has wildcard process scope, and a wildcard
-scope overlaps every explicit scope — so every duplicate case that is an
-error today stays an error. The rule is more permissive than before in
-exactly one shape: chords that **overlap without being identical** with
-disjoint explicit process lists, as in the `alt - a` / `lalt - a` example
-above.
+A bare hotkey (no process list) has wildcard scope, which overlaps every
+explicit scope.
 
 An expired or mismatched prefix is never replayed — its consumed key events
 stay consumed, which matters for safety bindings like `cmd-q` where delayed

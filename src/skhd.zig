@@ -861,7 +861,7 @@ fn cancelPendingSequence(self: *Skhd) void {
 /// rather than a placeholder.
 fn fireDeferred(self: *Skhd, hotkey: *Hotkey, process_name: []const u8) !HotkeyResult {
     const eventkey = hotkey.chords[0];
-    return self.processMatchedHotkey(hotkey, &eventkey, @ptrFromInt(0), process_name, false);
+    return self.processMatchedHotkey(hotkey, &eventkey, null, process_name, false);
 }
 
 fn sequenceTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
@@ -1368,7 +1368,7 @@ pub inline fn findWildcardHotkey(_: *Skhd, mode: *const Mode, eventkey: Hotkey.K
 
 /// Process a hotkey - single lookup that handles both forwarding and execution
 inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !HotkeyResult {
-    const mode = self.current_mode orelse return .not_found;
+    if (self.current_mode == null) return .not_found;
     self.tracer.traceHotkeyLookup();
 
     // A sequence cannot begin in one application and finish in another.
@@ -1379,6 +1379,12 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
     // retries this chord from the root, where the prefix is empty and the
     // retry branch is therefore unreachable.
     while (true) {
+        // Re-read per iteration: the mismatch path fires the deferred
+        // fallback before retrying, and a `; mode` activation reassigns
+        // current_mode. A mode captured before the loop would send the retry
+        // to the old mode's map, making the same two keys resolve differently
+        // depending on whether the timeout beat the user to the second chord.
+        const mode = self.current_mode orelse return .not_found;
         const prefix = self.buildPrefix(eventkey.*);
 
         // A complete match: fire it now, or defer it as the fallback if a
@@ -1402,10 +1408,14 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
             null;
 
         if (longer != null) {
-            // Pending. `exact` (possibly null) becomes the fallback: don't
-            // throw the first press away if there is something to do with it.
+            // Pending. Remember the most specific complete match SEEN so far:
+            // only overwrite when this depth has one. A deeper prefix with no
+            // exact match must not erase a shallower fallback — with
+            // `lcmd - k` and a three-chord sequence but no two-chord binding,
+            // stalling at two chords would otherwise silently drop yabai,
+            // while `k` then an unrelated key still fires it.
             self.commitPrefix(prefix, process_name);
-            self.sequence_deferred = exact;
+            if (exact) |hit| self.sequence_deferred = hit;
             self.startSequenceTimer();
             self.tracer.traceHotkeyFound(true);
             return .consumed;
@@ -1441,7 +1451,14 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
         if (self.sequence_prefix_len > 0) {
             const deferred = self.sequence_deferred;
             self.cancelPendingSequence();
-            if (deferred) |hk| _ = try self.fireDeferred(hk, process_name);
+            if (deferred) |hk| {
+                // Log and carry on, matching the timer path: a fallback that
+                // fails to fork must not also swallow the chord that ended the
+                // sequence.
+                _ = self.fireDeferred(hk, process_name) catch |err| {
+                    log.err("sequence fallback failed: {s}", .{@errorName(err)});
+                };
+            }
             continue;
         }
 
@@ -1921,23 +1938,14 @@ test "processHotkey respects passthrough in capture mode" {
 test "shorter binding defers while a longer sequence is applicable" {
     const alloc = std.testing.allocator;
 
-    // `~` keeps results observable without forking a shell: a pending chord
-    // reports .consumed, a fired one .passthrough.
-    const config =
-        \\lcmd - k ~
-        \\cmd - k, cmd - k [
-        \\    "Google Chrome" : echo chrome
-        \\]
-    ;
-    _ = config;
-
-    // `~` cannot be a fallback (nothing left to pass through), so use a
-    // command for the shorter binding and a forward for the sequence.
     var threaded: std.Io.Threaded = .init(alloc, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    // `~` cannot be a fallback (nothing left to pass through), so the shorter
+    // binding forwards instead — forwardKey no-ops under test, which keeps
+    // this from fork+exec'ing a shell the way a `:` command would.
     var skhd = try createTestSkhdFromConfig(alloc, io,
-        \\lcmd - k : echo yabai
+        \\lcmd - k | f19
         \\cmd - k, cmd - k [
         \\    "Google Chrome" | cmd - k
         \\]
@@ -1964,7 +1972,7 @@ test "shorter binding fires instantly where the sequence does not apply" {
     defer threaded.deinit();
     const io = threaded.io();
     var skhd = try createTestSkhdFromConfig(alloc, io,
-        \\lcmd - k : echo yabai
+        \\lcmd - k | f19
         \\cmd - k, cmd - k [
         \\    "Google Chrome" | cmd - k
         \\]
@@ -2009,7 +2017,7 @@ test "mismatch fires the deferred fallback and still delivers the chord" {
     defer threaded.deinit();
     const io = threaded.io();
     var skhd = try createTestSkhdFromConfig(alloc, io,
-        \\lcmd - k : echo yabai
+        \\lcmd - k | f19
         \\cmd - k, cmd - k [
         \\    "Google Chrome" | cmd - k
         \\]
@@ -2028,6 +2036,66 @@ test "mismatch fires the deferred fallback and still delivers the chord" {
     try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&alt_z, mock_event, "Google Chrome"));
     try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
     try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "deferred fallback survives a prefix depth with no exact match" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // A ladder with a hole: there is no two-chord binding, so depth 2 has no
+    // exact match. The depth-1 fallback must survive rather than be erased —
+    // otherwise a triple-tap that stalls at two chords silently loses the
+    // yabai action, while `k` then an unrelated key would still fire it.
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k | f19
+        \\cmd - k, cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    const at_depth_1 = skhd.sequence_deferred;
+    try std.testing.expect(at_depth_1 != null);
+
+    // Depth 2: no exact match here, but the fallback is still owed.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 2), skhd.sequence_prefix_len);
+    try std.testing.expectEqual(at_depth_1, skhd.sequence_deferred);
+}
+
+test "a deferred mode activation is visible to the mismatch retry" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // The mismatch path now fires the fallback before reprocessing the chord.
+    // If that fallback switches modes, the retry must look up the NEW mode —
+    // otherwise the same two keys mean different things depending on whether
+    // the timeout beat you to it.
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\:: wm
+        \\alt - a ; wm
+        \\alt - a, alt - b | f19
+        \\alt - x ~
+        \\wm < alt - x | f19
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const alt_a = Hotkey.KeyPress{ .key = c.kVK_ANSI_A, .flags = .{ .alt = true } };
+    const alt_x = Hotkey.KeyPress{ .key = c.kVK_ANSI_X, .flags = .{ .alt = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&alt_a, mock_event, "any"));
+    try std.testing.expect(skhd.sequence_deferred != null);
+
+    // alt-x mismatches: the activation fires, switching to `insert`, and the
+    // retry must resolve alt-x there (`| f19` -> consumed), not in `default`
+    // (`~` -> passthrough).
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&alt_x, mock_event, "any"));
+    try std.testing.expectEqualStrings("wm", skhd.current_mode.?.name);
 }
 
 test "deferred action tracks the most specific complete match" {

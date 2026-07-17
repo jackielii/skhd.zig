@@ -347,7 +347,14 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
 
     const client = try self.allocator.create(agent_grabber_client.Client);
     errdefer self.allocator.destroy(client);
-    client.* = try agent_grabber_client.Client.connect(self.allocator, self.io, grabber_protocol.default_socket_path);
+    // The only place a failed connect is worth warning about: we are here
+    // because the config HAS rules to forward, so the user asked for
+    // something that isn't going to work. Probes elsewhere stay quiet.
+    client.* = agent_grabber_client.Client.connect(self.allocator, self.io, grabber_protocol.default_socket_path) catch |err| {
+        var buf: [256]u8 = undefined;
+        log.warn("{s}", .{agent_grabber_client.Client.connectErrorMessage(err, grabber_protocol.default_socket_path, &buf)});
+        return err;
+    };
     errdefer client.close();
 
     try client.hello();

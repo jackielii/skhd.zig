@@ -3389,7 +3389,3 @@ test "mouse button - parses as a literal with synthetic keycode" {
     try std.testing.expect(saw_m1);
     try std.testing.expect(saw_m3);
 }
-
-
-
-

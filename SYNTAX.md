@@ -93,10 +93,53 @@ each chord's own modifiers are present when that chord's key goes down.
 ```
 
 The budget applies between each pair of chords, not to the sequence as a
-whole, and is global — every sequence shares it. A pending prefix is never
-replayed: when it expires, the chords already consumed stay consumed. The
-value must be greater than zero, since `0` would expire every prefix
-instantly while still swallowing its first chord.
+whole, and is global — every sequence shares it. The value must be greater
+than zero, since `0` would expire every prefix instantly while still
+swallowing its first chord.
+
+### Fallback: a shorter binding under a sequence
+
+A binding may be both complete on its own and the prefix of a longer
+sequence. When the sequence doesn't complete, the shorter binding fires:
+
+```
+lcmd - k : yabai -m window --focus north     # everywhere
+cmd - k, cmd - k [
+    "Google Chrome" | cmd - k                # Chrome's own Cmd-K
+]
+```
+
+In Chrome, one `Cmd-K` runs the yabai command once the timeout expires; two
+in quick succession send Chrome its own `Cmd-K`. In every other application
+`Cmd-K` fires yabai **immediately** — the sequence isn't applicable there, so
+there is no longer match to wait for. That is how a global binding and an
+application's native shortcut can share one chord.
+
+**This is Vim's `timeoutlen`.** Vim lets `j` be both a command and the prefix
+of `jk`: press `j` alone and it waits, then runs the shorter match. Two
+differences are worth knowing:
+
+- **Vim's wait is unconditional; skhd's is scoped.** The delay exists only
+  where a longer sequence actually applies — above, only in Chrome.
+- **Vim replays the raw keys; skhd fires a declared binding.** skhd never
+  invents an action. The operating system's own `Cmd-Q` is not an skhd
+  binding, so it is never a fallback:
+
+```
+cmd - q, cmd - q [
+    "Protected App" | cmd - q
+]
+```
+
+Nothing shorter is declared, so a single `Cmd-Q` is consumed and discarded —
+the safety binding still protects you. A prefix is only ever replaced by a
+binding you wrote, never by the key itself.
+
+Because a prefix chord is consumed the moment it arrives, `~` and `->` cannot
+be a fallback — by the time it would run, there is no keypress left to pass
+through. A hotkey using either that is also the prefix of a longer sequence
+in the same application scope is a parse error. Use `:` or `|` instead; a
+forward synthesizes a fresh event.
 
 An explicit rule claims its chord in whichever application it applies to. A
 chord with no applicable rule for the frontmost application is not consumed,

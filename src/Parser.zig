@@ -412,8 +412,8 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
 
             return error.ParseErrorOccurred;
         }
-        if (err == error.AmbiguousSequencePrefix) {
-            self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "Ambiguous hotkey sequence prefix in overlapping application scope", self.current_file_path);
+        if (err == error.PassthroughPrefixNotAllowed) {
+            self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "a hotkey using '~' or '->' cannot also be the prefix of a longer sequence in the same application scope: the chord is consumed when the sequence starts, so there is no keypress left to pass through", self.current_file_path);
             return error.ParseErrorOccurred;
         }
         return err;
@@ -1913,13 +1913,16 @@ test "uniqueness rule gates prefix conflicts on process scope" {
         );
     }
 
-    // Overlapping scopes: cmd-q in Terminal would match both.
+    // Overlapping scopes used to be `AmbiguousSequencePrefix`. Under the
+    // fallback design the shorter binding is the longer one's fallback:
+    // cmd-q in Terminal defers `echo now` and fires it if the second chord
+    // never arrives. Legal, and no longer ambiguous.
     {
         var mappings = try Mappings.init(alloc, std.testing.io);
         defer mappings.deinit();
         var parser = try Parser.init(alloc, std.testing.io);
         defer parser.deinit();
-        const result = parser.parse(&mappings,
+        try parser.parse(&mappings,
             \\cmd - q [
             \\    "Terminal" : echo now
             \\]
@@ -1927,23 +1930,24 @@ test "uniqueness rule gates prefix conflicts on process scope" {
             \\    "Terminal" : echo later
             \\]
         );
-        try std.testing.expectError(error.ParseErrorOccurred, result);
-        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Ambiguous hotkey sequence prefix"));
+        try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
     }
 
-    // A bare hotkey is wildcard-scoped, so it overlaps every explicit scope.
+    // A bare hotkey is wildcard-scoped, so it overlaps every explicit scope —
+    // and is therefore the fallback for the sequence, everywhere the sequence
+    // applies. Also legal now.
     {
         var mappings = try Mappings.init(alloc, std.testing.io);
         defer mappings.deinit();
         var parser = try Parser.init(alloc, std.testing.io);
         defer parser.deinit();
-        const result = parser.parse(&mappings,
+        try parser.parse(&mappings,
             \\cmd - q : echo immediate
             \\cmd - q, cmd - q [
             \\    "Protected App" : echo protected
             \\]
         );
-        try std.testing.expectError(error.ParseErrorOccurred, result);
+        try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
     }
 
     // Identical chords + disjoint explicit scopes: HotkeyMap keys on chords
@@ -2232,6 +2236,79 @@ test "shell directive" {
 
     // Verify shell was updated
     try std.testing.expectEqualStrings("/bin/zsh", mappings.shell);
+}
+
+test "a shorter binding may be a prefix of a longer sequence" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+
+    // The motivating case: a global binding shadows an app's native shortcut.
+    // In Chrome one Cmd-K runs yabai after the timeout; two send Chrome its
+    // own Cmd-K. Everywhere else Cmd-K fires yabai instantly, because the
+    // sequence isn't applicable so no longer match exists to wait for.
+    // This was `AmbiguousSequencePrefix` before the fallback design.
+    try parser.parse(&mappings,
+        \\lcmd - k : echo yabai-focus
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
+}
+
+test "prefix fallback rejects ~ and -> on the shorter binding" {
+    const alloc = std.testing.allocator;
+
+    // Both mean "let the key reach the app", but a prefix chord is consumed
+    // the instant it arrives — 300ms later there is no event left to deliver.
+    const rejected = [_][]const u8{
+        \\lcmd - k ~
+        \\cmd - k, cmd - k : echo seq
+        ,
+        \\lcmd - k -> : echo shorter
+        \\cmd - k, cmd - k : echo seq
+        ,
+    };
+    for (rejected) |src| {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, src));
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "cannot"));
+    }
+}
+
+test "equal-length and identical conflicts still error" {
+    const alloc = std.testing.allocator;
+    const rejected = [_][]const u8{
+        // identical chords, both wildcard-scoped
+        \\cmd - a : echo first
+        \\cmd - a : echo second
+        ,
+        // identical chords, disjoint scopes: HotkeyMap keys on chords alone
+        \\cmd - a [
+        \\    "Terminal" : echo t
+        \\]
+        \\cmd - a [
+        \\    "Firefox" : echo f
+        \\]
+        ,
+        // equal-length sequences that overlap in scope
+        \\cmd - k, cmd - c : echo one
+        \\cmd - k, cmd - c : echo two
+        ,
+    };
+    for (rejected) |src| {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, src));
+    }
 }
 
 test "parseKeySpec accepts a bare chord" {
@@ -3312,4 +3389,7 @@ test "mouse button - parses as a literal with synthetic keycode" {
     try std.testing.expect(saw_m1);
     try std.testing.expect(saw_m3);
 }
+
+
+
 

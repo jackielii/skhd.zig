@@ -74,6 +74,13 @@ sequence_prefix_len: usize = 0,
 /// caps names at 256 bytes, so this matches.
 sequence_process: [256]u8 = undefined,
 sequence_process_len: usize = 0,
+/// The complete binding the pending prefix would have fired, had a longer
+/// sequence not also been reachable. Run when the sequence fails to complete,
+/// so a declared shorter binding isn't silently thrown away. null when nothing
+/// shorter is declared — which is what keeps `cmd - q, cmd - q ["Protected"]`
+/// safe: with no fallback, the timeout still does nothing. Borrows mappings,
+/// so it is cleared by cancelPendingSequence before any reload swap.
+sequence_deferred: ?*Hotkey = null,
 sequence_timer: c.CFRunLoopTimerRef = null,
 
 pub fn init(gpa: std.mem.Allocator, io: std.Io, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
@@ -843,11 +850,39 @@ fn cancelPendingSequence(self: *Skhd) void {
     self.cancelSequenceTimer();
     self.sequence_prefix_len = 0;
     self.sequence_process_len = 0;
+    self.sequence_deferred = null;
+}
+
+/// Run the shorter binding a pending prefix deferred.
+///
+/// Safe to call without a CGEvent: forwardKey ignores its event parameter,
+/// and `eventkey` is only read when via_wildcard is set, which the prefix path
+/// never does. The hotkey's own trigger stands in so the argument is honest
+/// rather than a placeholder.
+fn fireDeferred(self: *Skhd, hotkey: *Hotkey, process_name: []const u8) !HotkeyResult {
+    const eventkey = hotkey.chords[0];
+    return self.processMatchedHotkey(hotkey, &eventkey, @ptrFromInt(0), process_name, false);
 }
 
 fn sequenceTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const self: *Skhd = @ptrCast(@alignCast(info orelse return));
+
+    // Snapshot before cancelling — cancelPendingSequence zeroes both.
+    const deferred = self.sequence_deferred;
+    var process_buf: [256]u8 = undefined;
+    const n = self.sequence_process_len;
+    @memcpy(process_buf[0..n], self.sequence_process[0..n]);
+
     self.cancelPendingSequence();
+
+    // The sequence didn't complete. If the first press had a shorter binding
+    // of its own, that is what the user asked for — run it. With no fallback
+    // the prefix is simply discarded, as before.
+    if (deferred) |hotkey| {
+        _ = self.fireDeferred(hotkey, process_buf[0..n]) catch |err| {
+            log.err("sequence fallback failed: {s}", .{@errorName(err)});
+        };
+    }
 }
 
 fn startSequenceTimer(self: *Skhd) void {
@@ -1346,17 +1381,37 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
     while (true) {
         const prefix = self.buildPrefix(eventkey.*);
 
-        if (mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{
+        // A complete match: fire it now, or defer it as the fallback if a
+        // longer sequence is still reachable.
+        const exact = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{
             .process_name = process_name,
-        })) |hit| {
-            if (hit.chords.len > prefix.len) {
-                // Pending: always consumed. `->`/`~` are read only in
-                // processMatchedHotkey, i.e. only on the completing chord.
-                self.commitPrefix(prefix, process_name);
-                self.startSequenceTimer();
-                self.tracer.traceHotkeyFound(true);
-                return .consumed;
-            }
+            .length = .exact,
+        });
+
+        // Is a longer sequence still reachable in THIS application? Skipped
+        // entirely when the config declares no sequences, so ordinary configs
+        // pay nothing. The process filter is what keeps the fallback lag
+        // scoped: `cmd - k, cmd - k ["Chrome"]` makes `lcmd - k` wait only in
+        // Chrome — everywhere else there is no longer match and it fires now.
+        const longer = if (self.mappings.max_chords > 1)
+            mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{
+                .process_name = process_name,
+                .length = .longer,
+            })
+        else
+            null;
+
+        if (longer != null) {
+            // Pending. `exact` (possibly null) becomes the fallback: don't
+            // throw the first press away if there is something to do with it.
+            self.commitPrefix(prefix, process_name);
+            self.sequence_deferred = exact;
+            self.startSequenceTimer();
+            self.tracer.traceHotkeyFound(true);
+            return .consumed;
+        }
+
+        if (exact) |hit| {
             self.cancelPendingSequence();
 
             // Format the matched hotkey to mirror the config-file syntax —
@@ -1379,11 +1434,14 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
             return self.processMatchedHotkey(hit, eventkey, event, process_name, false);
         }
 
-        // Mismatch mid-sequence: drop the prefix and reprocess this chord
-        // from the root so it can still fire an unrelated hotkey or start
-        // another sequence.
+        // Mismatch mid-sequence: the sequence is off, so its fallback is now
+        // due — run it, then reprocess this chord from the root so it can
+        // still fire an unrelated hotkey or start another sequence. Both
+        // halves matter: `cmd-k` then `x` must run yabai AND deliver `x`.
         if (self.sequence_prefix_len > 0) {
+            const deferred = self.sequence_deferred;
             self.cancelPendingSequence();
+            if (deferred) |hk| _ = try self.fireDeferred(hk, process_name);
             continue;
         }
 
@@ -1858,6 +1916,145 @@ test "processHotkey respects passthrough in capture mode" {
         const result = try skhd.processHotkey(&keypress, mock_event, "test");
         try std.testing.expectEqual(HotkeyResult.not_found, result);
     }
+}
+
+test "shorter binding defers while a longer sequence is applicable" {
+    const alloc = std.testing.allocator;
+
+    // `~` keeps results observable without forking a shell: a pending chord
+    // reports .consumed, a fired one .passthrough.
+    const config =
+        \\lcmd - k ~
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" : echo chrome
+        \\]
+    ;
+    _ = config;
+
+    // `~` cannot be a fallback (nothing left to pass through), so use a
+    // command for the shorter binding and a forward for the sequence.
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k : echo yabai
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+
+    // In Chrome the sequence is applicable, so the shorter binding is
+    // deferred rather than fired: pending, with a fallback remembered.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred != null);
+
+    // Second chord completes the sequence; the fallback is dropped, not run.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "shorter binding fires instantly where the sequence does not apply" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k : echo yabai
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+
+    // Outside Chrome there is no applicable longer match, so nothing is
+    // deferred and the binding fires immediately. If this ever goes pending,
+    // every window-focus press pays the timeout and the feature is unusable.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "kitty"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "no shorter binding means the timeout still discards the prefix" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Issue #51's safety binding: nothing shorter is declared, so there is
+    // nothing to fall back to. macOS's own Cmd-Q is not an skhd binding and
+    // must never be invented as one.
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\cmd - q, cmd - q [
+        \\    "Protected App" : echo quit
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_q = Hotkey.KeyPress{ .key = c.kVK_ANSI_Q, .flags = .{ .cmd = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "mismatch fires the deferred fallback and still delivers the chord" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k : echo yabai
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+        \\alt - z ~
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+    const alt_z = Hotkey.KeyPress{ .key = c.kVK_ANSI_Z, .flags = .{ .alt = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expect(skhd.sequence_deferred != null);
+
+    // alt-z doesn't continue the sequence: the fallback runs, and alt-z is
+    // reprocessed from the root so it still fires its own binding.
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&alt_z, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "deferred action tracks the most specific complete match" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\alt - a : echo one
+        \\alt - a, alt - b : echo two
+        \\alt - a, alt - b, alt - c : echo three
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const a = Hotkey.KeyPress{ .key = c.kVK_ANSI_A, .flags = .{ .alt = true } };
+    const b = Hotkey.KeyPress{ .key = c.kVK_ANSI_B, .flags = .{ .alt = true } };
+
+    // After `a`, stopping should run `a`.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&a, mock_event, "any"));
+    const after_a = skhd.sequence_deferred.?;
+    try std.testing.expectEqual(@as(usize, 1), after_a.chords.len);
+
+    // After `a, b`, stopping should run `a, b` — the deferred action grows
+    // with the prefix rather than staying pinned to the shortest match.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&b, mock_event, "any"));
+    const after_ab = skhd.sequence_deferred.?;
+    try std.testing.expectEqual(@as(usize, 2), after_ab.chords.len);
 }
 
 test "sequence prefix buffer: pending, completion, mismatch retry, process change" {

@@ -218,6 +218,12 @@ pub const PrefixLookupContext = struct {
     /// answers "did any rule claim this chord?", which gates the
     /// capture-mode fallback.
     process_name: ?[]const u8,
+    /// Which chord counts to accept, relative to the prefix length.
+    ///   .exact  — a complete match: fire it, or defer it as the fallback
+    ///   .longer — a sequence is still reachable: go pending
+    ///   .any    — either; used with process_name = null as the
+    ///             capture-mode claim gate
+    length: enum { exact, longer, any } = .any,
 
     pub fn hash(_: @This(), prefix: []const KeyPress) u32 {
         std.debug.assert(prefix.len >= 1);
@@ -225,7 +231,11 @@ pub const PrefixLookupContext = struct {
     }
 
     pub fn eql(self: @This(), prefix: []const KeyPress, config: *Hotkey, _: usize) bool {
-        if (config.chords.len < prefix.len) return false;
+        switch (self.length) {
+            .exact => if (config.chords.len != prefix.len) return false,
+            .longer => if (config.chords.len <= prefix.len) return false,
+            .any => if (config.chords.len < prefix.len) return false,
+        }
         for (prefix, config.chords[0..prefix.len]) |ev, cfg| {
             if (cfg.key != ev.key) return false;
             if (!hotkeyFlagsMatch(cfg.flags, ev.flags)) return false;
@@ -519,6 +529,20 @@ pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?
 
 pub fn hasWildcardAction(self: *const Hotkey) bool {
     return self.wildcard_command != null;
+}
+
+/// True when any of this hotkey's actions is `~` (unbound). Such an action
+/// releases the original keypress to the application, which a sequence prefix
+/// cannot do — the chord was consumed the moment it arrived.
+pub fn hasUnboundAction(self: *const Hotkey) bool {
+    if (self.wildcard_command) |cmd| {
+        if (cmd == .unbound) return true;
+    }
+    var it = self.mappings.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == .unbound) return true;
+    }
+    return false;
 }
 
 pub fn hasExplicitProcess(self: *const Hotkey, process_name: []const u8) bool {

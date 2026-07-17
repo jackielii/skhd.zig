@@ -76,10 +76,20 @@ pub fn add_hotkey(self: *Mode, hotkey: *Hotkey) !void {
         // regardless of process scope — put() would silently drop one.
         if (Hotkey.eql(existing, hotkey)) return error.DuplicateHotkeyInMode;
         if (!Hotkey.processScopesOverlap(existing, hotkey)) continue;
-        return if (existing.chords.len == hotkey.chords.len)
-            error.DuplicateHotkeyInMode
-        else
-            error.AmbiguousSequencePrefix;
+        if (existing.chords.len == hotkey.chords.len) return error.DuplicateHotkeyInMode;
+
+        // Unequal lengths: the shorter is the longer's fallback. The runtime
+        // defers it while the longer one is reachable and fires it if the
+        // sequence doesn't complete, so this is no longer ambiguous.
+        //
+        // Except when the shorter one is `~`/`->`: both mean "let the key
+        // reach the app", but a prefix chord is consumed the instant it
+        // arrives, so by the time the fallback runs there is no event left to
+        // deliver. Unrepresentable, not merely awkward.
+        const shorter = if (existing.chords.len < hotkey.chords.len) existing else hotkey;
+        if (shorter.passthrough or shorter.hasUnboundAction()) {
+            return error.PassthroughPrefixNotAllowed;
+        }
     }
 
     try self.hotkey_map.put(self.allocator, hotkey, {});

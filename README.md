@@ -74,6 +74,28 @@ Save, then `skhd --restart-service`. Tap `caps_lock` → escape. Hold `caps_lock
 
 See [skhd-grabber](#skhd-grabber-caps_lock-class-tap-hold) below for the full architecture, [SYNTAX.md](SYNTAX.md) for the new directive grammar, and the [v0.1.0 CHANGELOG entry](CHANGELOG.md#010---2026-05-04) for everything that changed.
 
+## v0.2.0 — Hotkey sequences
+
+Bind a run of chords to one action, fired only when the chords arrive in order within a time budget (default 300ms, set with `.sequence_timeout`):
+
+```bash
+# Two quick Cmd-Q presses to quit Chrome; a single press does nothing.
+cmd - q, cmd - q [
+    "Google Chrome" | cmd - q
+]
+```
+
+A shorter binding can also be the **prefix** of a longer sequence and fires when the sequence doesn't complete — like Vim's `timeoutlen`, but the wait only happens in apps where a longer match applies. That lets a global binding and an app's native shortcut share one chord:
+
+```bash
+lcmd - k : yabai -m window --focus north   # focus north — everywhere, instantly
+cmd - k, cmd - k [
+    "Google Chrome" | cmd - k              # …but double-tap sends Chrome its own Cmd-K
+]
+```
+
+Every action form works on a sequence (commands, forwarding, unbound/passthrough, mode activation, process lists). See [SYNTAX.md](SYNTAX.md#hotkey-sequences) for the grammar and the [v0.2.0 CHANGELOG entry](CHANGELOG.md#020---2026-07-20).
+
 ## Installation
 
 ### Homebrew

@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.1.11...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.0...HEAD)
+
+## [0.2.0](https://github.com/jackielii/skhd.zig/compare/v0.1.11...v0.2.0) - 2026-07-20
+
+### Added
+- **Multi-chord hotkey sequences.** A hotkey may now be a comma-separated run of chords, fired only when they arrive in order within a time budget: `cmd - q, cmd - q : command`. Each chord carries its own modifiers (nothing is inherited between chords), and every existing action form works on a sequence — commands, key forwarding, unbound (`~`) and passthrough (`->`) on the final chord, mode activation, command references, and process lists/groups. The motivating case (issue #51): require two presses before a destructive action in one app, while every other app keeps the key's normal behavior.
+- **`.sequence_timeout` directive.** Sets the maximum gap between consecutive chords (default 300ms). Accepts a bare integer, `500ms`, or `1s`. The `s`/`ms` suffix now also works in `.remap` tap-hold `timeout` fields, where the grammar had always documented it.
+- **Sequence fallback.** A shorter binding may be the prefix of a longer sequence; if the sequence doesn't complete, the shorter one fires — the same idea as Vim's `timeoutlen`, but the wait only happens in applications where a longer match actually applies. This lets a global binding and an application's native shortcut share one chord: `lcmd - k` focuses a window everywhere, while `cmd - k, cmd - k [ "Google Chrome" | cmd - k ]` sends Chrome its own Cmd-K on a double-tap.
+
+### Fixed
+- **`skhd -k` now reports a bad keyspec instead of a config-file parse error.** `skhd -k "hello world"` previously printed `Mode 'hello' not found` and a stack trace, because the key argument was routed through the config-file grammar. It now parses a keyspec directly and, on failure, prints a clear message pointing at `-t/--text` for literal text.
+- **No spurious grabber-socket warning when no grabber is needed.** `skhd --status` (and other probes) no longer print `grabber socket not found …` for configs without `.remap`/`.taphold` rules, which need no `skhd-grabber` at all. The warning is now emitted only where a missing grabber actually breaks something.
 
 ## [0.1.11](https://github.com/jackielii/skhd.zig/compare/v0.1.10...v0.1.11) - 2026-07-12
 

@@ -16,6 +16,13 @@ loaded_files: std.ArrayListUnmanaged([]const u8) = .empty,
 paths: std.ArrayListUnmanaged([]const u8) = .empty,
 // Track all hotkeys for cleanup (hotkeys can belong to multiple modes)
 hotkeys: std.ArrayListUnmanaged(*Hotkey) = .empty,
+/// Longest chord list across all hotkeys. Sizes the runtime prefix
+/// buffer, so a pending sequence can never out-run it.
+max_chords: usize = 1,
+/// Maximum gap between consecutive chords of a sequence, from
+/// `.sequence_timeout`. Rides the mappings swap, so hot reload picks up a
+/// new value for free.
+sequence_timeout_ms: u32 = 300,
 // Device aliases declared via `.device <name> <vendor> <product>`. Empty
 // when the user hasn't opted into per-device matching, in which case the
 // IOHIDManager monitor is never started.
@@ -147,6 +154,7 @@ pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
 
     // Only track the hotkey after successful addition to all modes
     try self.hotkeys.append(self.allocator, hotkey);
+    self.max_chords = @max(self.max_chords, hotkey.chords.len);
 }
 
 pub fn set_shell(self: *Mappings, shell: []const u8) !void {
@@ -227,7 +235,6 @@ pub fn add_path(self: *Mappings, path: []const u8) !void {
     errdefer self.allocator.free(owned);
     try self.paths.append(self.allocator, owned);
 }
-
 
 pub fn format(self: Mappings, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.writeAll("Mappings {");

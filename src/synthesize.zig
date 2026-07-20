@@ -1,7 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c.zig");
 const Parser = @import("Parser.zig");
-const Mappings = @import("Mappings.zig");
 const Hotkey = @import("Hotkey.zig");
 const Keycodes = @import("Keycodes.zig");
 const ModifierFlag = Keycodes.ModifierFlag;
@@ -16,53 +16,40 @@ const Modifier_Keycode_Fn = 0x3F;
 
 /// Synthesize a keypress from a key specification string (e.g., "cmd - space")
 pub fn synthesizeKey(allocator: std.mem.Allocator, io: std.Io, key_string: []const u8) !void {
-    // Parse the key string
     var parser = try Parser.init(allocator, io);
     defer parser.deinit();
 
-    // Create temporary mappings just for parsing
-    var mappings = try Mappings.init(allocator, io);
-    defer mappings.deinit();
-
-    // For synthesis, we need to add a dummy command since the parser expects a complete hotkey
-    // The command won't be executed, we just need it for parsing
-    const key_with_command = try std.fmt.allocPrint(allocator, "{s} : __dummy__", .{key_string});
-    defer allocator.free(key_with_command);
-
-    // Parse the key specification with dummy command
-    try parser.parse(&mappings, key_with_command);
-
-    // Find the first hotkey that was parsed
-    var mode_iter = mappings.mode_map.iterator();
-    if (mode_iter.next()) |mode_entry| {
-        const mode = mode_entry.value_ptr.*;
-        var hotkey_iter = mode.hotkey_map.iterator();
-        if (hotkey_iter.next()) |hotkey_entry| {
-            const hotkey = hotkey_entry.key_ptr.*;
-
-            // Disable local event suppression and state combining for clean synthesis
-            _ = c.CGSetLocalEventsSuppressionInterval(0.0);
-            _ = c.CGEnableEventStateCombining(false);
-
-            // Press modifiers down
-            synthesizeModifiers(hotkey.flags, true);
-
-            // Press the main key down
-            createAndPostKeyEvent(@intCast(hotkey.key), true);
-
-            // Release the main key
-            createAndPostKeyEvent(@intCast(hotkey.key), false);
-
-            // Release modifiers
-            synthesizeModifiers(hotkey.flags, false);
-
-            std.log.scoped(.synthesize).debug("Synthesized key: {any} + {s}", .{ hotkey.flags, Keycodes.getKeyString(hotkey.key) });
-        } else {
-            std.debug.print("Error: Failed to parse key specification: {s}\n", .{key_string});
+    // parseKeySpec accepts a chord and nothing else — no modes, no process
+    // lists, no actions — so failures here describe the key the user typed
+    // rather than config-file grammar they never wrote.
+    const chord = parser.parseKeySpec(key_string) catch |err| {
+        if (err != error.ParseErrorOccurred) return err;
+        // Diagnostics are the point of this path, but they would pollute test
+        // output — the tests assert on the returned error, not the text.
+        if (!builtin.is_test) {
+            std.debug.print("skhd: '{s}' is not a valid key combination.\n", .{key_string});
+            if (parser.error_info) |parse_err| {
+                std.debug.print("  {f}\n", .{parse_err});
+            }
+            // Don't echo the spec back into the -t suggestion: for a genuine
+            // typo like 'cmd - zzz' it would advise typing that as literal
+            // text, which is never what the user wanted.
+            std.debug.print("  -k/--key takes one key combination: 'cmd - q', 'shift - a', 'f19', '0x0C'.\n", .{});
+            std.debug.print("  To type literal text, use -t/--text instead.\n", .{});
         }
-    } else {
-        std.debug.print("Error: Failed to parse key specification: {s}\n", .{key_string});
-    }
+        return error.InvalidKeySpec;
+    };
+
+    // Disable local event suppression and state combining for clean synthesis
+    _ = c.CGSetLocalEventsSuppressionInterval(0.0);
+    _ = c.CGEnableEventStateCombining(false);
+
+    synthesizeModifiers(chord.flags, true);
+    createAndPostKeyEvent(@intCast(chord.key), true);
+    createAndPostKeyEvent(@intCast(chord.key), false);
+    synthesizeModifiers(chord.flags, false);
+
+    std.log.scoped(.synthesize).debug("Synthesized key: {any} + {s}", .{ chord.flags, Keycodes.getKeyString(chord.key) });
 }
 
 /// Synthesize text input
@@ -112,6 +99,9 @@ pub fn synthesizeText(allocator: std.mem.Allocator, io: std.Io, text: []const u8
 }
 
 fn createAndPostKeyEvent(keycode: u16, pressed: bool) void {
+    // Never fire real keystrokes into the developer's session from a test.
+    // Same guard, same reason, as forwardKey in skhd.zig.
+    if (builtin.is_test) return;
     // Use the deprecated but working CGPostKeyboardEvent for now
     // This matches the original skhd implementation
     _ = c.CGPostKeyboardEvent(0, keycode, pressed);
@@ -139,26 +129,33 @@ fn synthesizeModifiers(flags: ModifierFlag, pressed: bool) void {
     }
 }
 
-test "synthesize key parsing" {
+test "synthesizeKey reports a bad keyspec instead of leaking a parse error" {
     const testing = std.testing;
     const allocator = testing.allocator;
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    // Test that we can parse a simple key specification
-    var parser = try Parser.init(allocator, io);
-    defer parser.deinit();
+    // `-k` takes a keyspec, not prose. "hello" lexes as an identifier, so the
+    // parser reads it as a mode name and fails deep inside parse_mode. Callers
+    // must get a typed error they can report, not error.ParseErrorOccurred
+    // plus a Zig backtrace. (`-t/--text` is the tool for text.)
+    try testing.expectError(error.InvalidKeySpec, synthesizeKey(allocator, io, "hello world"));
 
-    var mappings = try Mappings.init(allocator, io);
-    defer mappings.deinit();
+    // Empty spec is the same class of mistake.
+    try testing.expectError(error.InvalidKeySpec, synthesizeKey(allocator, io, ""));
+}
 
-    try parser.parse(&mappings, "cmd - space : echo test");
+test "synthesizeKey accepts valid keyspecs" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
-    // Should have a default mode with one hotkey
-    const default_mode = mappings.mode_map.get("default");
-    try testing.expect(default_mode != null);
-
-    const hotkey_count = default_mode.?.hotkey_map.count();
-    try testing.expect(hotkey_count == 1);
+    // createAndPostKeyEvent no-ops under test, so this exercises parse and
+    // dispatch without firing keystrokes into the session running the suite.
+    try synthesizeKey(allocator, io, "cmd - space");
+    try synthesizeKey(allocator, io, "f19");
+    try synthesizeKey(allocator, io, "0x0C");
 }

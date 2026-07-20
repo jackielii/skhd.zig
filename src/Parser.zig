@@ -133,6 +133,46 @@ pub fn parse(self: *Parser, mappings: *Mappings, content: []const u8) !void {
     try self.parseWithPath(mappings, content, null);
 }
 
+/// Parse a bare keyspec — `"cmd - q"`, `"f19"`, `"0x0C"` — into one chord.
+///
+/// Deliberately NOT the config grammar: no modes, no process lists, no
+/// actions, no trailing anything. `skhd -k` synthesizes a keypress, so its
+/// diagnostics must talk about keys. Routing it through `parse()` (by
+/// wrapping the spec in a fake `<spec> : __dummy__` config line) made a
+/// leading word lex as an identifier and read as a mode name, so
+/// `skhd -k "hello world"` answered "Mode 'hello' not found. Did you forget
+/// to declare it with '::hello'?" — an implementation detail leaking as
+/// advice. It also meant `-k` silently accepted process lists.
+pub fn parseKeySpec(self: *Parser, spec: []const u8) !Hotkey.KeyPress {
+    self.content = spec;
+    self.tokenizer = try Tokenizer.init(spec);
+    self.current_file_path = null;
+    _ = self.advance();
+
+    const first = self.peek() orelse {
+        // No token at all — nothing to point `fromToken` at.
+        self.error_info = try ParseError.fromToken(
+            self.allocator,
+            .{ .type = .Token_Key, .text = spec, .line = 1, .cursor = 1 },
+            "Expected a key combination (e.g. 'cmd - q')",
+            null,
+        );
+        return error.ParseErrorOccurred;
+    };
+    _ = first;
+
+    const chord = try self.parse_keypress();
+
+    if (self.peek()) |extra| {
+        const msg = try std.fmt.allocPrint(self.allocator, "Unexpected '{s}' after the key combination", .{extra.text});
+        defer self.allocator.free(msg);
+        self.error_info = try ParseError.fromToken(self.allocator, extra, msg, null);
+        return error.ParseErrorOccurred;
+    }
+
+    return chord;
+}
+
 pub fn parseWithPath(self: *Parser, mappings: *Mappings, content: []const u8, file_path: ?[]const u8) !void {
     self.content = content;
     self.tokenizer = try Tokenizer.init(content);
@@ -255,14 +295,14 @@ fn handleProcessError(self: *Parser, err: anyerror, process_name: []const u8, op
 }
 
 fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
-    var hotkey = try Hotkey.create(self.allocator);
-    errdefer hotkey.destroy();
+    var modes: std.ArrayListUnmanaged(*Mode) = .empty;
+    defer modes.deinit(self.allocator);
 
     if (self.match(.Token_Identifier)) {
-        try self.parse_mode(mappings, hotkey);
+        try self.parse_mode(mappings, &modes);
     }
 
-    if (hotkey.mode_list.count() > 0) {
+    if (modes.items.len > 0) {
         if (!self.match(.Token_Insert)) {
             const token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '<' after mode identifier", self.current_file_path);
@@ -276,8 +316,29 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
             return error.ParseErrorOccurred;
         } orelse unreachable;
-        hotkey.add_mode(default_mode) catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "Failed to add default mode to hotkey: {s}", .{@errorName(err)});
+        try modes.append(self.allocator, default_mode);
+    }
+
+    // Chords are parsed before the hotkey exists: Hotkey.create enforces
+    // len >= 1 structurally, so it cannot be constructed empty.
+    var chords: std.ArrayListUnmanaged(Hotkey.KeyPress) = .empty;
+    defer chords.deinit(self.allocator);
+    try chords.append(self.allocator, try self.parse_keypress());
+    while (self.match(.Token_Comma)) {
+        const comma = self.previous();
+        const chord = self.parse_keypress() catch |err| {
+            self.clearError();
+            self.error_info = try ParseError.fromToken(self.allocator, comma, "Expected complete hotkey chord after ','", self.current_file_path);
+            return err;
+        };
+        try chords.append(self.allocator, chord);
+    }
+
+    var hotkey = try Hotkey.create(self.allocator, chords.items);
+    errdefer hotkey.destroy();
+    for (modes.items) |mode| {
+        hotkey.add_mode(mode) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ mode.name, @errorName(err) });
             defer self.allocator.free(msg);
             const token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
@@ -285,61 +346,8 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         };
     }
 
-    var found_modifier = false;
-    var key_consumed = false;
-
-    if (self.peek_check(.Token_Alias)) {
-        const tok = self.peek().?;
-        const alias = try self.lookup_alias(tok);
-        switch (alias) {
-            .modifier => {
-                self.advance();
-                hotkey.flags = try self.parse_modifier();
-                found_modifier = true;
-            },
-            .key => |kp| {
-                self.advance();
-                try self.reject_key_alias_in_modifier_position(tok);
-                hotkey.flags = hotkey.flags.merge(kp.flags);
-                hotkey.key = kp.key;
-                key_consumed = true;
-            },
-        }
-    } else if (self.match(.Token_Modifier)) {
-        hotkey.flags = try self.parse_modifier();
-        found_modifier = true;
-    }
-
-    if (found_modifier) {
-        if (!self.match(.Token_Dash)) {
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected '-' after modifier", self.current_file_path);
-            return error.ParseErrorOccurred;
-        }
-    }
-
-    if (!key_consumed) {
-        if (self.match(.Token_Key)) {
-            hotkey.key = try self.parse_key();
-        } else if (self.match(.Token_Key_Hex)) {
-            hotkey.key = try self.parse_key_hex();
-        } else if (self.match(.Token_Literal)) {
-            const keypress = try self.parse_key_literal();
-            hotkey.flags = hotkey.flags.merge(keypress.flags);
-            hotkey.key = keypress.key;
-        } else if (self.match(.Token_Alias)) {
-            const keypress = try self.resolve_key_alias(self.previous());
-            hotkey.flags = hotkey.flags.merge(keypress.flags);
-            hotkey.key = keypress.key;
-        } else {
-            const token = self.peek() orelse self.previous();
-            self.error_info = try ParseError.fromToken(self.allocator, token, "Expected key, key hex, or literal", self.current_file_path);
-            return error.ParseErrorOccurred;
-        }
-    }
-
     if (self.match(.Token_Arrow)) {
-        hotkey.flags = hotkey.flags.merge(.{ .passthrough = true });
+        hotkey.passthrough = true;
     }
 
     if (self.match(.Token_Activate)) {
@@ -381,7 +389,7 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
         if (err == error.DuplicateHotkeyInMode) {
             // Format the hotkey for the error message
             var buf: [256]u8 = undefined;
-            const key_str = try Keycodes.formatKeyPressBuffer(&buf, hotkey.flags, hotkey.key);
+            const key_str = try Keycodes.formatKeyPressBuffer(&buf, hotkey.chords[0].flags, hotkey.chords[0].key);
 
             // Get the mode(s) where we're trying to add this hotkey
             var mode_names: std.ArrayList(u8) = .empty;
@@ -404,11 +412,15 @@ fn parse_hotkey(self: *Parser, mappings: *Mappings) !void {
 
             return error.ParseErrorOccurred;
         }
+        if (err == error.PassthroughPrefixNotAllowed) {
+            self.error_info = try ParseError.fromToken(self.allocator, self.previous(), "a hotkey using '~' or '->' cannot also be the prefix of a longer sequence in the same application scope: the chord is consumed when the sequence starts, so there is no keypress left to pass through", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
         return err;
     };
 }
 
-fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
+fn parse_mode(self: *Parser, mappings: *Mappings, modes: *std.ArrayListUnmanaged(*Mode)) !void {
     const token: Token = self.previous();
     assert(token.type == .Token_Identifier);
 
@@ -424,15 +436,18 @@ fn parse_mode(self: *Parser, mappings: *Mappings, hotkey: *Hotkey) !void {
         self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
         return error.ParseErrorOccurred;
     };
-    hotkey.add_mode(mode) catch |err| {
-        const msg = try std.fmt.allocPrint(self.allocator, "Failed to add mode '{s}' to hotkey: {s}", .{ name, @errorName(err) });
-        defer self.allocator.free(msg);
-        self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
-        return error.ParseErrorOccurred;
-    };
+    for (modes.items) |existing| {
+        if (existing == mode) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Mode '{s}' listed twice", .{name});
+            defer self.allocator.free(msg);
+            self.error_info = try ParseError.fromToken(self.allocator, token, msg, self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+    }
+    try modes.append(self.allocator, mode);
     if (self.match(.Token_Comma)) {
         if (self.match(.Token_Identifier)) {
-            try self.parse_mode(mappings, hotkey);
+            try self.parse_mode(mappings, modes);
         } else {
             const error_token = self.peek() orelse self.previous();
             self.error_info = try ParseError.fromToken(self.allocator, error_token, "Expected mode identifier after comma", self.current_file_path);
@@ -1231,6 +1246,15 @@ fn parse_option(self: *Parser, mappings: *Mappings) !void {
             self.error_info = try ParseError.fromToken(self.allocator, token, "Expected shell path after 'shell'", self.current_file_path);
             return error.ParseErrorOccurred;
         }
+    } else if (std.mem.eql(u8, option, "sequence_timeout")) {
+        const number_token = self.peek() orelse self.previous();
+        const ms = try self.parse_duration_ms();
+        if (ms == 0) {
+            self.error_info = try ParseError.fromToken(self.allocator, number_token, "sequence timeout must be greater than zero (0 would expire every sequence instantly)", self.current_file_path);
+            return error.ParseErrorOccurred;
+        }
+        // Last wins, like `.shell`.
+        mappings.sequence_timeout_ms = ms;
     } else if (std.mem.eql(u8, option, "device")) {
         try self.parse_device_decl(mappings);
     } else if (std.mem.eql(u8, option, "remap")) {
@@ -1645,11 +1669,30 @@ fn parse_duration_ms(self: *Parser) !u32 {
         self.error_info = try ParseError.fromToken(self.allocator, num_token, msg, self.current_file_path);
         return error.ParseErrorOccurred;
     };
-    // Optional `ms` unit suffix. Accepted-and-ignored (timeouts already
-    // in ms). Reserved for future seconds support.
-    if (self.peek_check(.Token_Identifier)) {
-        if (self.peek()) |t| {
-            if (std.mem.eql(u8, t.text, "ms")) _ = self.advance();
+    // Optional unit suffix: `ms` (no-op, timeouts are already ms) or `s`.
+    //
+    // The suffix must sit on the same line as the number. Newlines are not
+    // tokens, and `resolveIdentifierType` lexes ANY single character as a
+    // Token_Key — so a bare `s` starting the next line is otherwise
+    // indistinguishable from a seconds suffix. Without the line check,
+    //
+    //     .sequence_timeout 500
+    //     s : echo hi
+    //
+    // would parse as 500 SECONDS and orphan `: echo hi`.
+    if (self.peek()) |t| {
+        if (t.line == num_token.line) {
+            if (t.type == .Token_Identifier and std.mem.eql(u8, t.text, "ms")) {
+                _ = self.advance();
+            } else if (t.type == .Token_Key and std.mem.eql(u8, t.text, "s")) {
+                _ = self.advance();
+                return std.math.mul(u32, value, 1000) catch {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Duration '{s}s' overflows the millisecond range", .{num_token.text});
+                    defer self.allocator.free(msg);
+                    self.error_info = try ParseError.fromToken(self.allocator, num_token, msg, self.current_file_path);
+                    return error.ParseErrorOccurred;
+                };
+            }
         }
     }
     return value;
@@ -1824,6 +1867,214 @@ test "double mode free" {
     // print("{s}\n", .{mappings});
 }
 
+test "sequences live in hotkey_map as ordinary hotkeys" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+
+    try parser.parse(&mappings,
+        \\cmd - q, cmd - q [
+        \\    "Protected App" | cmd - q
+        \\]
+    );
+    const mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), mode.hotkey_map.count());
+
+    var it = mode.hotkey_map.iterator();
+    const hk = it.next().?.key_ptr.*;
+    try std.testing.expect(hk.isSequence());
+    try std.testing.expectEqual(@as(usize, 2), hk.chords.len);
+    try std.testing.expectEqual(@as(usize, 2), mappings.max_chords);
+    // Mappings owns it, like every other hotkey.
+    try std.testing.expectEqual(@as(usize, 1), mappings.hotkeys.items.len);
+}
+
+test "uniqueness rule gates prefix conflicts on process scope" {
+    const alloc = std.testing.allocator;
+
+    // Commands lex to end-of-line, so process lists carrying a `:` action
+    // must put the closing ']' on its own line.
+
+    // Disjoint scopes: decidable, so allowed.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings,
+            \\cmd - q [
+            \\    "Terminal" : echo terminal
+            \\]
+            \\cmd - q, cmd - q [
+            \\    "Protected App" : echo protected
+            \\]
+        );
+    }
+
+    // Overlapping scopes used to be `AmbiguousSequencePrefix`. Under the
+    // fallback design the shorter binding is the longer one's fallback:
+    // cmd-q in Terminal defers `echo now` and fires it if the second chord
+    // never arrives. Legal, and no longer ambiguous.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings,
+            \\cmd - q [
+            \\    "Terminal" : echo now
+            \\]
+            \\cmd - q, cmd - q [
+            \\    "Terminal" : echo later
+            \\]
+        );
+        try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
+    }
+
+    // A bare hotkey is wildcard-scoped, so it overlaps every explicit scope —
+    // and is therefore the fallback for the sequence, everywhere the sequence
+    // applies. Also legal now.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings,
+            \\cmd - q : echo immediate
+            \\cmd - q, cmd - q [
+            \\    "Protected App" : echo protected
+            \\]
+        );
+        try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
+    }
+
+    // Identical chords + disjoint explicit scopes: HotkeyMap keys on chords
+    // alone, so this must still be rejected as a duplicate even though the
+    // scopes don't overlap — otherwise put() silently drops the second entry.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        const result = parser.parse(&mappings,
+            \\cmd - a [
+            \\    "Terminal" : echo terminal
+            \\]
+            \\cmd - a [
+            \\    "Firefox" : echo firefox
+            \\]
+        );
+        try std.testing.expectError(error.ParseErrorOccurred, result);
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Duplicate hotkey"));
+    }
+
+    // Overlapping-but-not-identical chords (flags differ) + disjoint explicit
+    // scopes: must still parse as two distinct entries, disambiguated at
+    // runtime by PrefixLookupContext.
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings,
+            \\alt - a [
+            \\    "Terminal" : echo terminal
+            \\]
+            \\lalt - a [
+            \\    "Firefox" : echo firefox
+            \\]
+        );
+        const default_mode = mappings.mode_map.get("default").?;
+        try std.testing.expectEqual(@as(usize, 2), default_mode.hotkey_map.count());
+    }
+}
+
+test "shared incomplete prefixes are allowed" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    try parser.parse(&mappings,
+        \\cmd - k, cmd - c : echo comment
+        \\cmd - k, cmd - u : echo uncomment
+    );
+    try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
+}
+
+test "parse three-chord sequence and reject missing chord" {
+    const alloc = std.testing.allocator;
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try parser.parse(&mappings, "cmd - k, cmd - c, alt - q : echo sequence");
+        var it = mappings.mode_map.get("default").?.hotkey_map.iterator();
+        try std.testing.expectEqual(@as(usize, 3), it.next().?.key_ptr.*.chords.len);
+        try std.testing.expectEqual(@as(usize, 3), mappings.max_chords);
+    }
+    {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, "cmd - q, : echo invalid"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "Expected complete hotkey chord"));
+    }
+}
+
+test "multi-mode declaration with sequence chords" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    // Mode-list commas and chord commas cannot collide: mode lists require
+    // '<', and key tokens lex as Token_Key rather than Token_Identifier.
+    try parser.parse(&mappings,
+        \\:: alpha
+        \\:: beta
+        \\alpha, beta < cmd - k, cmd - c : echo both
+    );
+    try std.testing.expectEqual(@as(usize, 1), mappings.mode_map.get("alpha").?.hotkey_map.count());
+    try std.testing.expectEqual(@as(usize, 1), mappings.mode_map.get("beta").?.hotkey_map.count());
+    // One hotkey, two modes — not two hotkeys.
+    try std.testing.expectEqual(@as(usize, 1), mappings.hotkeys.items.len);
+}
+
+test "every action form works on a sequence" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+
+    // The spec's grammar-coverage table, in one config: process group,
+    // command reference with a placeholder, unbound, mode activation,
+    // per-chord hex/literal/alias forms.
+    try parser.parse(&mappings,
+        \\:: winmode
+        \\.define native_apps ["Finder", "Terminal"]
+        \\.define notify : echo {{1}}
+        \\cmd - k, cmd - c [ @native_apps | end ]
+        \\cmd - k, cmd - n : @notify("hi")
+        \\cmd - k, cmd - u ~
+        \\cmd - k, cmd - m ; winmode : echo entering
+        \\cmd - 0x1B, alt - return : echo mixed
+    );
+
+    const mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 5), mode.hotkey_map.count());
+    try std.testing.expectEqual(@as(usize, 5), mappings.hotkeys.items.len);
+    for (mappings.hotkeys.items) |hk| {
+        try std.testing.expect(hk.isSequence());
+        try std.testing.expectEqual(@as(usize, 2), hk.chords.len);
+    }
+}
+
 test "load directive" {
     const alloc = std.testing.allocator;
     var parser = try Parser.init(alloc, std.testing.io);
@@ -1944,7 +2195,7 @@ test "load directive shares aliases with included files" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .control = true, .shift = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "config duplicate detection allows disjoint side-specific modifiers" {
@@ -1985,6 +2236,245 @@ test "shell directive" {
 
     // Verify shell was updated
     try std.testing.expectEqualStrings("/bin/zsh", mappings.shell);
+}
+
+test "a shorter binding may be a prefix of a longer sequence" {
+    const alloc = std.testing.allocator;
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+
+    // The motivating case: a global binding shadows an app's native shortcut.
+    // In Chrome one Cmd-K runs yabai after the timeout; two send Chrome its
+    // own Cmd-K. Everywhere else Cmd-K fires yabai instantly, because the
+    // sequence isn't applicable so no longer match exists to wait for.
+    // This was `AmbiguousSequencePrefix` before the fallback design.
+    try parser.parse(&mappings,
+        \\lcmd - k : echo yabai-focus
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    try std.testing.expectEqual(@as(usize, 2), mappings.mode_map.get("default").?.hotkey_map.count());
+}
+
+test "prefix fallback rejects ~ and -> on the shorter binding" {
+    const alloc = std.testing.allocator;
+
+    // Both mean "let the key reach the app", but a prefix chord is consumed
+    // the instant it arrives — 300ms later there is no event left to deliver.
+    const rejected = [_][]const u8{
+        \\lcmd - k ~
+        \\cmd - k, cmd - k : echo seq
+        ,
+        \\lcmd - k -> : echo shorter
+        \\cmd - k, cmd - k : echo seq
+        ,
+    };
+    for (rejected) |src| {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, src));
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "cannot"));
+    }
+}
+
+test "equal-length and identical conflicts still error" {
+    const alloc = std.testing.allocator;
+    const rejected = [_][]const u8{
+        // identical chords, both wildcard-scoped
+        \\cmd - a : echo first
+        \\cmd - a : echo second
+        ,
+        // identical chords, disjoint scopes: HotkeyMap keys on chords alone
+        \\cmd - a [
+        \\    "Terminal" : echo t
+        \\]
+        \\cmd - a [
+        \\    "Firefox" : echo f
+        \\]
+        ,
+        // equal-length sequences that overlap in scope
+        \\cmd - k, cmd - c : echo one
+        \\cmd - k, cmd - c : echo two
+        ,
+    };
+    for (rejected) |src| {
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, src));
+    }
+}
+
+test "parseKeySpec accepts a bare chord" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { spec: []const u8, flags: ModifierFlag, key: u32 }{
+        .{ .spec = "cmd - q", .flags = .{ .cmd = true }, .key = c.kVK_ANSI_Q },
+        .{ .spec = "f19", .flags = .{ .@"fn" = true }, .key = c.kVK_F19 },
+        .{ .spec = "cmd + shift - a", .flags = .{ .cmd = true, .shift = true }, .key = c.kVK_ANSI_A },
+        .{ .spec = "0x0C", .flags = .{}, .key = 0x0C },
+    };
+    for (cases) |case| {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        const chord = try parser.parseKeySpec(case.spec);
+        try std.testing.expectEqual(case.key, chord.key);
+        try std.testing.expectEqual(@as(u32, @bitCast(case.flags)), @as(u32, @bitCast(chord.flags)));
+    }
+}
+
+test "parseKeySpec rejects config grammar and talks about keys, not modes" {
+    const alloc = std.testing.allocator;
+
+    // A keyspec is not a config line. Routing `-k` through parse() made a
+    // leading word read as a mode name, so `skhd -k "hello world"` reported
+    // "Mode 'hello' not found" — nonsense to someone synthesizing a keypress.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parseKeySpec("hello world"));
+        const msg = parser.error_info.?.message;
+        try std.testing.expect(!std.mem.containsAtLeast(u8, msg, 1, "Mode"));
+        try std.testing.expect(!std.mem.containsAtLeast(u8, msg, 1, "::"));
+    }
+
+    // Modes, process lists and actions are all config-file concepts that a
+    // keyspec must not accept.
+    const rejected = [_][]const u8{
+        "cmd - q [ \"Finder\" : echo x ]",
+        "cmd - q : echo hi",
+        "cmd - q | cmd - w",
+        "hello world",
+        "",
+        "cmd -",
+        "cmd - zzz",
+    };
+    for (rejected) |spec| {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parseKeySpec(spec));
+        try std.testing.expect(parser.error_info != null);
+    }
+}
+
+test "sequence_timeout directive" {
+    const alloc = std.testing.allocator;
+
+    // Default when the directive is absent.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try parser.parse(&mappings, "cmd - k, cmd - c : echo seq");
+        try std.testing.expectEqual(@as(u32, 300), mappings.sequence_timeout_ms);
+    }
+
+    // Bare number, explicit ms, and seconds all land in milliseconds.
+    const cases = [_]struct { src: []const u8, want: u32 }{
+        .{ .src = ".sequence_timeout 500", .want = 500 },
+        .{ .src = ".sequence_timeout 500ms", .want = 500 },
+        .{ .src = ".sequence_timeout 1s", .want = 1000 },
+    };
+    for (cases) |case| {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try parser.parse(&mappings, case.src);
+        try std.testing.expectEqual(case.want, mappings.sequence_timeout_ms);
+    }
+
+    // Last wins, like .shell.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try parser.parse(&mappings,
+            \\.sequence_timeout 400
+            \\.sequence_timeout 700
+        );
+        try std.testing.expectEqual(@as(u32, 700), mappings.sequence_timeout_ms);
+    }
+}
+
+test "sequence_timeout rejects zero and garbage" {
+    const alloc = std.testing.allocator;
+
+    // 0 would expire the prefix instantly, making every sequence unreachable
+    // while permanently swallowing its first chord.
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, ".sequence_timeout 0"));
+        try std.testing.expect(std.mem.containsAtLeast(u8, parser.error_info.?.message, 1, "must be greater than zero"));
+    }
+    {
+        var parser = try Parser.init(alloc, std.testing.io);
+        defer parser.deinit();
+        var mappings = try Mappings.init(alloc, std.testing.io);
+        defer mappings.deinit();
+        try std.testing.expectError(error.ParseErrorOccurred, parser.parse(&mappings, ".sequence_timeout"));
+    }
+}
+
+test "tap-hold timeout accepts ms and s suffixes" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+
+    // parse_duration_ms is shared with .sequence_timeout, so seconds support
+    // lands here too — which is what SYNTAX.md's grammar already promised.
+    try parser.parse(&mappings,
+        \\.device builtin { vendor: 0x05AC, product: 0x0342 }
+        \\.remap caps_lock [device builtin] {
+        \\    tap     : escape
+        \\    hold    : lctrl
+        \\    timeout : 1s
+        \\}
+        \\.remap space [device builtin] {
+        \\    tap     : space
+        \\    hold    : lalt
+        \\    timeout : 250ms
+        \\}
+    );
+    try std.testing.expectEqual(@as(usize, 2), mappings.tapholds.items.len);
+    try std.testing.expectEqual(@as(u32, 1000), mappings.tapholds.items[0].timeout_ms);
+    try std.testing.expectEqual(@as(u32, 250), mappings.tapholds.items[1].timeout_ms);
+}
+
+test "duration suffix must be on the same line as the number" {
+    const alloc = std.testing.allocator;
+    var parser = try Parser.init(alloc, std.testing.io);
+    defer parser.deinit();
+    var mappings = try Mappings.init(alloc, std.testing.io);
+    defer mappings.deinit();
+
+    // The tokenizer drops newlines and lexes any single character as a
+    // Token_Key, so a bare `s` on the next line is indistinguishable from a
+    // seconds suffix without comparing line numbers. Consuming it here would
+    // silently mean 500 SECONDS and orphan `: echo hi`.
+    try parser.parse(&mappings,
+        \\.sequence_timeout 500
+        \\s : echo hi
+    );
+    try std.testing.expectEqual(@as(u32, 500), mappings.sequence_timeout_ms);
+
+    const mode = mappings.mode_map.get("default").?;
+    try std.testing.expectEqual(@as(usize, 1), mode.hotkey_map.count());
+    var it = mode.hotkey_map.iterator();
+    const hk = it.next().?.key_ptr.*;
+    try std.testing.expectEqual(@as(u32, c.kVK_ANSI_S), hk.chords[0].key);
 }
 
 test "shell directive with spaces" {
@@ -2110,9 +2600,9 @@ test "command definition without placeholders" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify command expanded correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x30 }; // tab key
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --focus recent || yabai -m space --focus recent", cmd.command);
 }
@@ -2142,13 +2632,13 @@ test "command definition with single placeholder" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify hotkeys expand to correct commands
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .lcmd = true }, .key = c.kVK_ANSI_H };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --focus west || yabai -m display --focus west", cmd1.command);
     const keypress2 = Hotkey.KeyPress{ .flags = .{ .lcmd = true }, .key = c.kVK_ANSI_J };
-    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress2, ctx).?;
+    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress2}, ctx).?;
     const cmd2 = hotkey2.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --focus south || yabai -m display --focus south", cmd2.command);
 }
@@ -2178,14 +2668,14 @@ test "command definition with multiple placeholders" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify commands expanded correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .shift = true }, .key = c.kVK_ANSI_H };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --swap west || yabai -m display --swap west", cmd1.command);
 
     const keypress2 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .shift = true }, .key = c.kVK_ANSI_J };
-    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress2, ctx).?;
+    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress2}, ctx).?;
     const cmd2 = hotkey2.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --swap south || yabai -m display --swap south", cmd2.command);
 }
@@ -2212,9 +2702,9 @@ test "command definition with repeated placeholders" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify placeholder replaced correctly in both locations
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_N };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "osascript -e 'display notification \"Test Message\" with title \"Test Message\"'", cmd.command);
 }
@@ -2347,9 +2837,9 @@ test "command definition with escape sequences" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify escape sequences are processed correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_N };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "osascript -e 'display notification \"Message with \"quotes\"\" with title \"Test\"'", cmd.command);
 }
@@ -2375,14 +2865,14 @@ test "command definition with comma-separated arguments" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify commands expanded correctly
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .control = true, .shift = true }, .key = c.kVK_ANSI_K };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --resize top:0:-10", cmd1.command);
 
     const keypress2 = Hotkey.KeyPress{ .flags = .{ .cmd = true, .control = true, .shift = true }, .key = c.kVK_ANSI_J };
-    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress2, ctx).?;
+    const hotkey2 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress2}, ctx).?;
     const cmd2 = hotkey2.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --resize bottom:0:10", cmd2.command);
 }
@@ -2408,9 +2898,9 @@ test "command definition with whitespace handling" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 2);
 
     // Verify whitespace is trimmed from arguments
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress1 = Hotkey.KeyPress{ .flags = .{ .ralt = true }, .key = c.kVK_ANSI_M };
-    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress1, ctx).?;
+    const hotkey1 = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress1}, ctx).?;
     const cmd1 = hotkey1.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "yabai -m window --toggle YT Music || open -a \"YT Music\"", cmd1.command);
 }
@@ -2435,9 +2925,9 @@ test "command definition complex placeholders" {
     try std.testing.expectEqual(@as(u8, 3), cmd_def.max_placeholder);
 
     // Verify placeholders expanded in correct order
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_C };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
     const cmd = hotkey.find_command_for_process("").?;
     try std.testing.expectEqualSlices(u8, "echo third first third second", cmd.command);
 }
@@ -2465,9 +2955,9 @@ test "process group in hotkey with command expansion" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify commands expanded for different processes
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_A };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
 
     const firefox_cmd = hotkey.find_command_for_process("firefox").?;
     try std.testing.expectEqualSlices(u8, "open -a \"Firefox\"", firefox_cmd.command);
@@ -2549,9 +3039,9 @@ test "valid process group in process list" {
     try std.testing.expect(mappings.mode_map.get("default").?.hotkey_map.count() == 1);
 
     // Verify commands are set for all browsers
-    const ctx = Hotkey.KeyboardLookupContext{};
+    const ctx = Hotkey.PrefixLookupContext{ .process_name = null };
     const keypress = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_B };
-    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(keypress, ctx).?;
+    const hotkey = mappings.mode_map.get("default").?.hotkey_map.getKeyAdapted(&[_]Hotkey.KeyPress{keypress}, ctx).?;
 
     const firefox_cmd = hotkey.find_command_for_process("Firefox").?;
     try std.testing.expectEqualSlices(u8, "echo \"Browser hotkey\"", firefox_cmd.command);
@@ -2663,7 +3153,7 @@ test "modifier alias - basic definition and use" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .control = true, .shift = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "modifier alias - combined with extra modifiers" {
@@ -2683,7 +3173,7 @@ test "modifier alias - combined with extra modifiers" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .shift = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "modifier alias - nested alias" {
@@ -2704,7 +3194,7 @@ test "modifier alias - nested alias" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     const expected = ModifierFlag{ .cmd = true, .alt = true, .shift = true, .control = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "modifier alias - undefined alias errors" {
@@ -2769,9 +3259,9 @@ test "key alias - hex code in key position" {
     const default = mappings.mode_map.get("default").?;
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
-    try std.testing.expectEqual(@as(u32, 0x32), hk.key);
+    try std.testing.expectEqual(@as(u32, 0x32), hk.chords[0].key);
     const expected = ModifierFlag{ .control = true };
-    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.flags)));
+    try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(hk.chords[0].flags)));
 }
 
 test "key alias - literal carries implicit flags (e.g., delete -> fn)" {
@@ -2791,8 +3281,8 @@ test "key alias - literal carries implicit flags (e.g., delete -> fn)" {
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
     // delete is a fn-implicit literal; flags should include both cmd and fn
-    try std.testing.expect(hk.flags.cmd);
-    try std.testing.expect(hk.flags.@"fn");
+    try std.testing.expect(hk.chords[0].flags.cmd);
+    try std.testing.expect(hk.chords[0].flags.@"fn");
 }
 
 test "key alias - standalone without modifiers" {
@@ -2861,7 +3351,7 @@ test "alias - key alias inherits kind from referenced alias" {
     const default = mappings.mode_map.get("default").?;
     var it = default.hotkey_map.iterator();
     const hk = it.next().?.key_ptr.*;
-    try std.testing.expectEqual(@as(u32, 0x32), hk.key);
+    try std.testing.expectEqual(@as(u32, 0x32), hk.chords[0].key);
 }
 
 test "mouse button - parses as a literal with synthetic keycode" {
@@ -2884,16 +3374,16 @@ test "mouse button - parses as a literal with synthetic keycode" {
     var it = default.hotkey_map.iterator();
     while (it.next()) |entry| {
         const hk = entry.key_ptr.*;
-        if (hk.key == Keycodes.mouseButtonCode(1)) {
+        if (hk.chords[0].key == Keycodes.mouseButtonCode(1)) {
             saw_m1 = true;
-            try std.testing.expect(hk.flags.cmd);
+            try std.testing.expect(hk.chords[0].flags.cmd);
             // Mouse buttons must NOT pick up the implicit nx flag.
-            try std.testing.expect(!hk.flags.nx);
-            try std.testing.expect(!hk.flags.@"fn");
-        } else if (hk.key == Keycodes.mouseButtonCode(3)) {
+            try std.testing.expect(!hk.chords[0].flags.nx);
+            try std.testing.expect(!hk.chords[0].flags.@"fn");
+        } else if (hk.chords[0].key == Keycodes.mouseButtonCode(3)) {
             saw_m3 = true;
-            try std.testing.expect(hk.flags.passthrough);
-            try std.testing.expect(!hk.flags.nx);
+            try std.testing.expect(hk.passthrough);
+            try std.testing.expect(!hk.chords[0].flags.nx);
         }
     }
     try std.testing.expect(saw_m1);

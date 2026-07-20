@@ -143,7 +143,7 @@ pub fn main() !void {
     // Initialize hotkeys for process mapping benchmarks
     {
         // Original implementation
-        var hotkey_original = try HotkeyOriginal.create(allocator);
+        var hotkey_original = try HotkeyOriginal.create(allocator, &.{.{ .flags = .{}, .key = 0x35 }});
         g_hotkey_original = hotkey_original;
 
         // Add common process mappings to both implementations

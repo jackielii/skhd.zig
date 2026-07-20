@@ -20,26 +20,41 @@ pub const Client = struct {
     /// send it). Owned by the client; freed in `close`.
     grabber_version: ?[]u8 = null,
 
+    /// Dial the grabber's IPC socket.
+    ///
+    /// Returns the error without logging: whether a failed connect is worth
+    /// telling the user about is the caller's call, not this primitive's.
+    /// Most callers are probes that treat "not reachable" as an ordinary
+    /// answer — `--status` reports it as a field, `grabberStatus` prints its
+    /// own [FAIL] line — and a warning there is noise for the majority of
+    /// users, who have no `.remap`/`.taphold` rules and need no grabber at
+    /// all. The one caller that genuinely wants a warning (the agent, which
+    /// only dials when it has rules to forward) logs it itself.
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8) !Client {
-        const addr = std.Io.net.UnixAddress.init(socket_path) catch |err| {
-            log.warn("invalid socket path {s}: {s}", .{ socket_path, @errorName(err) });
-            return err;
-        };
-        const stream = addr.connect(io) catch |err| {
-            switch (err) {
-                error.FileNotFound => log.warn(
-                    "grabber socket not found at {s} — is skhd-grabber installed and running?",
-                    .{socket_path},
-                ),
-                error.PermissionDenied, error.AccessDenied => log.warn(
-                    "permission denied connecting to {s}",
-                    .{socket_path},
-                ),
-                else => log.warn("connect to {s} failed: {s}", .{ socket_path, @errorName(err) }),
-            }
-            return err;
-        };
+        const addr = try std.Io.net.UnixAddress.init(socket_path);
+        const stream = try addr.connect(io);
         return .{ .allocator = allocator, .io = io, .stream = stream };
+    }
+
+    /// Human-readable reason a `connect` failed, for callers that report it.
+    pub fn connectErrorMessage(err: anyerror, socket_path: []const u8, buf: []u8) []const u8 {
+        return switch (err) {
+            error.FileNotFound => std.fmt.bufPrint(
+                buf,
+                "grabber socket not found at {s} — is skhd-grabber installed and running?",
+                .{socket_path},
+            ),
+            error.PermissionDenied, error.AccessDenied => std.fmt.bufPrint(
+                buf,
+                "permission denied connecting to {s}",
+                .{socket_path},
+            ),
+            else => std.fmt.bufPrint(
+                buf,
+                "connect to {s} failed: {s}",
+                .{ socket_path, @errorName(err) },
+            ),
+        } catch "grabber connect failed";
     }
 
     pub fn close(self: *Client) void {

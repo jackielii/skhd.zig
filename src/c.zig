@@ -304,6 +304,7 @@ pub const kCGEventTapDisabledByTimeout: CGEventType = 0xFFFFFFFE;
 pub const kCGEventTapDisabledByUserInput: CGEventType = 0xFFFFFFFF;
 
 pub const kCGKeyboardEventKeycode: CGEventField = 9;
+pub const kCGKeyboardEventAutorepeat: CGEventField = 8;
 pub const kCGMouseEventButtonNumber: CGEventField = 3;
 pub const kCGEventSourceUserData: CGEventField = 42;
 

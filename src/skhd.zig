@@ -66,6 +66,22 @@ grabber_reconnect_timer: c.CFRunLoopTimerRef = null,
 /// signal), restoreAll() clears the OS-level mapping so the keyboard
 /// returns to default.
 hidutil: ?*Hidutil = null,
+/// Chords matched so far. Allocated at config load with
+/// len == mappings.max_chords. Never allocated on the event loop.
+sequence_prefix: []Hotkey.KeyPress = &.{},
+sequence_prefix_len: usize = 0,
+/// Frontmost process captured at the first chord. find_command_for_process
+/// caps names at 256 bytes, so this matches.
+sequence_process: [256]u8 = undefined,
+sequence_process_len: usize = 0,
+/// The complete binding the pending prefix would have fired, had a longer
+/// sequence not also been reachable. Run when the sequence fails to complete,
+/// so a declared shorter binding isn't silently thrown away. null when nothing
+/// shorter is declared — which is what keeps `cmd - q, cmd - q ["Protected"]`
+/// safe: with no fallback, the timeout still does nothing. Borrows mappings,
+/// so it is cleared by cancelPendingSequence before any reload swap.
+sequence_deferred: ?*Hotkey = null,
+sequence_timer: c.CFRunLoopTimerRef = null,
 
 pub fn init(gpa: std.mem.Allocator, io: std.Io, config_file: []const u8, verbose: bool, profile: bool) !Skhd {
     log.info("Initializing skhd with config: {s}", .{config_file});
@@ -148,7 +164,7 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io, config_file: []const u8, verbose
     | (1 << c.kCGEventRightMouseDown) //
     | (1 << c.kCGEventOtherMouseDown);
 
-    return Skhd{
+    var skhd = Skhd{
         .allocator = gpa,
         .io = io,
         .mappings = mappings,
@@ -160,6 +176,9 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io, config_file: []const u8, verbose
         .carbon_event = carbon_event,
         .hidutil = hidutil,
     };
+    errdefer gpa.free(skhd.config_file);
+    try skhd.allocSequencePrefix();
+    return skhd;
 }
 
 pub fn deinit(self: *Skhd) void {
@@ -170,6 +189,8 @@ pub fn deinit(self: *Skhd) void {
         self.tracer.printSummary(&stderr_w.interface) catch {};
         stderr_w.interface.flush() catch {};
     }
+
+    self.cancelPendingSequence();
 
     // Clear hidutil UserKeyMapping FIRST so the user's keyboard isn't
     // left remapped if anything below errors. Idempotent — no-op when
@@ -193,6 +214,7 @@ pub fn deinit(self: *Skhd) void {
     self.carbon_event.deinit();
     self.event_tap.deinit();
     self.mappings.deinit();
+    self.allocator.free(self.sequence_prefix);
     self.allocator.free(self.config_file);
 }
 
@@ -325,7 +347,14 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
 
     const client = try self.allocator.create(agent_grabber_client.Client);
     errdefer self.allocator.destroy(client);
-    client.* = try agent_grabber_client.Client.connect(self.allocator, self.io, grabber_protocol.default_socket_path);
+    // The only place a failed connect is worth warning about: we are here
+    // because the config HAS rules to forward, so the user asked for
+    // something that isn't going to work. Probes elsewhere stay quiet.
+    client.* = agent_grabber_client.Client.connect(self.allocator, self.io, grabber_protocol.default_socket_path) catch |err| {
+        var buf: [256]u8 = undefined;
+        log.warn("{s}", .{agent_grabber_client.Client.connectErrorMessage(err, grabber_protocol.default_socket_path, &buf)});
+        return err;
+    };
     errdefer client.close();
 
     try client.hello();
@@ -362,6 +391,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
 /// layer back to default".
 fn modeChangePushed(ctx: ?*anyopaque, mode_name: []const u8) void {
     const self: *Skhd = @ptrCast(@alignCast(ctx orelse return));
+    self.cancelPendingSequence();
     if (mode_name.len == 0) {
         if (self.mappings.mode_map.getPtr("default")) |m| {
             self.current_mode = m;
@@ -740,6 +770,7 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
             // delivering callbacks instead of sending the disabled event) —
             // the watchdog timer catches that case.
             log.info("Restarting event-tap (typ={d})", .{typ});
+            self.cancelPendingSequence();
             c.CGEventTapEnable(self.event_tap.handle, true);
             if (!c.CGEventTapIsEnabled(self.event_tap.handle)) {
                 log.err("CGEventTapEnable did not bring the tap back; watchdog will detach it on the next tick.", .{});
@@ -784,13 +815,125 @@ fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef,
     }
 }
 
+fn allocSequencePrefix(self: *Skhd) !void {
+    // Allocate before freeing: on OOM the old buffer stays valid rather
+    // than leaving a dangling slice for deinit to free again.
+    const buf = try self.allocator.alloc(Hotkey.KeyPress, self.mappings.max_chords);
+    self.allocator.free(self.sequence_prefix);
+    self.sequence_prefix = buf;
+    self.sequence_prefix_len = 0;
+}
+
+/// prefix ++ eventkey. In bounds because a prefix only stays pending when
+/// hit.chords.len > prefix.len, so a pending length is strictly less than
+/// max_chords; a prefix that reaches max_chords is by definition complete
+/// and cleared before the next chord arrives.
+fn buildPrefix(self: *Skhd, eventkey: Hotkey.KeyPress) []const Hotkey.KeyPress {
+    std.debug.assert(self.sequence_prefix_len < self.sequence_prefix.len);
+    self.sequence_prefix[self.sequence_prefix_len] = eventkey;
+    return self.sequence_prefix[0 .. self.sequence_prefix_len + 1];
+}
+
+fn commitPrefix(self: *Skhd, prefix: []const Hotkey.KeyPress, process_name: []const u8) void {
+    self.sequence_prefix_len = prefix.len;
+    const n = @min(process_name.len, self.sequence_process.len);
+    @memcpy(self.sequence_process[0..n], process_name[0..n]);
+    self.sequence_process_len = n;
+}
+
+fn processMatchesCaptured(self: *const Skhd, process_name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(self.sequence_process[0..self.sequence_process_len], process_name);
+}
+
+fn cancelSequenceTimer(self: *Skhd) void {
+    if (self.sequence_timer != null) {
+        c.CFRunLoopTimerInvalidate(self.sequence_timer);
+        c.CFRelease(self.sequence_timer);
+        self.sequence_timer = null;
+    }
+}
+
+fn cancelPendingSequence(self: *Skhd) void {
+    self.cancelSequenceTimer();
+    self.sequence_prefix_len = 0;
+    self.sequence_process_len = 0;
+    self.sequence_deferred = null;
+}
+
+/// Run the shorter binding a pending prefix deferred.
+///
+/// Safe to call without a CGEvent: forwardKey ignores its event parameter,
+/// and `eventkey` is only read when via_wildcard is set, which the prefix path
+/// never does. The hotkey's own trigger stands in so the argument is honest
+/// rather than a placeholder.
+fn fireDeferred(self: *Skhd, hotkey: *Hotkey, process_name: []const u8) !HotkeyResult {
+    const eventkey = hotkey.chords[0];
+    return self.processMatchedHotkey(hotkey, &eventkey, null, process_name, false);
+}
+
+fn sequenceTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const self: *Skhd = @ptrCast(@alignCast(info orelse return));
+
+    // Snapshot before cancelling — cancelPendingSequence zeroes both.
+    const deferred = self.sequence_deferred;
+    var process_buf: [256]u8 = undefined;
+    const n = self.sequence_process_len;
+    @memcpy(process_buf[0..n], self.sequence_process[0..n]);
+
+    self.cancelPendingSequence();
+
+    // The sequence didn't complete. If the first press had a shorter binding
+    // of its own, that is what the user asked for — run it. With no fallback
+    // the prefix is simply discarded, as before.
+    if (deferred) |hotkey| {
+        _ = self.fireDeferred(hotkey, process_buf[0..n]) catch |err| {
+            log.err("sequence fallback failed: {s}", .{@errorName(err)});
+        };
+    }
+}
+
+fn startSequenceTimer(self: *Skhd) void {
+    self.cancelSequenceTimer();
+    const fire_date = c.CFAbsoluteTimeGetCurrent() +
+        @as(f64, @floatFromInt(self.mappings.sequence_timeout_ms)) / 1000.0;
+    var context: c.CFRunLoopTimerContext = .{
+        .version = 0,
+        .info = self,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    self.sequence_timer = c.CFRunLoopTimerCreate(
+        c.kCFAllocatorDefault,
+        fire_date,
+        0,
+        0,
+        0,
+        sequenceTimerCallback,
+        &context,
+    );
+    if (self.sequence_timer != null) {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), self.sequence_timer, c.kCFRunLoopDefaultMode);
+    } else {
+        log.err("Failed to create hotkey-sequence timer", .{});
+        self.cancelPendingSequence();
+    }
+}
+
 inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     if (self.current_mode == null) {
         self.tracer.traceNoModeExit();
         return event;
     }
 
-    // Skip events that we generated ourselves to avoid loops
+    // Skip events we generated ourselves. This MUST stay above all
+    // sequence handling: `cmd - q, cmd - q ["Terminal" | cmd - q]` forwards
+    // a cmd-q that re-enters this tap (head-inserted at kCGSessionEventTap;
+    // forwardKey posts to the same tap). If this check ran below, the
+    // forward would match the sequence's own first chord, go pending, and be
+    // swallowed — the app would never receive the quit. Returning here also
+    // means a self-generated event never advances or cancels a pending
+    // prefix, which is correct: our own synthesis is not user input.
     const marker = c.CGEventGetIntegerValueField(event, c.kCGEventSourceUserData);
     if (marker == SKHD_EVENT_MARKER) {
         self.tracer.traceSelfGeneratedExit();
@@ -807,6 +950,12 @@ inline fn handleKeyDown(self: *Skhd, event: c.CGEventRef) !c.CGEventRef {
     }
 
     const eventkey = createEventKey(event);
+    if (self.sequence_prefix_len > 0 and
+        c.CGEventGetIntegerValueField(event, c.kCGKeyboardEventAutorepeat) != 0)
+    {
+        return @ptrFromInt(0);
+    }
+
     const result = try self.processHotkey(&eventkey, event, process_name);
     return try self.handleHotkeyResult(result, event, eventkey, process_name);
 }
@@ -1212,79 +1361,136 @@ inline fn hotkeyFlagsToCGEventFlags(hotkey_flags: ModifierFlag) c.CGEventFlags {
     return flags;
 }
 
-/// Find a hotkey in the mode that matches the keyboard event
-/// Returns the hotkey pointer if found, null otherwise
-pub inline fn findHotkeyInMode(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-    // Method 1: HashMap lookup with adapted context (O(1) average case)
-    return self.findHotkeyHashMap(mode, eventkey);
-
-    // Method 2: Linear array search (O(n) but potentially faster for small sets)
-    // return self.findHotkeyLinear(mode, eventkey);
-}
-
-/// HashMap-based lookup using adapted context
-pub inline fn findHotkeyHashMap(self: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-    self.tracer.traceHotkeyLookup();
-    const ctx = Hotkey.KeyboardLookupContext{};
-    const result = mode.hotkey_map.getKeyAdapted(eventkey, ctx);
-    self.tracer.traceHotkeyFound(result != null);
-    return result;
-}
-
 /// Wildcard fallback for capture (layer) modes: same key, but the
 /// lookup ignores the keyboard's modifiers and only matches a config
 /// hotkey that itself was declared without explicit modifiers. Used
 /// to get QMK-style layer transparency: `fn_layer < h | left` should
 /// also fire for `shift+h`, `ctrl+h`, etc., with the user's actual
 /// modifiers carried through to the forwarded keystroke.
-pub inline fn findWildcardHotkey(_: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress) ?*Hotkey {
-    const ctx = Hotkey.WildcardLookupContext{};
-    return mode.hotkey_map.getKeyAdapted(eventkey, ctx);
+pub inline fn findWildcardHotkey(_: *Skhd, mode: *const Mode, eventkey: Hotkey.KeyPress, process_name: []const u8) ?*Hotkey {
+    return mode.hotkey_map.getKeyAdapted(eventkey, Hotkey.WildcardLookupContext{
+        .process_name = process_name,
+    });
 }
 
 /// Process a hotkey - single lookup that handles both forwarding and execution
 inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8) !HotkeyResult {
-    const mode = self.current_mode orelse return .not_found;
-
+    if (self.current_mode == null) return .not_found;
     self.tracer.traceHotkeyLookup();
-    var found_hotkey = self.findHotkeyInMode(mode, eventkey.*);
 
-    // Capture-mode layer transparency: if no exact-modifier match
-    // exists, try the wildcard lookup (matches the same key code
-    // against any rule with no declared modifiers). When this hits,
-    // we OR the user's actual modifiers into the forwarded output
-    // below so e.g. `fn_layer < h | left` also handles `lctrl+h`
-    // → `lctrl+left`.
-    var via_wildcard = false;
-    if (found_hotkey == null and mode.capture) {
-        found_hotkey = self.findWildcardHotkey(mode, eventkey.*);
-        via_wildcard = (found_hotkey != null);
-    }
+    // A sequence cannot begin in one application and finish in another.
+    if (self.sequence_prefix_len > 0 and !self.processMatchesCaptured(process_name))
+        self.cancelPendingSequence();
 
-    if (found_hotkey == null) {
+    // Iterates at most twice: a mid-sequence mismatch drops the prefix and
+    // retries this chord from the root, where the prefix is empty and the
+    // retry branch is therefore unreachable.
+    while (true) {
+        // Re-read per iteration: the mismatch path fires the deferred
+        // fallback before retrying, and a `; mode` activation reassigns
+        // current_mode. A mode captured before the loop would send the retry
+        // to the old mode's map, making the same two keys resolve differently
+        // depending on whether the timeout beat the user to the second chord.
+        const mode = self.current_mode orelse return .not_found;
+        const prefix = self.buildPrefix(eventkey.*);
+
+        // A complete match: fire it now, or defer it as the fallback if a
+        // longer sequence is still reachable.
+        const exact = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{
+            .process_name = process_name,
+            .length = .exact,
+        });
+
+        // Is a longer sequence still reachable in THIS application? Skipped
+        // entirely when the config declares no sequences, so ordinary configs
+        // pay nothing. The process filter is what keeps the fallback lag
+        // scoped: `cmd - k, cmd - k ["Chrome"]` makes `lcmd - k` wait only in
+        // Chrome — everywhere else there is no longer match and it fires now.
+        const longer = if (self.mappings.max_chords > 1)
+            mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{
+                .process_name = process_name,
+                .length = .longer,
+            })
+        else
+            null;
+
+        if (longer != null) {
+            // Pending. Remember the most specific complete match SEEN so far:
+            // only overwrite when this depth has one. A deeper prefix with no
+            // exact match must not erase a shallower fallback — with
+            // `lcmd - k` and a three-chord sequence but no two-chord binding,
+            // stalling at two chords would otherwise silently drop yabai,
+            // while `k` then an unrelated key still fires it.
+            self.commitPrefix(prefix, process_name);
+            if (exact) |hit| self.sequence_deferred = hit;
+            self.startSequenceTimer();
+            self.tracer.traceHotkeyFound(true);
+            return .consumed;
+        }
+
+        if (exact) |hit| {
+            self.cancelPendingSequence();
+
+            // Format the matched hotkey to mirror the config-file syntax —
+            // `mode < key` so the log line reads the same way the binding
+            // is written. Default mode prints just the key (no `default <`
+            // prefix in user configs). Compile out entirely in release
+            // builds (log.debug is filtered there anyway).
+            if (comptime builtin.mode == .Debug) {
+                if (self.verbose) {
+                    var key_buf: [256]u8 = undefined;
+                    const key_str = try Keycodes.formatKeyPressBuffer(&key_buf, eventkey.flags, eventkey.key);
+                    if (std.mem.eql(u8, mode.name, "default")) {
+                        log.debug("Found hotkey: '{s}' for process: '{s}'", .{ key_str, process_name });
+                    } else {
+                        log.debug("Found hotkey: '{s} < {s}' for process: '{s}'", .{ mode.name, key_str, process_name });
+                    }
+                }
+            }
+            self.tracer.traceHotkeyFound(true);
+            return self.processMatchedHotkey(hit, eventkey, event, process_name, false);
+        }
+
+        // Mismatch mid-sequence: the sequence is off, so its fallback is now
+        // due — run it, then reprocess this chord from the root so it can
+        // still fire an unrelated hotkey or start another sequence. Both
+        // halves matter: `cmd-k` then `x` must run yabai AND deliver `x`.
+        if (self.sequence_prefix_len > 0) {
+            const deferred = self.sequence_deferred;
+            self.cancelPendingSequence();
+            if (deferred) |hk| {
+                // Log and carry on, matching the timer path: a fallback that
+                // fails to fork must not also swallow the chord that ended the
+                // sequence.
+                _ = self.fireDeferred(hk, process_name) catch |err| {
+                    log.err("sequence fallback failed: {s}", .{@errorName(err)});
+                };
+            }
+            continue;
+        }
+
+        // Capture-mode transparency: consult the fallback only if no rule
+        // claimed this chord. An explicit `fn_layer < cmd - h ["Terminal"]`
+        // claims cmd+h in that mode, so it must not become `cmd - left` in
+        // Firefox merely because that rule has no action there.
+        if (mode.capture) {
+            const claimed = mode.hotkey_map.getKeyAdapted(prefix, Hotkey.PrefixLookupContext{
+                .process_name = null,
+            }) != null;
+            if (!claimed) {
+                if (self.findWildcardHotkey(mode, eventkey.*, process_name)) |hit| {
+                    self.tracer.traceHotkeyFound(true);
+                    return self.processMatchedHotkey(hit, eventkey, event, process_name, true);
+                }
+            }
+        }
+
         self.tracer.traceHotkeyFound(false);
         return .not_found;
     }
+}
 
-    // Format the matched hotkey to mirror the config-file syntax —
-    // `mode < key` so the log line reads the same way the binding
-    // is written. Default mode prints just the key (no `default <`
-    // prefix in user configs). Compile out entirely in release
-    // builds (log.debug is filtered there anyway).
-    if (comptime builtin.mode == .Debug) {
-        if (self.verbose) {
-            var key_buf: [256]u8 = undefined;
-            const key_str = try Keycodes.formatKeyPressBuffer(&key_buf, eventkey.flags, eventkey.key);
-            if (std.mem.eql(u8, mode.name, "default")) {
-                log.debug("Found hotkey: '{s}' for process: '{s}'", .{ key_str, process_name });
-            } else {
-                log.debug("Found hotkey: '{s} < {s}' for process: '{s}'", .{ mode.name, key_str, process_name });
-            }
-        }
-    }
-    self.tracer.traceHotkeyFound(true);
-    const hotkey = found_hotkey.?;
-
+inline fn processMatchedHotkey(self: *Skhd, hotkey: *Hotkey, eventkey: *const Hotkey.KeyPress, event: c.CGEventRef, process_name: []const u8, via_wildcard: bool) !HotkeyResult {
     // Check for process-specific command/forward (includes wildcard fallback)
     if (hotkey.find_command_for_process(process_name)) |process_cmd| {
         switch (process_cmd) {
@@ -1308,7 +1514,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                 log.debug("Executing command '{s}' for process {s}", .{ cmd, process_name });
                 self.tracer.traceCommandExecuted();
                 try forkAndExec(self.mappings.shell, cmd, self.verbose);
-                return if (hotkey.flags.passthrough) .passthrough else .consumed;
+                return if (hotkey.passthrough) .passthrough else .consumed;
             },
             .unbound => {
                 log.debug("Unbound key for process {s}", .{process_name});
@@ -1321,6 +1527,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
                     try forkAndExec(self.mappings.shell, activation_cmd, self.verbose);
                 }
                 log.debug("Activating mode '{s}'", .{act.mode_name});
+                self.cancelPendingSequence();
                 self.current_mode = self.mappings.mode_map.getPtr(act.mode_name);
                 if (self.current_mode) |_mode| {
                     if (_mode.command) |mode_cmd| {
@@ -1379,9 +1586,26 @@ pub fn reloadConfig(self: *Skhd) !void {
         return err;
     };
 
+    // Pending sequence candidates borrow the current mappings.
+    self.cancelPendingSequence();
+
+    // Allocate the new prefix buffer before committing the mappings swap,
+    // so a reload is all-or-nothing: reloadConfig's error is only logged
+    // while the daemon keeps running, so if this alloc failed after the
+    // swap, self.mappings would already point at new_mappings while
+    // sequence_prefix stayed sized for the old (possibly smaller)
+    // max_chords — a later commitPrefix() could then write past the end
+    // of the buffer (assert-caught in Debug/ReleaseSafe, silent
+    // out-of-bounds write in ReleaseFast).
+    const new_prefix = try self.allocator.alloc(Hotkey.KeyPress, new_mappings.max_chords);
+
     // Swap old mappings with new ones
     self.mappings.deinit();
     self.mappings = new_mappings;
+
+    self.allocator.free(self.sequence_prefix);
+    self.sequence_prefix = new_prefix;
+    self.sequence_prefix_len = 0;
 
     // Reset to default mode
     if (self.mappings.mode_map.getPtr("default")) |default_mode| {
@@ -1562,7 +1786,7 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, io: std.Io, config: []
     const carbon_event = try CarbonEvent.init(allocator, io);
     errdefer carbon_event.deinit();
 
-    return Skhd{
+    var skhd = Skhd{
         .allocator = allocator,
         .io = io,
         .mappings = mappings,
@@ -1573,6 +1797,9 @@ fn createTestSkhdFromConfig(allocator: std.mem.Allocator, io: std.Io, config: []
         .tracer = Tracer.init(false),
         .carbon_event = carbon_event,
     };
+    errdefer allocator.free(skhd.config_file);
+    try skhd.allocSequencePrefix();
+    return skhd;
 }
 
 test "hot reload refresh is deferred until maintenance turn" {
@@ -1621,6 +1848,47 @@ test "hot reload refresh is deferred until maintenance turn" {
     skhd.processPendingHotReloadRefresh();
     try std.testing.expect(skhd.hotloader != null);
     try std.testing.expectEqual(@as(usize, 2), skhd.hotloader.?.watch_list.items.len);
+}
+
+test "reload resizes the sequence prefix buffer to the new max_chords" {
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // PID-qualified for the same reason as the hot reload test above.
+    const test_id = std.testing.random_seed;
+    const pid = std.c.getpid();
+    const config_path = try std.fmt.allocPrint(allocator, "/tmp/skhd_test_reload_resize_{d}_{d}.skhdrc", .{ test_id, pid });
+    defer allocator.free(config_path);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = "cmd - a : echo initial" });
+    defer std.Io.Dir.deleteFileAbsolute(io, config_path) catch {};
+
+    var skhd = try Skhd.init(allocator, io, config_path, false, false);
+    defer skhd.deinit();
+
+    // Baseline: no sequences, so one chord is the longest chord list.
+    try std.testing.expectEqual(@as(usize, 1), skhd.mappings.max_chords);
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix.len);
+
+    // Reload into a config whose longest chord list is longer. The buffer
+    // must grow with it: commitPrefix indexes it by sequence_prefix_len and
+    // trusts it to be sized for the *current* mappings, so a stale buffer is
+    // an out-of-bounds write (assert in Debug/ReleaseSafe, silent in
+    // ReleaseFast).
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = config_path,
+        .data =
+        \\cmd - a : echo reloaded
+        \\cmd - k, cmd - c : echo seq
+        ,
+    });
+    try skhd.reloadConfig();
+
+    try std.testing.expectEqual(@as(usize, 2), skhd.mappings.max_chords);
+    try std.testing.expectEqual(skhd.mappings.max_chords, skhd.sequence_prefix.len);
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
 }
 
 test "processHotkey respects passthrough in capture mode" {
@@ -1672,6 +1940,348 @@ test "processHotkey respects passthrough in capture mode" {
         const result = try skhd.processHotkey(&keypress, mock_event, "test");
         try std.testing.expectEqual(HotkeyResult.not_found, result);
     }
+}
+
+test "shorter binding defers while a longer sequence is applicable" {
+    const alloc = std.testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // `~` cannot be a fallback (nothing left to pass through), so the shorter
+    // binding forwards instead — forwardKey no-ops under test, which keeps
+    // this from fork+exec'ing a shell the way a `:` command would.
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k | f19
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+
+    // In Chrome the sequence is applicable, so the shorter binding is
+    // deferred rather than fired: pending, with a fallback remembered.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred != null);
+
+    // Second chord completes the sequence; the fallback is dropped, not run.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "shorter binding fires instantly where the sequence does not apply" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k | f19
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+
+    // Outside Chrome there is no applicable longer match, so nothing is
+    // deferred and the binding fires immediately. If this ever goes pending,
+    // every window-focus press pays the timeout and the feature is unusable.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "kitty"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "no shorter binding means the timeout still discards the prefix" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Issue #51's safety binding: nothing shorter is declared, so there is
+    // nothing to fall back to. macOS's own Cmd-Q is not an skhd binding and
+    // must never be invented as one.
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\cmd - q, cmd - q [
+        \\    "Protected App" : echo quit
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_q = Hotkey.KeyPress{ .key = c.kVK_ANSI_Q, .flags = .{ .cmd = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "mismatch fires the deferred fallback and still delivers the chord" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k | f19
+        \\cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+        \\alt - z ~
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+    const alt_z = Hotkey.KeyPress{ .key = c.kVK_ANSI_Z, .flags = .{ .alt = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expect(skhd.sequence_deferred != null);
+
+    // alt-z doesn't continue the sequence: the fallback runs, and alt-z is
+    // reprocessed from the root so it still fires its own binding.
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&alt_z, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+    try std.testing.expect(skhd.sequence_deferred == null);
+}
+
+test "deferred fallback survives a prefix depth with no exact match" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // A ladder with a hole: there is no two-chord binding, so depth 2 has no
+    // exact match. The depth-1 fallback must survive rather than be erased —
+    // otherwise a triple-tap that stalls at two chords silently loses the
+    // yabai action, while `k` then an unrelated key would still fire it.
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\lcmd - k | f19
+        \\cmd - k, cmd - k, cmd - k [
+        \\    "Google Chrome" | cmd - k
+        \\]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .lcmd = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    const at_depth_1 = skhd.sequence_deferred;
+    try std.testing.expect(at_depth_1 != null);
+
+    // Depth 2: no exact match here, but the fallback is still owed.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Google Chrome"));
+    try std.testing.expectEqual(@as(usize, 2), skhd.sequence_prefix_len);
+    try std.testing.expectEqual(at_depth_1, skhd.sequence_deferred);
+}
+
+test "a deferred mode activation is visible to the mismatch retry" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // The mismatch path now fires the fallback before reprocessing the chord.
+    // If that fallback switches modes, the retry must look up the NEW mode —
+    // otherwise the same two keys mean different things depending on whether
+    // the timeout beat you to it.
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\:: wm
+        \\alt - a ; wm
+        \\alt - a, alt - b | f19
+        \\alt - x ~
+        \\wm < alt - x | f19
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const alt_a = Hotkey.KeyPress{ .key = c.kVK_ANSI_A, .flags = .{ .alt = true } };
+    const alt_x = Hotkey.KeyPress{ .key = c.kVK_ANSI_X, .flags = .{ .alt = true } };
+
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&alt_a, mock_event, "any"));
+    try std.testing.expect(skhd.sequence_deferred != null);
+
+    // alt-x mismatches: the activation fires, switching to `insert`, and the
+    // retry must resolve alt-x there (`| f19` -> consumed), not in `default`
+    // (`~` -> passthrough).
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&alt_x, mock_event, "any"));
+    try std.testing.expectEqualStrings("wm", skhd.current_mode.?.name);
+}
+
+test "deferred action tracks the most specific complete match" {
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\alt - a : echo one
+        \\alt - a, alt - b : echo two
+        \\alt - a, alt - b, alt - c : echo three
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const a = Hotkey.KeyPress{ .key = c.kVK_ANSI_A, .flags = .{ .alt = true } };
+    const b = Hotkey.KeyPress{ .key = c.kVK_ANSI_B, .flags = .{ .alt = true } };
+
+    // After `a`, stopping should run `a`.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&a, mock_event, "any"));
+    const after_a = skhd.sequence_deferred.?;
+    try std.testing.expectEqual(@as(usize, 1), after_a.chords.len);
+
+    // After `a, b`, stopping should run `a, b` — the deferred action grows
+    // with the prefix rather than staying pinned to the shortest match.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&b, mock_event, "any"));
+    const after_ab = skhd.sequence_deferred.?;
+    try std.testing.expectEqual(@as(usize, 2), after_ab.chords.len);
+}
+
+test "sequence prefix buffer: pending, completion, mismatch retry, process change" {
+    const alloc = std.testing.allocator;
+
+    // `~` actions keep the assertions observable without forking a shell:
+    // a pending chord is `.consumed`, a completed one is `.passthrough`.
+    const config =
+        \\cmd - k, cmd - c ~
+        \\alt - z ~
+    ;
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, config);
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    // The buffer is sized from the config, not the event loop.
+    try std.testing.expectEqual(@as(usize, 2), skhd.mappings.max_chords);
+    try std.testing.expectEqual(@as(usize, 2), skhd.sequence_prefix.len);
+
+    const cmd_k = Hotkey.KeyPress{ .key = c.kVK_ANSI_K, .flags = .{ .cmd = true } };
+    const cmd_c = Hotkey.KeyPress{ .key = c.kVK_ANSI_C, .flags = .{ .cmd = true } };
+    const alt_z = Hotkey.KeyPress{ .key = c.kVK_ANSI_Z, .flags = .{ .alt = true } };
+
+    // First chord: pending, consumed, prefix retained.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "test"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+
+    // Second chord completes the sequence and clears the prefix.
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&cmd_c, mock_event, "test"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+
+    // Mismatch mid-sequence: the prefix is dropped and the chord is
+    // reprocessed from the root, where it fires an unrelated hotkey.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "test"));
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&alt_z, mock_event, "test"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+
+    // A sequence cannot begin in one application and finish in another:
+    // cmd-c alone matches nothing once the prefix is dropped.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "test"));
+    try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_c, mock_event, "Other App"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+}
+
+test "process-scoped sequence completes and does not apply elsewhere" {
+    // `cmd - q, cmd - q ["Protected App" | cmd - q]`: the completing chord
+    // forwards cmd-q back out. That forward re-enters our own tap (it's
+    // head-inserted at kCGSessionEventTap and marked SKHD_EVENT_MARKER), but
+    // by then the sequence has already completed and the prefix is empty, so
+    // the marker check (handleKeyDown) is what stops it from being
+    // re-matched as a fresh first chord. See "self-generated events never
+    // touch pending sequence state" below for that half of the invariant.
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\cmd - q, cmd - q ["Protected App" | cmd - q]
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    const cmd_q = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_Q };
+
+    // First press: pending, consumed, prefix retained.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+
+    // Second press completes the sequence and forwards cmd-q back out.
+    // forwardKey no-ops under builtin.is_test, so the only observable
+    // effects are the result and the cleared prefix.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Protected App"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
+
+    // Elsewhere the sequence does not apply, so cmd-q passes through to macOS.
+    try std.testing.expectEqual(HotkeyResult.not_found, try skhd.processHotkey(&cmd_q, mock_event, "Firefox"));
+}
+
+test "passthrough applies to the final chord only" {
+    // `cmd - k, cmd - c -> : echo hi`: chord 1 can't be delivered before
+    // completion is known (we don't yet know whether the user is mid-sequence
+    // or just pressed an unrelated key), so it must be .consumed regardless
+    // of the `->` on the binding. Only the completing chord reads `->`/`~`
+    // (see the comment in processHotkey's pending arm).
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, "cmd - k, cmd - c -> : echo hi");
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    const cmd_k = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_K };
+    const cmd_c = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_C };
+
+    // Chord 1 is consumed — completion isn't known yet, so delivering it
+    // would send a cmd-k the user never meant to send.
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_k, mock_event, "Any"));
+    // Chord 2 completes: action fires and the key still goes through.
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&cmd_c, mock_event, "Any"));
+}
+
+test "self-generated events never touch pending sequence state" {
+    // The marker check in handleKeyDown must run before any sequence
+    // handling and must return early without touching sequence_prefix_len.
+    // If it ever moved below sequence handling (or stopped returning
+    // early), a forward of `cmd - q, cmd - q`'s own trigger would re-enter
+    // the tap, match the sequence's own first chord, go pending, and the
+    // app would never receive the keypress.
+    const alloc = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io,
+        \\cmd - q, cmd - q : echo quit
+    );
+    defer skhd.deinit();
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+
+    const cmd_q = Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = c.kVK_ANSI_Q };
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Any"));
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+
+    // A mock pointer can't carry kCGEventSourceUserData, so this needs a
+    // real CGEvent mirroring forwardKey's own construction.
+    const marked = c.CGEventCreateKeyboardEvent(null, c.kVK_ANSI_Q, true);
+    defer c.CFRelease(marked);
+    c.CGEventSetFlags(marked, c.kCGEventFlagMaskCommand);
+    c.CGEventSetIntegerValueField(marked, c.kCGEventSourceUserData, SKHD_EVENT_MARKER);
+
+    const returned = try skhd.handleKeyDown(marked);
+    // Passed through untouched, and the prefix is exactly as it was.
+    try std.testing.expectEqual(marked, returned);
+    try std.testing.expectEqual(@as(usize, 1), skhd.sequence_prefix_len);
+
+    // The prefix length alone can coincidentally read as 1 even if the
+    // marked event above WAS processed as a phantom chord (mismatch on
+    // process -> cancel -> re-match as a fresh pending first chord also
+    // lands on length 1). The real tell is whether the *originally*
+    // pending sequence (captured under process "Any") can still be
+    // completed afterward. If the marker check ran after sequence
+    // handling, the marked event's carbon_event process ("unknown" in
+    // tests) would not match "Any", cancelling and restarting the
+    // sequence under process "unknown" instead — so this completing
+    // press from "Any" would mismatch *again* and merely go pending a
+    // second time (prefix_len == 1), rather than complete (prefix_len == 0).
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_q, mock_event, "Any"));
+    try std.testing.expectEqual(@as(usize, 0), skhd.sequence_prefix_len);
 }
 
 test "capture-mode wildcard: no-modifier rule matches any-modifier press" {

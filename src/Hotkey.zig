@@ -13,9 +13,20 @@ pub const ProcessCommandError = error{
     OutOfMemory,
 };
 
+pub const KeyPress = struct {
+    flags: ModifierFlag,
+    key: u32,
+};
+
 allocator: std.mem.Allocator,
-flags: ModifierFlag = .{},
-key: u32 = 0,
+/// The chords that must be pressed in order to fire this hotkey.
+/// Owned. Invariant: len >= 1. chords[0] is the trigger.
+chords: []const KeyPress,
+/// `->`: run the action but still deliver the keypress. A property of the
+/// binding, not of any one chord: each chord carries its own modifiers, so
+/// storing passthrough in a chord's modifier set would leave it undefined
+/// for every chord but the first. Applies to the final chord only.
+passthrough: bool = false,
 wildcard_command: ?ProcessCommand = null,
 // Use ArrayHashMap for process name -> command mapping
 mappings: std.StringArrayHashMapUnmanaged(ProcessCommand) = .empty,
@@ -35,22 +46,31 @@ pub fn destroy(self: *Hotkey) void {
     }
 
     self.mode_list.deinit(self.allocator);
+    self.allocator.free(self.chords);
     self.allocator.destroy(self);
 }
 
-pub fn create(allocator: std.mem.Allocator) !*Hotkey {
+pub fn create(allocator: std.mem.Allocator, chords: []const KeyPress) !*Hotkey {
+    std.debug.assert(chords.len >= 1);
     const hotkey = try allocator.create(Hotkey);
+    errdefer allocator.destroy(hotkey);
     hotkey.* = .{
         .allocator = allocator,
+        .chords = try allocator.dupe(KeyPress, chords),
     };
     return hotkey;
+}
+
+pub fn isSequence(self: *const Hotkey) bool {
+    return self.chords.len > 1;
 }
 
 pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
     pub fn hash(self: @This(), key: *Hotkey) u32 {
         _ = self;
-        // Like original skhd, only hash by key code to allow modifier matching during lookup
-        return key.key;
+        // Hash by the first chord's key code only, so hotkeys sharing a
+        // trigger land in one probe chain and eql separates them.
+        return key.chords[0].key;
     }
     pub fn eql(self: @This(), a: *Hotkey, b: *Hotkey, _: anytype) bool {
         _ = self;
@@ -58,26 +78,96 @@ pub const HotkeyMap = std.ArrayHashMapUnmanaged(*Hotkey, void, struct {
     }
 }, false);
 
-pub const KeyPress = struct {
-    flags: ModifierFlag,
-    key: u32,
-};
-
 pub fn eql(a: *Hotkey, b: *Hotkey) bool {
-    // Implement left/right modifier comparison logic like original skhd
-    // Note: This is for HashMap equality check, both are from config
-    return compareLRMod(a.flags, b.flags, .alt) and
-        compareLRMod(a.flags, b.flags, .cmd) and
-        compareLRMod(a.flags, b.flags, .control) and
-        compareLRMod(a.flags, b.flags, .shift) and
-        a.flags.@"fn" == b.flags.@"fn" and
-        a.flags.nx == b.flags.nx and
-        a.key == b.key;
+    if (a.chords.len != b.chords.len) return false;
+    for (a.chords, b.chords) |x, y| {
+        if (x.key != y.key) return false;
+        if (!(compareLRMod(x.flags, y.flags, .alt) and
+            compareLRMod(x.flags, y.flags, .cmd) and
+            compareLRMod(x.flags, y.flags, .control) and
+            compareLRMod(x.flags, y.flags, .shift) and
+            x.flags.@"fn" == y.flags.@"fn" and
+            x.flags.nx == y.flags.nx)) return false;
+    }
+    return true;
 }
 
-pub fn triggersOverlap(a: *Hotkey, b: *Hotkey) bool {
-    if (a.key != b.key) return false;
-    return hotkeyFlagsMatch(a.flags, b.flags) or hotkeyFlagsMatch(b.flags, a.flags);
+/// True when some one physical key press could match both chords.
+///
+/// This resolves per modifier family, not whole-set: the direction the
+/// overlap needs can differ between families. `cmd + lshift - x` and
+/// `lcmd + shift - x` overlap on a physical lcmd+lshift+x press, yet
+/// neither whole-set `hotkeyFlagsMatch` direction holds — cmd needs
+/// x-as-config, shift needs y-as-config.
+fn chordsOverlap(x: KeyPress, y: KeyPress) bool {
+    if (x.key != y.key) return false;
+    return familyOverlap(x.flags, y.flags, .alt) and
+        familyOverlap(x.flags, y.flags, .cmd) and
+        familyOverlap(x.flags, y.flags, .control) and
+        familyOverlap(x.flags, y.flags, .shift) and
+        x.flags.@"fn" == y.flags.@"fn" and
+        x.flags.nx == y.flags.nx;
+}
+
+/// Could one physical press satisfy this modifier family's requirement in
+/// both configs? Derived from the per-family semantics `hotkeyFlagsMatch`
+/// encodes, as the intersection of the keyboard states each config accepts:
+///
+///   - general bit set  -> accepts any event with general, left, or right
+///                         (side bits in the config are ignored)
+///   - general clear    -> accepts exactly the event whose left/right bits
+///                         equal the config's, with general clear
+///
+/// So, writing ANY for a general config, L/R/LR for the side-bit configs
+/// and NONE for an absent family:
+///
+///   ANY  vs ANY   -> true   (an event with the general bit matches both)
+///   ANY  vs L/R/LR-> true   (that exact side state satisfies ANY too)
+///   ANY  vs NONE  -> false  (NONE accepts only "family absent"; ANY needs it)
+///   L    vs L     -> true   (same single accepted state)
+///   L    vs R     -> false  (disjoint single states)
+///   L    vs LR    -> false  (LR needs rcmd too; L needs it clear)
+///   L/R/LR vs NONE-> false  (NONE needs the family absent)
+///   NONE vs NONE  -> true   (both accept "family absent")
+fn familyOverlap(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd, control, shift }) bool {
+    const general_field, const left_field, const right_field = switch (mod) {
+        .alt => .{ "alt", "lalt", "ralt" },
+        .cmd => .{ "cmd", "lcmd", "rcmd" },
+        .control => .{ "control", "lcontrol", "rcontrol" },
+        .shift => .{ "shift", "lshift", "rshift" },
+    };
+
+    const a_general = @field(a, general_field);
+    const b_general = @field(b, general_field);
+    const a_left = @field(a, left_field);
+    const a_right = @field(a, right_field);
+    const b_left = @field(b, left_field);
+    const b_right = @field(b, right_field);
+
+    if (a_general and b_general) return true;
+    // One side is general: it accepts any event carrying this family, so the
+    // other's accepted state qualifies iff it names a side at all.
+    if (a_general) return b_left or b_right;
+    if (b_general) return a_left or a_right;
+    // Neither is general: each accepts exactly one keyboard state.
+    return a_left == b_left and a_right == b_right;
+}
+
+/// True when one hotkey's chord list is a prefix of the other's (equal
+/// length counts), comparing chords with overlap semantics — chords that
+/// some one physical press could match both of.
+///
+/// Combined with processScopesOverlap this is the whole conflict rule, and
+/// because chordsOverlap resolves per modifier family it is exact: any two
+/// configs a single press could both match are rejected. That is what makes
+/// "at most one hotkey matches any (mode, prefix, process)" true, and hence
+/// probe order in PrefixLookupContext unobservable.
+pub fn onePrefixesOther(a: *const Hotkey, b: *const Hotkey) bool {
+    const n = @min(a.chords.len, b.chords.len);
+    for (a.chords[0..n], b.chords[0..n]) |x, y| {
+        if (!chordsOverlap(x, y)) return false;
+    }
+    return true;
 }
 
 fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd, control, shift }) bool {
@@ -113,17 +203,48 @@ fn compareLRMod(a: ModifierFlag, b: ModifierFlag, comptime mod: enum { alt, cmd,
     return a_general == b_general and a_left == b_left and a_right == b_right;
 }
 
-// Context for looking up hotkeys from keyboard events
-// This uses our custom modifier matching logic
-pub const KeyboardLookupContext = struct {
-    pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
-        // Must match the hash function used by HotkeyMap for lookup to work
-        return key.key;
+/// Looks a chord prefix up against a mode's hotkeys.
+///
+/// The caller reads the result's chord count to decide what happened:
+///   chords.len == prefix.len -> complete, fire it
+///   chords.len >  prefix.len -> pending, consume and arm the timer
+///   null                     -> nothing applicable
+///
+/// Enumerating candidates is unnecessary: when two sequences share a
+/// prefix, either one proves "pending" and the next chord disambiguates.
+pub const PrefixLookupContext = struct {
+    /// Frontmost process, or null to match structurally — ignoring
+    /// whether the hotkey has an action that applies here. The null form
+    /// answers "did any rule claim this chord?", which gates the
+    /// capture-mode fallback.
+    process_name: ?[]const u8,
+    /// Which chord counts to accept, relative to the prefix length.
+    ///   .exact  — a complete match: fire it, or defer it as the fallback
+    ///   .longer — a sequence is still reachable: go pending
+    ///   .any    — either; used with process_name = null as the
+    ///             capture-mode claim gate
+    length: enum { exact, longer, any } = .any,
+
+    pub fn hash(_: @This(), prefix: []const KeyPress) u32 {
+        std.debug.assert(prefix.len >= 1);
+        return prefix[0].key;
     }
 
-    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
-        // Match keyboard event against config hotkey
-        return config.key == keyboard.key and hotkeyFlagsMatch(config.flags, keyboard.flags);
+    pub fn eql(self: @This(), prefix: []const KeyPress, config: *Hotkey, _: usize) bool {
+        switch (self.length) {
+            .exact => if (config.chords.len != prefix.len) return false,
+            .longer => if (config.chords.len <= prefix.len) return false,
+            .any => if (config.chords.len < prefix.len) return false,
+        }
+        for (prefix, config.chords[0..prefix.len]) |ev, cfg| {
+            if (cfg.key != ev.key) return false;
+            if (!hotkeyFlagsMatch(cfg.flags, ev.flags)) return false;
+        }
+        // Skipping inapplicable hotkeys during probing is what lets a
+        // `cmd - q ["Terminal"]` entry not shadow a
+        // `cmd - q, cmd - q ["XYZ"]` entry while XYZ is frontmost.
+        const proc = self.process_name orelse return true;
+        return config.find_command_for_process(proc) != null;
     }
 };
 
@@ -134,12 +255,18 @@ pub const KeyboardLookupContext = struct {
 /// exact match elsewhere). The caller is expected to OR the user's
 /// modifiers into the forward target after a wildcard match.
 pub const WildcardLookupContext = struct {
+    process_name: []const u8,
+
     pub fn hash(_: @This(), key: Hotkey.KeyPress) u32 {
         return key.key;
     }
 
-    pub fn eql(_: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
-        return config.key == keyboard.key and config.flags.isEmpty();
+    pub fn eql(self: @This(), keyboard: Hotkey.KeyPress, config: *Hotkey, _: usize) bool {
+        // len == 1: the fallback must never fire a sequence off one chord.
+        if (config.chords.len != 1) return false;
+        if (config.chords[0].key != keyboard.key) return false;
+        if (!config.chords[0].flags.isEmpty()) return false;
+        return config.find_command_for_process(self.process_name) != null;
     }
 };
 
@@ -241,8 +368,12 @@ pub fn format(self: Hotkey, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         }
     }
     try writer.writeAll("}");
-    try writer.print("\n  flags: {f}", .{self.flags});
-    try writer.print("\n  key: {}", .{self.key});
+    try writer.writeAll("\n  chords: [");
+    for (self.chords, 0..) |chord, i| {
+        if (i != 0) try writer.writeAll(", ");
+        try writer.print("{f}-{}", .{ chord.flags, chord.key });
+    }
+    try writer.writeAll("]");
     try writer.print("\n  process_mappings: {} entries", .{self.mappings.count()});
     try writer.writeAll("\n}");
 }
@@ -396,6 +527,41 @@ pub fn find_command_for_process(self: *const Hotkey, process_name: []const u8) ?
     return self.wildcard_command;
 }
 
+pub fn hasWildcardAction(self: *const Hotkey) bool {
+    return self.wildcard_command != null;
+}
+
+/// True when any of this hotkey's actions is `~` (unbound). Such an action
+/// releases the original keypress to the application, which a sequence prefix
+/// cannot do — the chord was consumed the moment it arrived.
+pub fn hasUnboundAction(self: *const Hotkey) bool {
+    if (self.wildcard_command) |cmd| {
+        if (cmd == .unbound) return true;
+    }
+    var it = self.mappings.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == .unbound) return true;
+    }
+    return false;
+}
+
+pub fn hasExplicitProcess(self: *const Hotkey, process_name: []const u8) bool {
+    var it = self.mappings.iterator();
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, process_name)) return true;
+    }
+    return false;
+}
+
+pub fn processScopesOverlap(a: *const Hotkey, b: *const Hotkey) bool {
+    if (a.hasWildcardAction() or b.hasWildcardAction()) return true;
+    var it = a.mappings.iterator();
+    while (it.next()) |entry| {
+        if (b.hasExplicitProcess(entry.key_ptr.*)) return true;
+    }
+    return false;
+}
+
 pub fn add_mode(self: *Hotkey, mode: *Mode) !void {
     if (self.mode_list.contains(mode)) {
         return error.ModeAlreadyExistsInHotkey;
@@ -410,11 +576,8 @@ pub fn getProcessCount(self: *const Hotkey) usize {
 
 test "ArrayHashMap hotkey implementation" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = ModifierFlag{ .alt = true }, .key = 0x2 }});
     defer hotkey.destroy();
-
-    hotkey.flags = ModifierFlag{ .alt = true };
-    hotkey.key = 0x2;
 
     // Test the API
     try hotkey.add_process_command("firefox", "echo firefox");
@@ -443,14 +606,13 @@ test "ArrayHashMap hotkey implementation" {
 
 test "hotkey initialization" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
-    // Test that flags are properly initialized to empty
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(hotkey.flags)));
-
-    // Test that key is properly initialized to 0
-    try std.testing.expectEqual(@as(u32, 0), hotkey.key);
+    // Test that chords holds exactly the single chord passed in
+    try std.testing.expectEqual(@as(usize, 1), hotkey.chords.len);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(hotkey.chords[0].flags)));
+    try std.testing.expectEqual(@as(u32, 0), hotkey.chords[0].key);
 
     // Test that other fields are properly initialized
     try std.testing.expectEqual(@as(?ProcessCommand, null), hotkey.wildcard_command);
@@ -460,7 +622,7 @@ test "hotkey initialization" {
 
 test "add_process returns error on duplicate" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     // First mapping should succeed
@@ -490,9 +652,32 @@ test "add_process returns error on duplicate" {
     try std.testing.expectEqualStrings("echo wildcard", wildcard_cmd.?.command);
 }
 
+test "process scopes overlap for shared explicit app or wildcard" {
+    const alloc = std.testing.allocator;
+    var terminal = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
+    defer terminal.destroy();
+    try terminal.add_process_command("Terminal", "echo terminal");
+
+    var protected = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
+    defer protected.destroy();
+    try protected.add_process_command("Protected App", "echo protected");
+
+    var same_protected = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
+    defer same_protected.destroy();
+    try same_protected.add_process_command("protected app", "echo same");
+
+    var wildcard = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
+    defer wildcard.destroy();
+    try wildcard.add_process_command("*", "echo wildcard");
+
+    try testing.expect(!processScopesOverlap(terminal, protected));
+    try testing.expect(processScopesOverlap(protected, same_protected));
+    try testing.expect(processScopesOverlap(wildcard, protected));
+}
+
 test "ArrayHashMap performance characteristics" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     // Add many mappings
@@ -555,7 +740,7 @@ test "hotkeyFlagsMatch behavior" {
 
 test "duplicate commands allowed if identical" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     // Test duplicate command with same content is allowed
@@ -580,7 +765,7 @@ test "duplicate commands allowed if identical" {
 
 test "duplicate forwards allowed if identical" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     const key_press = KeyPress{ .flags = .{ .cmd = true }, .key = 0x24 };
@@ -605,7 +790,7 @@ test "duplicate forwards allowed if identical" {
 
 test "duplicate unbound allowed if identical" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     // First unbound should succeed
@@ -630,7 +815,7 @@ test "duplicate unbound allowed if identical" {
 
 test "duplicate activation allowed if identical" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     // Test activation without command
@@ -666,7 +851,7 @@ test "duplicate activation allowed if identical" {
 
 test "wildcard duplicate handling" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     // Test wildcard command duplicate
@@ -676,7 +861,7 @@ test "wildcard duplicate handling" {
     try std.testing.expectError(error.WildcardCommandAlreadyExists, result);
 
     // Test wildcard forward
-    var hotkey2 = try Hotkey.create(alloc);
+    var hotkey2 = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey2.destroy();
 
     const key_press = KeyPress{ .flags = .{}, .key = 0x24 };
@@ -685,7 +870,7 @@ test "wildcard duplicate handling" {
     try std.testing.expectError(error.WildcardCommandAlreadyExists, result2);
 
     // Test wildcard unbound
-    var hotkey3 = try Hotkey.create(alloc);
+    var hotkey3 = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey3.destroy();
 
     try hotkey3.add_process_unbound("*");
@@ -693,7 +878,7 @@ test "wildcard duplicate handling" {
     try std.testing.expectError(error.WildcardCommandAlreadyExists, result3);
 
     // Test wildcard activation
-    var hotkey4 = try Hotkey.create(alloc);
+    var hotkey4 = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey4.destroy();
 
     try hotkey4.add_process_activation("*", "mode", "cmd");
@@ -701,9 +886,266 @@ test "wildcard duplicate handling" {
     try std.testing.expectError(error.WildcardCommandAlreadyExists, result4);
 }
 
+test "onePrefixesOther detects prefix relationships with overlap semantics" {
+    const alloc = std.testing.allocator;
+    const cmd_q = KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
+    const lcmd_q = KeyPress{ .flags = .{ .lcmd = true }, .key = 0x0C };
+    const cmd_a = KeyPress{ .flags = .{ .cmd = true }, .key = 0x00 };
+
+    var single = try Hotkey.create(alloc, &.{cmd_q});
+    defer single.destroy();
+    var double = try Hotkey.create(alloc, &.{ cmd_q, cmd_q });
+    defer double.destroy();
+    var other = try Hotkey.create(alloc, &.{cmd_a});
+    defer other.destroy();
+    var specific = try Hotkey.create(alloc, &.{lcmd_q});
+    defer specific.destroy();
+
+    try testing.expect(onePrefixesOther(single, double));
+    try testing.expect(onePrefixesOther(double, single));
+    try testing.expect(!onePrefixesOther(single, other));
+    // Overlap, not equality: a physical lcmd-q press matches both.
+    try testing.expect(onePrefixesOther(single, specific));
+}
+
+test "chord overlap resolves per modifier family, not whole-set" {
+    const alloc = std.testing.allocator;
+    const x_key: u32 = 0x07;
+    const y_key: u32 = 0x10;
+
+    // The direction the overlap needs differs per family: cmd needs
+    // general-vs-specific one way, shift needs it the other way. A whole-set
+    // hotkeyFlagsMatch in either direction misses this, yet one physical
+    // lcmd+lshift+x press matches both configs.
+    var cmd_lshift = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true, .lshift = true }, .key = x_key }});
+    defer cmd_lshift.destroy();
+    var lcmd_shift_seq = try Hotkey.create(alloc, &.{
+        .{ .flags = .{ .lcmd = true, .shift = true }, .key = x_key },
+        .{ .flags = .{ .cmd = true }, .key = y_key },
+    });
+    defer lcmd_shift_seq.destroy();
+
+    try testing.expect(onePrefixesOther(cmd_lshift, lcmd_shift_seq));
+    try testing.expect(onePrefixesOther(lcmd_shift_seq, cmd_lshift));
+}
+
+test "chord overlap does not over-tighten" {
+    const alloc = std.testing.allocator;
+    const x_key: u32 = 0x07;
+
+    var lcmd_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .lcmd = true }, .key = x_key }});
+    defer lcmd_x.destroy();
+    var rcmd_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .rcmd = true }, .key = x_key }});
+    defer rcmd_x.destroy();
+    var cmd_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true }, .key = x_key }});
+    defer cmd_x.destroy();
+    var bare_x = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = x_key }});
+    defer bare_x.destroy();
+    var cmd_shift_x = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true, .shift = true }, .key = x_key }});
+    defer cmd_shift_x.destroy();
+    var cmd_x_2 = try Hotkey.create(alloc, &.{.{ .flags = .{ .cmd = true }, .key = x_key }});
+    defer cmd_x_2.destroy();
+
+    // No physical press carries lcmd and rcmd-without-lcmd at once.
+    try testing.expect(!onePrefixesOther(lcmd_x, rcmd_x));
+    // A general modifier still requires the family to be present.
+    try testing.expect(!onePrefixesOther(cmd_x, bare_x));
+    // An absent family requires the event to lack it entirely.
+    try testing.expect(!onePrefixesOther(cmd_x, cmd_shift_x));
+
+    // Genuine overlaps stay overlaps.
+    try testing.expect(onePrefixesOther(cmd_x, lcmd_x));
+    try testing.expect(onePrefixesOther(cmd_x, cmd_x_2));
+}
+
+test "familyOverlap is symmetric and reflexive across the whole family state space" {
+    // Mode.add_hotkey relies on two properties of familyOverlap that aren't
+    // exercised by name elsewhere:
+    //
+    //   1. Symmetry: add_hotkey calls onePrefixesOther(existing, hotkey) in
+    //      one fixed order. If familyOverlap were asymmetric, conflict
+    //      detection would depend on config line order.
+    //   2. Reflexivity (self-overlap): eql-equal hotkeys have identical
+    //      family state per chord, so familyOverlap(a, a) being true for
+    //      every reachable state is exactly what makes `eql` imply
+    //      `onePrefixesOther` — which is what makes the identity gate in
+    //      add_hotkey (`if (Hotkey.eql(existing, hotkey)) return
+    //      error.DuplicateHotkeyInMode;`) reachable at all.
+    //
+    // A family's config state is the tuple (general, left, right) — 8
+    // combinations. Exhaust all 8 for the cmd family and check both
+    // properties over the full 8x8 state space.
+    var states: [8]ModifierFlag = undefined;
+    for (0..8) |i| {
+        states[i] = .{
+            .cmd = (i & 0b100) != 0,
+            .lcmd = (i & 0b010) != 0,
+            .rcmd = (i & 0b001) != 0,
+        };
+    }
+
+    var pairs_checked: usize = 0;
+    for (states) |a| {
+        for (states) |b| {
+            try testing.expectEqual(
+                familyOverlap(a, b, .cmd),
+                familyOverlap(b, a, .cmd),
+            );
+            pairs_checked += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 64), pairs_checked);
+
+    var self_checked: usize = 0;
+    for (states) |a| {
+        try testing.expect(familyOverlap(a, a, .cmd));
+        self_checked += 1;
+    }
+    try testing.expectEqual(@as(usize, 8), self_checked);
+}
+
+test "prefix lookup resolves complete vs pending and skips inapplicable scopes" {
+    const alloc = std.testing.allocator;
+    const cmd_q = KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
+
+    var immediate = try Hotkey.create(alloc, &.{cmd_q});
+    defer immediate.destroy();
+    try immediate.add_process_command("Terminal", "echo t");
+
+    var sequence = try Hotkey.create(alloc, &.{ cmd_q, cmd_q });
+    defer sequence.destroy();
+    try sequence.add_process_command("Protected App", "echo p");
+
+    var map: HotkeyMap = .empty;
+    defer map.deinit(alloc);
+    try map.put(alloc, immediate, {});
+    try map.put(alloc, sequence, {});
+
+    const prefix: []const KeyPress = &.{cmd_q};
+
+    // Terminal: the one-chord rule applies -> complete.
+    try testing.expectEqual(immediate, map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = "Terminal",
+    }).?);
+
+    // Protected App: the one-chord rule is skipped during probing, so the
+    // sequence is reachable -> pending (chords.len > prefix.len).
+    const in_protected = map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = "Protected App",
+    }).?;
+    try testing.expectEqual(sequence, in_protected);
+    try testing.expect(in_protected.chords.len > prefix.len);
+
+    // Firefox: neither applies -> cmd-q passes through to macOS.
+    try testing.expect(map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = "Firefox",
+    }) == null);
+
+    // Process-blind: something claimed the chord, regardless of scope.
+    try testing.expect(map.getKeyAdapted(prefix, PrefixLookupContext{
+        .process_name = null,
+    }) != null);
+}
+
+test "prefix lookup narrows a shared prefix on the second chord" {
+    const alloc = std.testing.allocator;
+    const cmd_k = KeyPress{ .flags = .{ .cmd = true }, .key = 0x28 };
+    const cmd_c = KeyPress{ .flags = .{ .cmd = true }, .key = 0x08 };
+    const cmd_u = KeyPress{ .flags = .{ .cmd = true }, .key = 0x20 };
+
+    var comment = try Hotkey.create(alloc, &.{ cmd_k, cmd_c });
+    defer comment.destroy();
+    try comment.add_process_command("*", "comment");
+    var uncomment = try Hotkey.create(alloc, &.{ cmd_k, cmd_u });
+    defer uncomment.destroy();
+    try uncomment.add_process_command("*", "uncomment");
+
+    var map: HotkeyMap = .empty;
+    defer map.deinit(alloc);
+    try map.put(alloc, comment, {});
+    try map.put(alloc, uncomment, {});
+
+    // [cmd-k] matches both; either proves "pending". We don't care which.
+    const step1: []const KeyPress = &.{cmd_k};
+    const pending = map.getKeyAdapted(step1, PrefixLookupContext{ .process_name = "Code" }).?;
+    try testing.expect(pending.chords.len > step1.len);
+
+    // The second chord disambiguates.
+    const step2: []const KeyPress = &.{ cmd_k, cmd_u };
+    const done = map.getKeyAdapted(step2, PrefixLookupContext{ .process_name = "Code" }).?;
+    try testing.expectEqual(uncomment, done);
+    try testing.expectEqual(step2.len, done.chords.len);
+}
+
+test "wildcard context rejects sequences and inapplicable scopes" {
+    const alloc = std.testing.allocator;
+    const h = KeyPress{ .flags = .{}, .key = 0x04 };
+
+    var transparent = try Hotkey.create(alloc, &.{h});
+    defer transparent.destroy();
+    try transparent.add_process_command("*", "left");
+
+    var seq = try Hotkey.create(alloc, &.{ h, h });
+    defer seq.destroy();
+    try seq.add_process_command("*", "nope");
+
+    var map: HotkeyMap = .empty;
+    defer map.deinit(alloc);
+    try map.put(alloc, seq, {});
+    try map.put(alloc, transparent, {});
+
+    // The fallback must never fire a sequence off a single chord.
+    const found = map.getKeyAdapted(
+        Hotkey.KeyPress{ .flags = .{ .cmd = true }, .key = 0x04 },
+        WildcardLookupContext{ .process_name = "Firefox" },
+    );
+    try testing.expectEqual(transparent, found.?);
+}
+
+test "create dupes chords and reports sequence-ness" {
+    const alloc = std.testing.allocator;
+    const chords = [_]KeyPress{
+        .{ .flags = .{ .cmd = true }, .key = 0x28 },
+        .{ .flags = .{ .cmd = true }, .key = 0x08 },
+    };
+    var hotkey = try Hotkey.create(alloc, &chords);
+    defer hotkey.destroy();
+
+    try testing.expectEqual(@as(usize, 2), hotkey.chords.len);
+    try testing.expect(hotkey.isSequence());
+    try testing.expectEqual(@as(u32, 0x08), hotkey.chords[1].key);
+    // Owned, not borrowed.
+    try testing.expect(hotkey.chords.ptr != &chords);
+}
+
+test "single chord hotkey is not a sequence" {
+    const alloc = std.testing.allocator;
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{ .alt = true }, .key = 0x02 }});
+    defer hotkey.destroy();
+    try testing.expect(!hotkey.isSequence());
+    try testing.expectEqual(@as(u32, 0x02), hotkey.chords[0].key);
+}
+
+test "eql compares whole chord lists" {
+    const alloc = std.testing.allocator;
+    const q = KeyPress{ .flags = .{ .cmd = true }, .key = 0x0C };
+
+    var single = try Hotkey.create(alloc, &.{q});
+    defer single.destroy();
+    var double = try Hotkey.create(alloc, &.{ q, q });
+    defer double.destroy();
+    var double2 = try Hotkey.create(alloc, &.{ q, q });
+    defer double2.destroy();
+
+    // Different lengths are never equal — this is what lets `cmd - q`
+    // and `cmd - q, cmd - q` coexist in one HotkeyMap.
+    try testing.expect(!Hotkey.eql(single, double));
+    try testing.expect(Hotkey.eql(double, double2));
+}
+
 test "mixed duplicate types should fail" {
     const alloc = std.testing.allocator;
-    var hotkey = try Hotkey.create(alloc);
+    var hotkey = try Hotkey.create(alloc, &.{.{ .flags = .{}, .key = 0 }});
     defer hotkey.destroy();
 
     // Add a command first

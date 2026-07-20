@@ -48,6 +48,7 @@ _Static_assert((unsigned)kCGEventTapDisabledByUserInput == 0xFFFFFFFF, "kCGEvent
 
 // CoreGraphics — event fields
 _Static_assert(kCGKeyboardEventKeycode        == 9,           "kCGKeyboardEventKeycode");
+_Static_assert(kCGKeyboardEventAutorepeat     == 8,           "kCGKeyboardEventAutorepeat");
 _Static_assert(kCGMouseEventButtonNumber      == 3,           "kCGMouseEventButtonNumber");
 _Static_assert(kCGEventSourceUserData         == 42,          "kCGEventSourceUserData");
 

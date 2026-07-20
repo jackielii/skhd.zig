@@ -11,10 +11,12 @@ hotkey       = <mode> '<' <action> | <action>
 
 mode         = 'name of mode' | <mode> ',' <mode>
 
-action       = <keysym> '[' <proc_map_lst> ']'   | <keysym> '->' '[' <proc_map_lst> ']'
-               <keysym> ':' <command>            | <keysym> '->' ':' <command>
-               <keysym> ';' <mode_activation>    | <keysym> '->' ';' <mode_activation>
-               <keysym> '~'
+action       = <trigger> '[' <proc_map_lst> ']'   | <trigger> '->' '[' <proc_map_lst> ']'
+               <trigger> ':' <command>            | <trigger> '->' ':' <command>
+               <trigger> ';' <mode_activation>    | <trigger> '->' ';' <mode_activation>
+               <trigger> '~'
+
+trigger      = <keysym> | <keysym> ',' <keysym> (',' <keysym>)*
 
 keysym       = <mod> '-' <key> | <key>
 
@@ -66,6 +68,150 @@ mode_activation = <mode> | <mode> ':' <command>
 
 ~            = application is unbound and keypress is forwarded per usual
 ```
+
+## Hotkey Sequences
+
+A sequence is not a separate construct — **it is a hotkey whose `trigger` has
+more than one chord.** Every action form (`:`, `|`, `~`, `->`, `;`, process
+lists, process groups, command references, multi-mode declarations) works on
+a sequence exactly as it does on a single-chord hotkey:
+
+```skhd
+cmd - q, cmd - q : echo "double Cmd-Q"
+cmd - k, cmd - c, alt - q : echo "three-chord sequence"
+```
+
+Every chord declares its own complete modifiers — nothing is inherited from
+the previous chord. Modifiers may be released and re-pressed between chords,
+as long as each chord's own modifiers are down when its key goes down.
+
+```
+.sequence_timeout 500ms     # default 300ms; also accepts `500` or `1s`
+```
+
+Applies between each pair of chords, not to the sequence as a whole. Global,
+and must be greater than zero.
+
+### Fallback: a shorter binding under a sequence
+
+Like Vim's `timeoutlen`: a binding can be both a command and the prefix of a
+longer one. If the sequence doesn't complete, the shorter one fires.
+
+```
+lcmd - k : yabai -m window --focus north
+cmd - k, cmd - k [
+    "Google Chrome" | cmd - k
+]
+```
+
+| press | in Chrome | elsewhere |
+| --- | --- | --- |
+| `Cmd-K` | yabai, after the timeout | yabai, **instantly** |
+| `Cmd-K` `Cmd-K` | Chrome's own Cmd-K | — |
+
+Only Chrome waits: the sequence doesn't apply elsewhere, so there's nothing
+to wait for. That's how a global binding and an app's native shortcut share
+one chord.
+
+Unlike Vim, skhd fires a *declared binding*, never the raw key. So a lone
+safety binding still swallows the first press:
+
+```
+cmd - q, cmd - q [
+    "Protected App" | cmd - q     # nothing shorter -> one Cmd-Q does nothing
+]
+```
+
+`~` and `->` can't be a fallback — the chord is consumed when the sequence
+starts, so there's no keypress left to release. Parse error; use `:` or `|`.
+
+An explicit rule claims its chord in whichever application it applies to. A
+chord with no applicable rule for the frontmost application is not consumed,
+so a sequence can express an application-specific safety binding while every
+other application keeps the operating system's normal behavior for that key:
+
+```skhd
+cmd - q, cmd - q [
+    "Protected App" : echo "quit Protected App"
+]
+```
+
+In `Protected App`, the first `cmd-q` starts the sequence. In every other
+application this binding does not apply, so the first `cmd-q` is never
+consumed and passes straight through to macOS.
+
+**Note:** a `:` command reads to end of line, so the process-list body above
+must be written on its own line(s) — `[ "Protected App" : echo "..." ]` on
+one line would swallow the closing `]` as part of the shell command and fail
+to parse. A `|` forward has no such problem and is fine inline:
+`cmd - q, cmd - q [ "Protected App" | cmd - q ]`.
+
+### `->` and `~` apply to the final chord only
+
+Earlier chords in a sequence are always consumed, because when an early
+chord arrives it is not yet known whether the sequence will go on to
+complete. Delivering it and *also* firing the action on completion would
+send the application a keypress the user never triggered. So `->`
+(passthrough) and `~` (unbound) only affect the chord that completes the
+binding:
+
+```skhd
+cmd - k, cmd - c -> : echo "chord 1 is consumed; chord 2 fires and passes through"
+cmd - k, cmd - u ~   # chord 1 is consumed; chord 2 is unbound and passes through
+```
+
+A single-chord hotkey is its own final chord, so this changes nothing for
+ordinary hotkeys.
+
+### The uniqueness rule
+
+Two hotkeys in a mode conflict when the same press could match both:
+**identical chord lists always**, and **equal-length overlapping chords**
+when their process scopes also overlap. Different lengths never conflict —
+the shorter is the longer's [fallback](#fallback-a-shorter-binding-under-a-sequence).
+
+```skhd
+# ERROR — identical chords.
+cmd - a : echo first
+cmd - a : echo second
+
+# ERROR — identical chords. Disjoint apps do NOT help: hotkeys are keyed by
+# chords alone, so the second could only be dropped. Use one process list.
+cmd - a [
+    "Terminal" : echo terminal
+]
+cmd - a [
+    "Firefox" : echo firefox
+]
+
+# OK — same key, different modifiers (alt vs lalt), disjoint apps.
+alt - a [
+    "Terminal" : echo terminal
+]
+lalt - a [
+    "Firefox" : echo firefox
+]
+
+# OK — different lengths: `echo now` is the fallback. Cmd-Q in Terminal runs
+# it once the timeout expires; twice runs `echo later`.
+cmd - q [
+    "Terminal" : echo now
+]
+cmd - q, cmd - q [
+    "Terminal" : echo later
+]
+
+# OK — shared prefix, disambiguated by the second chord.
+cmd - k, cmd - c : echo comment
+cmd - k, cmd - u : echo uncomment
+```
+
+A bare hotkey (no process list) has wildcard scope, which overlaps every
+explicit scope.
+
+An expired or mismatched prefix is never replayed — its consumed key events
+stay consumed, which matters for safety bindings like `cmd-q` where delayed
+replay could quit an application unexpectedly.
 
 ## Mode Activation
 
@@ -187,6 +333,7 @@ Configuration directives follow this syntax:
 directive = '.shell' <string> |
             '.blacklist' '[' <string_list> ']' |
             '.load' <string> |
+            '.sequence_timeout' <duration> |
             '.path' <string> | '.path' '[' <string_list> ']' |
             '.define' <identifier> '[' <string_list> ']' |
             '.define' <identifier> ':' <command_template> |
@@ -204,7 +351,9 @@ taphold_attr    = 'tap'                ':' <hid_key>
                 | 'hold_on_other_key_press' ':' ('on' | 'off')
                 | 'retro_tap'          ':' ('on' | 'off')
 hid_key_or_layer = <hid_key> | <mode_identifier>   // mode = layer hold
-duration         = <integer> ('ms' | 's')
+duration         = <integer> ('ms' | 's')?   // bare integer = milliseconds.
+                                             // The unit must be on the same
+                                             // line as the integer.
 
 string_list = <string> | <string> ',' <string_list>
 ```

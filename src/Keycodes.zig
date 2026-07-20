@@ -35,9 +35,8 @@ pub const ModifierFlag = packed struct(u32) {
     lcontrol: bool = false,
     rcontrol: bool = false,
     @"fn": bool = false,
-    passthrough: bool = false,
     nx: bool = false,
-    _: u17 = 0,
+    _: u18 = 0,
     pub const hyper: ModifierFlag = .{
         .cmd = true,
         .alt = true,
@@ -60,15 +59,11 @@ pub const ModifierFlag = packed struct(u32) {
         return @bitCast(m1 | m2);
     }
 
-    /// True when no modifier bits are set (excluding the
-    /// `passthrough` flag, which is a routing marker rather than a
-    /// modifier and shouldn't gate wildcard matching). Used by
-    /// capture-mode layer lookup: a forward rule with no declared
-    /// modifiers acts as a "transparent" wildcard.
+    /// True when no modifier bits are set. Used by capture-mode layer
+    /// lookup: a forward rule with no declared modifiers acts as a
+    /// "transparent" wildcard.
     pub fn isEmpty(self: ModifierFlag) bool {
-        var copy = self;
-        copy.passthrough = false;
-        const m: u32 = @bitCast(copy);
+        const m: u32 = @bitCast(self);
         return m == 0;
     }
     pub fn format(self: ModifierFlag, writer: *std.Io.Writer) std.Io.Writer.Error!void {

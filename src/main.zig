@@ -86,7 +86,13 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "-k") or std.mem.eql(u8, args[i], "--key")) {
             if (i + 1 < args.len) {
                 i += 1;
-                try synthesize.synthesizeKey(gpa, io, args[i]);
+                // synthesizeKey has already printed the diagnostic; exit
+                // non-zero without a Zig backtrace, which is noise to a user
+                // who simply mistyped a keyspec.
+                synthesize.synthesizeKey(gpa, io, args[i]) catch |err| {
+                    if (err == error.InvalidKeySpec) std.process.exit(1);
+                    return err;
+                };
                 return;
             } else {
                 std.debug.print("Error: --key requires a key string\n", .{});

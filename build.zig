@@ -544,6 +544,7 @@ pub fn build(b: *std.Build) void {
         "src/EventTap.zig",
         "src/DeviceCheck.zig",
         "src/synthesize.zig",
+        "src/service.zig",
         "src/grabber_cli.zig",
         "src/grabber_protocol.zig",
         "src/grabber/Vhidd.zig",

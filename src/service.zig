@@ -480,10 +480,37 @@ pub fn stopService(allocator: std.mem.Allocator, io: std.Io) !void {
 }
 
 pub fn restartService(allocator: std.mem.Allocator, io: std.Io) !void {
+    const sm_service = sm.agentService(LAUNCH_AGENT_PLIST_NAME);
+    const st = if (sm_service) |svc| sm.status(svc) else sm.Status.not_found;
+
+    if (chooseRestartStrategy(st) == .kickstart) {
+        if (kickstartService(allocator, io)) {
+            std.debug.print("Service restarted (registration preserved).\n", .{});
+            return;
+        }
+        log.warn("kickstart failed; falling back to bootout + re-register", .{});
+    }
+
     try stopService(allocator, io);
     // 1s pause so launchd fully tears down before re-register.
     std.Io.sleep(io, .fromSeconds(1), .awake) catch {};
     try startService(allocator, io);
+}
+
+/// `launchctl kickstart -k gui/<uid>/<label>`: kill and relaunch the
+/// already-registered agent in place, re-execing the (possibly upgraded)
+/// binary from the plist's program path. The BTM registration is never
+/// touched, so this path cannot hit SMAppService's codesign trust
+/// validation and cannot leave the user without a registered service
+/// (#53). Returns false when launchd doesn't know the job — e.g.
+/// registration reported enabled but the job isn't loaded — in which
+/// case the caller falls back to the bootout + register path.
+fn kickstartService(allocator: std.mem.Allocator, io: std.Io) bool {
+    const uid = getuid();
+    const target = std.fmt.allocPrint(allocator, "gui/{d}/" ++ BUNDLE_ID, .{uid}) catch return false;
+    defer allocator.free(target);
+    const code = runQuiet(allocator, io, &.{ "launchctl", "kickstart", "-k", target }) catch return false;
+    return code == 0;
 }
 
 pub fn reloadConfig(allocator: std.mem.Allocator, io: std.Io) !void {
@@ -746,6 +773,33 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
             grabber_cli.printVersionMismatchRemediation(installed_dext, compat);
         }
     }
+}
+
+/// How `--restart-service` restarts the agent, decided from its BTM
+/// registration status. `.kickstart` relaunches the launchd job in place
+/// and never touches the registration — a `register` call that fails
+/// codesign trust validation (macOS 27 beta, #53) therefore can't tear
+/// down a working setup. `.reregister` is the legacy bootout + register
+/// path, still needed when the agent isn't (validly) registered.
+const RestartStrategy = enum { kickstart, reregister };
+
+fn chooseRestartStrategy(st: sm.Status) RestartStrategy {
+    return switch (st) {
+        .enabled => .kickstart,
+        else => .reregister,
+    };
+}
+
+test "chooseRestartStrategy: enabled registration restarts in place, never re-registers" {
+    try std.testing.expectEqual(RestartStrategy.kickstart, chooseRestartStrategy(.enabled));
+}
+
+test "chooseRestartStrategy: unregistered or broken states take the register path" {
+    try std.testing.expectEqual(RestartStrategy.reregister, chooseRestartStrategy(.not_registered));
+    try std.testing.expectEqual(RestartStrategy.reregister, chooseRestartStrategy(.requires_approval));
+    try std.testing.expectEqual(RestartStrategy.reregister, chooseRestartStrategy(.not_found));
+    // Unknown future status values must not be treated as "safe to kickstart".
+    try std.testing.expectEqual(RestartStrategy.reregister, chooseRestartStrategy(@enumFromInt(99)));
 }
 
 /// Run `argv` with stdio captured (to avoid noise in the terminal) and

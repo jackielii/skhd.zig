@@ -237,6 +237,13 @@ pub extern fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) C
 // re-enumeration is visible in the forensic log (old id terminates, new
 // id matches).
 pub extern fn IORegistryEntryGetRegistryEntryID(entry: io_service_t, entryID: *u64) IOReturn;
+// Read one property off a registry node (DeviceNotify: VendorID /
+// ProductID / Built-In of a keyboard that just enumerated). Caller releases.
+pub extern fn IORegistryEntryCreateCFProperty(entry: io_service_t, key: CFStringRef, allocator: CFAllocatorRef, options: IOOptionBits) CFTypeRef;
+pub const CFTypeID = c_ulong;
+pub extern fn CFGetTypeID(cf: ?*const anyopaque) CFTypeID;
+pub extern fn CFNumberGetTypeID() CFTypeID;
+pub extern fn CFBooleanGetTypeID() CFTypeID;
 
 // IOService / IOHIDSystem client. Used by HidSystem.zig to force
 // caps_lock state off after Apple's MacBook keyboard firmware toggles
@@ -291,6 +298,7 @@ pub extern fn IOServiceAddMatchingNotification(
     notification: *io_iterator_t,
 ) IOReturn;
 pub extern fn IOIteratorNext(iterator: io_iterator_t) io_object_t;
+pub extern fn IOServiceGetMatchingServices(mainPort: mach_port_t, matching: CFDictionaryRef, existing: *io_iterator_t) IOReturn;
 pub extern fn IOServiceOpen(service: io_service_t, owningTask: task_port_t, type_: u32, connect: *io_connect_t) IOReturn;
 pub extern fn IOServiceClose(connect: io_connect_t) IOReturn;
 pub extern fn IOObjectRelease(object: io_object_t) IOReturn;

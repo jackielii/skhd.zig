@@ -76,6 +76,38 @@ pub const Event = struct {
     /// 1 for keydown / modifier set; 0 for keyup / modifier clear.
     /// Booleans abstract over IOHIDValueGetIntegerValue's CFIndex.
     pressed: bool,
+    /// Index into the matches passed to `setMatches` of the device that
+    /// sent this, so per-device rules only see their own keyboard. Null
+    /// when the device couldn't be resolved.
+    device: ?u8 = null,
+};
+
+/// Which match a device with this VendorID/ProductID was seized under. A
+/// FIFO built-in reports no IDs, so it reads as 0/0 and resolves to the
+/// (0,0) alias, the same way `matchPredicate` selects it.
+pub fn matchIndex(matches: []const Match, vendor: u32, product: u32) ?u8 {
+    for (matches, 0..) |m, i| {
+        if (m.vendor == vendor and m.product == product) return std.math.cast(u8, i);
+    }
+    return null;
+}
+
+/// Whether a rule bound to `rule_device` should see an event from
+/// `event_device`. Either side unknown means deliver, so an unresolved
+/// device keeps working rather than going silent.
+pub fn sameDevice(rule_device: ?u8, event_device: ?u8) bool {
+    const want = rule_device orelse return true;
+    const got = event_device orelse return true;
+    return want == got;
+}
+
+/// Seized devices resolved to their match index. Filled on a device's
+/// first input value and emptied on removal, so the per-keystroke cost is
+/// a pointer compare. Devices past capacity resolve on every value.
+const max_cached_devices = 16;
+const CachedDevice = struct {
+    ref: c.IOHIDDeviceRef,
+    match: ?u8,
 };
 
 pub const Callback = *const fn (ctx: ?*anyopaque, event: Event) void;
@@ -98,6 +130,8 @@ open_options: u32 = 0,
 /// disableCapsLockDelayOnMatches to filter event-system services
 /// to just the ones we seized.
 owned_matches: []Match = &.{},
+device_cache: [max_cached_devices]CachedDevice = undefined,
+device_cache_len: usize = 0,
 
 const Self = @This();
 
@@ -199,6 +233,7 @@ pub fn setMatches(self: *Self, matches: []const Match) !void {
     if (self.running) return error.AlreadyRunning;
 
     if (self.owned_matches.len > 0) self.allocator.free(self.owned_matches);
+    self.device_cache_len = 0;
     self.owned_matches = try self.allocator.dupe(Match, matches);
     errdefer {
         self.allocator.free(self.owned_matches);
@@ -426,6 +461,7 @@ pub fn stop(self: *Self) void {
     _ = c.IOHIDManagerClose(self.manager, self.open_options);
     c.IOHIDManagerUnscheduleFromRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
     self.running = false;
+    self.device_cache_len = 0;
     log.info("released seize", .{});
 }
 
@@ -450,6 +486,31 @@ fn deviceI32Property(device: c.IOHIDDeviceRef, key_cstr: [*:0]const u8) u32 {
     return @bitCast(out);
 }
 
+fn deviceIndex(self: *Self, device: c.IOHIDDeviceRef) ?u8 {
+    for (self.device_cache[0..self.device_cache_len]) |d| {
+        if (d.ref == device) return d.match;
+    }
+    const match = matchIndex(
+        self.owned_matches,
+        deviceI32Property(device, c.kIOHIDVendorIDKey),
+        deviceI32Property(device, c.kIOHIDProductIDKey),
+    );
+    if (self.device_cache_len < max_cached_devices) {
+        self.device_cache[self.device_cache_len] = .{ .ref = device, .match = match };
+        self.device_cache_len += 1;
+    }
+    return match;
+}
+
+fn forgetDevice(self: *Self, device: c.IOHIDDeviceRef) void {
+    for (self.device_cache[0..self.device_cache_len], 0..) |d, i| {
+        if (d.ref != device) continue;
+        self.device_cache[i] = self.device_cache[self.device_cache_len - 1];
+        self.device_cache_len -= 1;
+        return;
+    }
+}
+
 fn deviceMatchedCallback(
     ctx: ?*anyopaque,
     result: c.IOReturn,
@@ -468,10 +529,11 @@ fn deviceRemovedCallback(
     sender: ?*anyopaque,
     device: c.IOHIDDeviceRef,
 ) callconv(.c) void {
-    _ = ctx;
     _ = sender;
     if (result != c.kIOReturnSuccess) return;
     deviceIdsLog("device removed", device);
+    const self: *Self = @ptrCast(@alignCast(ctx orelse return));
+    self.forgetDevice(device);
 }
 
 fn valueCallback(
@@ -480,7 +542,6 @@ fn valueCallback(
     sender: ?*anyopaque,
     value: c.IOHIDValueRef,
 ) callconv(.c) void {
-    _ = sender;
     if (result != c.kIOReturnSuccess) return;
     const self: *Self = @ptrCast(@alignCast(ctx orelse return));
 
@@ -495,6 +556,8 @@ fn valueCallback(
         .usage_page = usage_page,
         .usage = usage,
         .pressed = int_value != 0,
+        // The device passes itself as sender (IOKitUser IOHIDDevice.c).
+        .device = if (sender) |dev| self.deviceIndex(dev) else null,
     });
 }
 
@@ -537,6 +600,30 @@ test "StartRetry: a fresh value after success starts the backoff over" {
     _ = r.next();
     r = .{};
     try testing.expectEqual(@as(?u32, 1000), r.next());
+}
+
+test "matchIndex: a device resolves to the match it was seized under" {
+    const matches = [_]Match{
+        .{ .vendor = 0, .product = 0 }, // built-in
+        .{ .vendor = 0x046D, .product = 0xC548 },
+        .{ .vendor = 0x046D, .product = 0xC52B },
+    };
+    // A FIFO built-in exposes no VendorID/ProductID, so it reads as 0/0.
+    try testing.expectEqual(@as(?u8, 0), matchIndex(&matches, 0, 0));
+    try testing.expectEqual(@as(?u8, 1), matchIndex(&matches, 0x046D, 0xC548));
+    try testing.expectEqual(@as(?u8, 2), matchIndex(&matches, 0x046D, 0xC52B));
+    try testing.expectEqual(@as(?u8, null), matchIndex(&matches, 0x16C0, 0x27DB));
+}
+
+test "sameDevice: a rule only hears its own device, unknowns hear everything" {
+    // Two keyboards each with a caps rule: without this, one caps tap
+    // ran both rules and typed the tap key twice.
+    try testing.expect(sameDevice(1, 1));
+    try testing.expect(!sameDevice(1, 2));
+    // An unresolved device or a rule without a device keeps the old
+    // deliver-to-all behaviour rather than dropping input.
+    try testing.expect(sameDevice(1, null));
+    try testing.expect(sameDevice(null, 2));
 }
 
 test "matchPredicate: external device matches VID/PID, no transport constraint" {

@@ -47,6 +47,11 @@ pub fn main(init: std.process.Init) !void {
         break :blk tracker.allocator();
     } else base_gpa;
 
+    // SMAppService agents can start without the usual login environment.
+    // Populate the identity variables that config discovery, daemon logging,
+    // and PID-file naming rely on from the current user's passwd record.
+    ensureUserEnvironment();
+
     defer if (comptime track_alloc) {
         std.debug.print("\n=== Final Allocation Report ===\n", .{});
         var stderr_buf: [4096]u8 = undefined;
@@ -225,6 +230,20 @@ pub fn main(init: std.process.Init) !void {
 
     // Pass the hotload flag to run
     skhd.run(!no_hotload) catch {};
+}
+
+fn ensureUserEnvironment() void {
+    const need_home = utils.getenv("HOME") == null;
+    const need_user = utils.getenv("USER") == null;
+    if (!need_home and !need_user) return;
+
+    const pw = c.getpwuid(c.getuid()) orelse return;
+    if (need_home) {
+        if (pw.*.pw_dir) |home| _ = c.setenv("HOME", home, 0);
+    }
+    if (need_user) {
+        if (pw.*.pw_name) |user| _ = c.setenv("USER", user, 0);
+    }
 }
 
 /// Print the error name and exit non-zero. Used by grabber CLI commands

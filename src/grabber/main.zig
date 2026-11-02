@@ -815,6 +815,7 @@ const Daemon = struct {
             };
             slots[i] = .{
                 .seize_ctx = &self.seize_ctx,
+                .device = if (rule.device) |d| HidSeize.matchIndex(matches.items, d.vendor, d.product) else null,
                 .engine = TapHold.initWithLayerSink(
                     th_rule,
                     emitToVhidd,
@@ -1556,6 +1557,9 @@ fn injectTestKey(allocator: std.mem.Allocator, io: std.Io) !void {
 const EngineSlot = struct {
     seize_ctx: *SeizeCtx,
     engine: TapHold,
+    /// Index into the seize matches of the device this slot's rule is
+    /// bound to. Null hears every device (the --seize-test harness).
+    device: ?u8 = null,
     timer: c.CFRunLoopTimerRef = null,
     /// Profile-only: ns-since-Timer-start when this slot's hold timer
     /// is supposed to fire. Set in applyTapHoldTimer when scheduling
@@ -2036,12 +2040,18 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     // space-down arrives, space_slot hasn't yet transitioned to
     // pending (this event is what triggers it), so the pending-
     // state-filtered version of the check would miss this case.
+    //
+    // Both loops only consider slots bound to the device that sent the
+    // event. Rules are per device: without this, two keyboards each with
+    // a caps_lock rule both ran on one caps tap and emitted the tap twice.
     const event_is_some_slot_source = blk: for (cx.slots) |*slot| {
+        if (!HidSeize.sameDevice(slot.device, ev.device)) continue;
         if (slot.engine.rule.src_usage == usage16) break :blk true;
     } else false;
 
     var any_consumed = false;
     for (cx.slots) |*slot| {
+        if (!HidSeize.sameDevice(slot.device, ev.device)) continue;
         if (event_is_some_slot_source and slot.engine.rule.src_usage != usage16) {
             continue;
         }

@@ -1215,7 +1215,7 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
 /// teardown is safe — same context as the console-user and power
 /// callbacks. Re-seizing does not itself re-enumerate the device, so
 /// there is no feedback loop.
-fn onDeviceChange(ctx: ?*anyopaque) void {
+fn onDeviceChange(ctx: ?*anyopaque, _: DeviceNotify.Change) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
     if (d.sleeping) return; // seize stays released until wake
     // Gate on wanting a seize, not on having one: a failed rebuild leaves

@@ -11,6 +11,7 @@ const forkAndExec = @import("exec.zig").forkAndExec;
 const grabber_protocol = @import("grabber_protocol");
 const DeviceCheck = @import("DeviceCheck.zig");
 const Hidutil = @import("Hidutil.zig");
+const KeyboardWatch = @import("KeyboardWatch.zig");
 const Hotkey = @import("Hotkey.zig");
 const Hotload = @import("Hotload.zig");
 const Keycodes = @import("Keycodes.zig");
@@ -66,6 +67,13 @@ grabber_reconnect_timer: c.CFRunLoopTimerRef = null,
 /// signal), restoreAll() clears the OS-level mapping so the keyboard
 /// returns to default.
 hidutil: ?*Hidutil = null,
+/// Re-applies remaps and re-forwards grabber rules when a configured
+/// keyboard (re-)enumerates, e.g. across a KVM switch. Started once the
+/// config has device-bound rules.
+keyboard_watch: ?*KeyboardWatch = null,
+/// Devices the last grabber forward skipped because they weren't
+/// connected. KeyboardWatch re-forwards when one of them appears.
+grabber_absent: std.ArrayListUnmanaged(Hidutil.VendorProduct) = .empty,
 /// Chords matched so far. Allocated at config load with
 /// len == mappings.max_chords. Never allocated on the event loop.
 sequence_prefix: []Hotkey.KeyPress = &.{},
@@ -192,6 +200,13 @@ pub fn deinit(self: *Skhd) void {
 
     self.cancelPendingSequence();
 
+    // Stop re-applying before clearing, or a pending pass could re-set
+    // what restoreAll just cleared.
+    if (self.keyboard_watch) |w| {
+        w.deinit();
+        self.keyboard_watch = null;
+    }
+    self.grabber_absent.deinit(self.allocator);
     // Clear hidutil UserKeyMapping FIRST so the user's keyboard isn't
     // left remapped if anything below errors. Idempotent — no-op when
     // applyRemaps was never called.
@@ -261,6 +276,7 @@ fn readFkeysAsStandardPref() bool {
 }
 
 fn forwardTapholdsToGrabber(self: *Skhd) !void {
+    self.grabber_absent.clearRetainingCapacity();
     if (self.mappings.tapholds.items.len == 0 and self.mappings.remaps.items.len == 0) return;
 
     // Build a presence cache keyed by device alias so we don't enumerate
@@ -301,6 +317,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
         };
         if (!aliasPresent(&self.mappings, &present, th.device_alias)) {
             skipped_absent += 1;
+            try self.noteGrabberAbsent(alias.vendor, alias.product);
             continue;
         }
         if (th.hold_layer != null) has_layer_rule = true;
@@ -324,6 +341,7 @@ fn forwardTapholdsToGrabber(self: *Skhd) !void {
         };
         if (!aliasPresent(&self.mappings, &present, rm.device_alias)) {
             skipped_absent += 1;
+            try self.noteGrabberAbsent(alias.vendor, alias.product);
             continue;
         }
         try remaps.append(self.allocator, .{
@@ -467,6 +485,73 @@ fn grabberDisconnected(ctx: ?*anyopaque) void {
         self.grabber_client = null;
     }
     self.scheduleGrabberReconnect();
+}
+
+fn noteGrabberAbsent(self: *Skhd, vendor: u32, product: u32) !void {
+    for (self.grabber_absent.items) |vp| {
+        if (vp.vendor == vendor and vp.product == product) return;
+    }
+    try self.grabber_absent.append(self.allocator, .{ .vendor = vendor, .product = product });
+}
+
+/// Run the keyboard watch exactly while the config has device-bound rules.
+fn syncKeyboardWatch(self: *Skhd) void {
+    const wanted = self.mappings.tapholds.items.len > 0 or self.mappings.remaps.items.len > 0;
+    if (!wanted) {
+        if (self.keyboard_watch) |w| w.deinit();
+        self.keyboard_watch = null;
+        return;
+    }
+    if (self.keyboard_watch != null) return;
+    self.keyboard_watch = KeyboardWatch.init(self.allocator, .{
+        .mappings = &self.mappings,
+        .hidutil = &self.hidutil,
+        .grabber_absent = &self.grabber_absent,
+        .reforward = reforwardFromWatch,
+        .reforward_ctx = self,
+    }) catch |err| blk: {
+        log.warn("keyboard re-enumeration watch failed ({s}); a keyboard that re-enumerates keeps stale remaps and grabber rules until reload", .{@errorName(err)});
+        break :blk null;
+    };
+}
+
+fn reforwardFromWatch(ctx: ?*anyopaque) void {
+    const self: *Skhd = @ptrCast(@alignCast(ctx orelse return));
+    self.reforwardToGrabber() catch |err| {
+        // The old subscription is already closed, so keep retrying rather
+        // than leave the grabber with no rules at all.
+        log.warn("could not re-forward rules to skhd-grabber after a keyboard arrived: {s}", .{@errorName(err)});
+        self.scheduleGrabberReconnect();
+    };
+}
+
+/// Replace the grabber subscription with one built from the current
+/// mappings and connected devices.
+fn reforwardToGrabber(self: *Skhd) !void {
+    // Tear down the previous grabber connection so forwardTapholds...
+    // can dial fresh with the current rules. Do this even when the
+    // new config has no caps-class rules — closing the old socket
+    // is how the grabber learns we don't want our previous rules
+    // applied any more.
+    //
+    // No `bye` here: once apply_rules has succeeded, the grabber moves
+    // this socket out of `Ipc.serve` and into its subscriptionCallback,
+    // which only PEEKs for EOS and discards any frame the agent writes
+    // as "stray bytes". A bye on a subscription connection therefore
+    // never gets a reply — and worse, an `expectOk` read after it can
+    // pick up a queued `mode_change` push (logged as "unexpected type:
+    // mode_change") or block indefinitely. EOS-on-close is the only
+    // teardown signal the subscription path actually honors.
+    if (self.layer_listener) |ll| {
+        ll.deinit();
+        self.layer_listener = null;
+    }
+    if (self.grabber_client) |gc| {
+        gc.close();
+        self.allocator.destroy(gc);
+        self.grabber_client = null;
+    }
+    try self.forwardTapholdsToGrabber();
 }
 
 fn scheduleGrabberReconnect(self: *Skhd) void {
@@ -744,6 +829,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
             log.err("Failed to apply hidutil remaps: {s}. Colon-form .remap rules will not take effect.", .{@errorName(err)});
         };
     }
+    self.syncKeyboardWatch();
 
     // Watchdog reconciles the tap with TCC state every 1s. Catches runtime
     // accessibility revoke (which the OS doesn't surface via the disabled
@@ -1637,32 +1723,10 @@ pub fn reloadConfig(self: *Skhd) !void {
         }
     }
 
-    // Tear down the previous grabber connection so forwardTapholds...
-    // can dial fresh with the updated rules. Do this even when the
-    // new config has no caps-class rules — closing the old socket
-    // is how the grabber learns we don't want our previous rules
-    // applied any more.
-    //
-    // No `bye` here: once apply_rules has succeeded, the grabber moves
-    // this socket out of `Ipc.serve` and into its subscriptionCallback,
-    // which only PEEKs for EOS and discards any frame the agent writes
-    // as "stray bytes". A bye on a subscription connection therefore
-    // never gets a reply — and worse, an `expectOk` read after it can
-    // pick up a queued `mode_change` push (logged as "unexpected type:
-    // mode_change") or block indefinitely. EOS-on-close is the only
-    // teardown signal the subscription path actually honors.
-    if (self.layer_listener) |ll| {
-        ll.deinit();
-        self.layer_listener = null;
-    }
-    if (self.grabber_client) |gc| {
-        gc.close();
-        self.allocator.destroy(gc);
-        self.grabber_client = null;
-    }
-    self.forwardTapholdsToGrabber() catch |err| {
+    self.reforwardToGrabber() catch |err| {
         log.warn("hot reload: could not forward updated rules to skhd-grabber: {s}", .{@errorName(err)});
     };
+    self.syncKeyboardWatch();
 
     self.requestHotReloadRefresh();
 

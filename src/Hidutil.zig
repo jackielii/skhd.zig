@@ -36,6 +36,18 @@ pub const VendorProduct = struct {
     product: u32,
 };
 
+/// A keyboard as IOKit reports it when it (re-)enumerates. FIFO built-ins
+/// carry no VendorID/ProductID, so they arrive as 0/0 with `built_in` set.
+pub const Keyboard = @import("grabber/DeviceNotify.zig").Device;
+
+/// Whether a remap applied to `applied` lands on `kb`. Mirrors
+/// `buildMatching`: 0/0 targets the built-in keyboard, anything else the
+/// exact VID/PID.
+pub fn targets(applied: VendorProduct, kb: Keyboard) bool {
+    if (applied.vendor == 0 and applied.product == 0) return kb.built_in;
+    return applied.vendor == kb.vendor and applied.product == kb.product;
+}
+
 pub fn init(allocator: std.mem.Allocator, io: std.Io) !*Hidutil {
     const state_path = try resolveStatePath(allocator);
     errdefer allocator.free(state_path);
@@ -104,6 +116,21 @@ pub fn applyRemaps(self: *Hidutil, mappings: *const Mappings) !void {
         };
     }
     if (any_failure) return error.PartialApply;
+}
+
+/// Re-set the UserKeyMapping of one already-applied device, e.g. after it
+/// re-enumerated and the mapping died with its old HID service. Sets
+/// without clearing first, so unlike a reload there is no window in which
+/// the device runs unmapped.
+pub fn reapplyDevice(self: *Hidutil, mappings: *const Mappings, device: VendorProduct) !void {
+    var remaps: std.ArrayListUnmanaged(Mappings.RemapDecl) = .empty;
+    defer remaps.deinit(self.allocator);
+    for (mappings.remaps.items) |r| {
+        const alias = mappings.device_aliases.get(r.device_alias) orelse continue;
+        if (alias.vendor == device.vendor and alias.product == device.product) try remaps.append(self.allocator, r);
+    }
+    if (remaps.items.len == 0) return;
+    try applyForDevice(self.allocator, self.io, device.vendor, device.product, remaps.items);
 }
 
 /// Restore all applied remaps by clearing UserKeyMapping on each touched
@@ -267,6 +294,21 @@ test "buildMatching: partial-zero still emits literal 0 (warning logged elsewher
     try std.testing.expectEqualStrings("{\"VendorID\":0,\"ProductID\":4660}", out_v);
     const out_p = try buildMatching(&buf, 0x1234, 0);
     try std.testing.expectEqualStrings("{\"VendorID\":4660,\"ProductID\":0}", out_p);
+}
+
+test "targets: explicit VID/PID matches only that keyboard" {
+    const receiver: VendorProduct = .{ .vendor = 0x046D, .product = 0xC548 };
+    try std.testing.expect(targets(receiver, .{ .vendor = 0x046D, .product = 0xC548, .built_in = false }));
+    try std.testing.expect(!targets(receiver, .{ .vendor = 0x046D, .product = 0xC52B, .built_in = false }));
+    // Karabiner's VirtualHIDKeyboard re-enumerates on every vhidd reconnect.
+    try std.testing.expect(!targets(receiver, .{ .vendor = 0x16C0, .product = 0x27DB, .built_in = false }));
+}
+
+test "targets: zero VID/PID means the built-in keyboard, as in buildMatching" {
+    const builtin_kb: VendorProduct = .{ .vendor = 0, .product = 0 };
+    // FIFO built-ins expose no VendorID/ProductID, so they read as 0/0.
+    try std.testing.expect(targets(builtin_kb, .{ .vendor = 0, .product = 0, .built_in = true }));
+    try std.testing.expect(!targets(builtin_kb, .{ .vendor = 0x046D, .product = 0xC548, .built_in = false }));
 }
 
 test "VendorProduct round-trip via state file" {

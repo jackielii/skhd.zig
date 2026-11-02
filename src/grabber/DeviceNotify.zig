@@ -15,20 +15,49 @@
 //! 24/7 daemon. This is the same mechanism Karabiner-Elements'
 //! iokit_service_monitor is built on.
 //!
-//! Lifetime: one DeviceNotify per Daemon. init creates an
-//! IONotificationPort on the current run loop and arms the notifications
-//! by draining their initial iterators (the pre-existing devices, which
-//! startup already seized — so the initial drain does NOT re-seize).
-//! deinit removes the source and releases the port + iterators.
+//! The agent uses it too (KeyboardWatch): a keyboard that re-enumerates
+//! gets a new HID service, and per-service state such as a `.remap`
+//! UserKeyMapping is lost with the old one, so the agent re-applies it for
+//! the devices each batch reports.
+//!
+//! Lifetime: one DeviceNotify per Daemon, and one per agent KeyboardWatch.
+//! init creates an IONotificationPort on the current run loop and arms the
+//! notifications by draining their initial iterators (the pre-existing
+//! devices, which the caller has already handled — so the initial drain
+//! does NOT call on_change). deinit removes the source and releases the
+//! port + iterators.
 
 const std = @import("std");
 const c = @import("c.zig");
 
 const log = std.log.scoped(.device_notify);
 
-/// Invoked (on the run-loop thread, between run-loop sources) whenever a
-/// keyboard enumerates or terminates. The handler re-seizes.
-pub const ChangeCallback = *const fn (ctx: ?*anyopaque) void;
+/// Invoked (on the run-loop thread, between run-loop sources) once per
+/// batch of keyboards that enumerated or terminated.
+pub const ChangeCallback = *const fn (ctx: ?*anyopaque, change: Change) void;
+
+/// Most services reported per batch. One device can enumerate several
+/// keyboard services at once; `Change.overflowed` covers the rest.
+pub const max_batch = 8;
+
+/// A keyboard service's identity, read off its registry node. FIFO
+/// built-ins carry no VendorID/ProductID and read as 0/0.
+pub const Device = struct {
+    vendor: u32,
+    product: u32,
+    built_in: bool,
+};
+
+pub const Change = struct {
+    kind: Kind,
+    /// The first `max_batch` services in the batch. Borrowed for the
+    /// duration of the callback only.
+    devices: []const Device,
+    /// The batch held more services than `devices` reports.
+    overflowed: bool,
+
+    pub const Kind = enum { matched, terminated };
+};
 
 allocator: std.mem.Allocator,
 notify_port: c.IONotificationPortRef = null,
@@ -153,33 +182,99 @@ fn drainSilently(iter: c.io_iterator_t) void {
     }
 }
 
-/// Drain + log every service in the iterator. Draining is mandatory:
-/// it both reads the changed services and re-arms the notification for
-/// the next event. `kind` labels the forensic log line.
-fn drainAndLog(iter: c.io_iterator_t, kind: []const u8) void {
+/// Drain + log every service in the iterator, recording up to
+/// `buf.len` of them. Draining is mandatory: it both reads the changed
+/// services and re-arms the notification for the next event.
+fn drain(iter: c.io_iterator_t, kind: Change.Kind, buf: []Device) Change {
+    var n: usize = 0;
+    var overflowed = false;
     while (true) {
         const svc = c.IOIteratorNext(iter);
         if (svc == c.IO_OBJECT_NULL) break;
+        defer _ = c.IOObjectRelease(svc);
         var id: u64 = 0;
         _ = c.IORegistryEntryGetRegistryEntryID(svc, &id);
+        const dev: Device = .{
+            .vendor = registryU32(svc, c.kIOHIDVendorIDKey),
+            .product = registryU32(svc, c.kIOHIDProductIDKey),
+            // A direct registry read, so unlike IOHIDManager device
+            // matching (see HidSeize) it does see Built-In.
+            .built_in = registryBool(svc, "Built-In"),
+        };
         // info, NOT warn: this fires on every keyboard enumeration change
         // (each wake, USB plug, vhidd reconnect) — routine operation, not
         // an anomaly. Compiled out of ReleaseFast so a forever-running
         // daemon's release log doesn't accumulate per-wake noise; visible
         // in a ReleaseSafe diagnostic build.
-        log.info("keyboard {s}: entry_id={d}", .{ kind, id });
-        _ = c.IOObjectRelease(svc);
+        log.info("keyboard {s}: entry_id={d} vendor=0x{X:0>4} product=0x{X:0>4} built_in={}", .{ @tagName(kind), id, dev.vendor, dev.product, dev.built_in });
+        if (n == buf.len) {
+            overflowed = true;
+            continue;
+        }
+        buf[n] = dev;
+        n += 1;
     }
+    return .{ .kind = kind, .devices = buf[0..n], .overflowed = overflowed };
+}
+
+/// Read an integer property off a registry node; 0 when absent.
+fn registryU32(svc: c.io_object_t, key_cstr: [*:0]const u8) u32 {
+    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, key_cstr, c.kCFStringEncodingUTF8);
+    if (key == null) return 0;
+    defer c.CFRelease(key);
+    const value = c.IORegistryEntryCreateCFProperty(svc, key, c.kCFAllocatorDefault, 0) orelse return 0;
+    defer c.CFRelease(value);
+    if (c.CFGetTypeID(value) != c.CFNumberGetTypeID()) return 0;
+    var out: i32 = 0;
+    _ = c.CFNumberGetValue(value, c.kCFNumberSInt32Type, &out);
+    return @bitCast(out);
+}
+
+/// Read a boolean property off a registry node; false when absent.
+fn registryBool(svc: c.io_object_t, key_cstr: [*:0]const u8) bool {
+    const key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, key_cstr, c.kCFStringEncodingUTF8);
+    if (key == null) return false;
+    defer c.CFRelease(key);
+    const value = c.IORegistryEntryCreateCFProperty(svc, key, c.kCFAllocatorDefault, 0) orelse return false;
+    defer c.CFRelease(value);
+    if (c.CFGetTypeID(value) != c.CFBooleanGetTypeID()) return false;
+    return c.CFBooleanGetValue(value) != 0;
 }
 
 fn matchedCallback(refcon: ?*anyopaque, iterator: c.io_iterator_t) callconv(.c) void {
     const self: *Self = @ptrCast(@alignCast(refcon orelse return));
-    drainAndLog(iterator, "matched");
-    self.on_change(self.on_change_ctx);
+    var buf: [max_batch]Device = undefined;
+    self.on_change(self.on_change_ctx, drain(iterator, .matched, &buf));
 }
 
 fn terminatedCallback(refcon: ?*anyopaque, iterator: c.io_iterator_t) callconv(.c) void {
     const self: *Self = @ptrCast(@alignCast(refcon orelse return));
-    drainAndLog(iterator, "terminated");
-    self.on_change(self.on_change_ctx);
+    var buf: [max_batch]Device = undefined;
+    self.on_change(self.on_change_ctx, drain(iterator, .terminated, &buf));
+}
+
+// Live check that `drain` reads real keyboards' identities: the registry
+// property types and the VendorID-less built-in are the parts a unit test
+// can't reach. Gated like HidSeize's live tests:
+//
+//     SKHD_HID_LIVE=1 zig build test
+test "live: drain reads connected keyboards' vendor, product and built-in" {
+    if (std.c.getenv("SKHD_HID_LIVE") == null) return error.SkipZigTest;
+
+    const dict = c.IOServiceMatching(c.kIOHIDDeviceKey) orelse return error.MatchingDictFailed;
+    setNumberKey(dict, c.kIOHIDPrimaryUsagePageKey, c.kHIDPage_GenericDesktop);
+    setNumberKey(dict, c.kIOHIDPrimaryUsageKey, c.kHIDUsage_GD_Keyboard);
+    var iter: c.io_iterator_t = c.IO_OBJECT_NULL;
+    // Consumes the dict.
+    if (c.IOServiceGetMatchingServices(c.kIOMainPortDefault, dict, &iter) != c.kIOReturnSuccess) return error.CannotVerify;
+    defer _ = c.IOObjectRelease(iter);
+
+    var buf: [max_batch]Device = undefined;
+    const change = drain(iter, .matched, &buf);
+    for (change.devices) |d| {
+        std.debug.print("keyboard vendor=0x{X:0>4} product=0x{X:0>4} built_in={}\n", .{ d.vendor, d.product, d.built_in });
+        // A built-in is matched by transport, never VID/PID (see HidSeize).
+        if (d.built_in) try std.testing.expectEqual(@as(u32, 0), d.vendor);
+    }
+    try std.testing.expect(change.devices.len > 0);
 }

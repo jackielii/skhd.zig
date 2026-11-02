@@ -119,7 +119,7 @@ const Pending = struct {
 };
 
 /// Start watching. Must run on the main run loop's thread; the keyboards
-/// present now are taken as already handled.
+/// present now are reconciled too, closing the startup arrival gap.
 pub fn init(allocator: std.mem.Allocator, opts: Options) !*KeyboardWatch {
     const self = try allocator.create(KeyboardWatch);
     errdefer allocator.destroy(self);
@@ -128,7 +128,7 @@ pub fn init(allocator: std.mem.Allocator, opts: Options) !*KeyboardWatch {
         .opts = opts,
         .notify = undefined,
     };
-    self.notify = try DeviceNotify.init(allocator, onChange, self);
+    self.notify = try DeviceNotify.initWithOptions(allocator, onChange, self, .{ .report_existing = true });
     return self;
 }
 
@@ -296,4 +296,57 @@ test "Pending: an already-forwarded keyboard re-enumerating needs no re-forward"
     const interest: Interest = .{ .applied = &applied_devs, .absent = &absent };
     try testing.expect(p.add(interest, matched(&.{.{ .vendor = 0x046D, .product = 0xC548, .built_in = false }})));
     try testing.expect(!p.wantsAny(&absent));
+}
+
+test "startup: a keyboard already present when the watch registers is reconciled" {
+    const hid_c = @import("grabber/c.zig");
+    const dict = hid_c.IOServiceMatching(hid_c.kIOHIDDeviceKey) orelse return error.MatchingDictFailed;
+    var iterator: hid_c.io_iterator_t = hid_c.IO_OBJECT_NULL;
+    if (hid_c.IOServiceGetMatchingServices(hid_c.kIOMainPortDefault, dict, &iterator) != hid_c.kIOReturnSuccess) return error.CannotVerify;
+    defer _ = hid_c.IOObjectRelease(iterator);
+    var absent: std.ArrayListUnmanaged(Hidutil.VendorProduct) = .empty;
+    defer absent.deinit(testing.allocator);
+    // No physical input, seize, remap writes, or run-loop pumping: only
+    // query connected keyboards and drive the watch's reconciliation pass.
+    const readU32 = struct {
+        fn get(service: hid_c.io_object_t, name: [*:0]const u8) u32 {
+            const key = hid_c.CFStringCreateWithCString(hid_c.kCFAllocatorDefault, name, hid_c.kCFStringEncodingUTF8) orelse return 0;
+            defer hid_c.CFRelease(key);
+            const value = hid_c.IORegistryEntryCreateCFProperty(service, key, hid_c.kCFAllocatorDefault, 0) orelse return 0;
+            defer hid_c.CFRelease(value);
+            if (hid_c.CFGetTypeID(value) != hid_c.CFNumberGetTypeID()) return 0;
+            var out: i32 = 0;
+            _ = hid_c.CFNumberGetValue(value, hid_c.kCFNumberSInt32Type, &out);
+            return @bitCast(out);
+        }
+    }.get;
+    while (true) {
+        const service = hid_c.IOIteratorNext(iterator);
+        if (service == hid_c.IO_OBJECT_NULL) break;
+        defer _ = hid_c.IOObjectRelease(service);
+        if (readU32(service, hid_c.kIOHIDPrimaryUsagePageKey) != 1 or readU32(service, hid_c.kIOHIDPrimaryUsageKey) != 6) continue;
+        try absent.append(testing.allocator, .{ .vendor = readU32(service, hid_c.kIOHIDVendorIDKey), .product = readU32(service, hid_c.kIOHIDProductIDKey) });
+    }
+    if (absent.items.len == 0) return error.SkipZigTest;
+    var mappings = try Mappings.init(testing.allocator, testing.io);
+    defer mappings.deinit();
+    const hidutil: ?*Hidutil = null;
+    const ForwardCapture = struct {
+        calls: usize = 0,
+        fn forward(ctx: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.calls += 1;
+        }
+    };
+    var forwarded: ForwardCapture = .{};
+    const watch = try init(testing.allocator, .{
+        .mappings = &mappings,
+        .hidutil = &hidutil,
+        .grabber_absent = &absent,
+        .reforward = ForwardCapture.forward,
+        .reforward_ctx = &forwarded,
+    });
+    defer watch.deinit();
+    timerCallback(null, watch);
+    try testing.expectEqual(@as(usize, 1), forwarded.calls);
 }

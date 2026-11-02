@@ -22,9 +22,9 @@
 //!
 //! Lifetime: one DeviceNotify per Daemon, and one per agent KeyboardWatch.
 //! init creates an IONotificationPort on the current run loop and arms the
-//! notifications by draining their initial iterators (the pre-existing
-//! devices, which the caller has already handled — so the initial drain
-//! does NOT call on_change). deinit removes the source and releases the
+//! notifications by draining their initial iterators. Agent watches also
+//! report existing devices to reconcile arrivals during startup; grabber
+//! watches drain silently. deinit removes the source and releases the
 //! port + iterators.
 
 const std = @import("std");
@@ -73,6 +73,18 @@ pub fn init(
     allocator: std.mem.Allocator,
     on_change: ChangeCallback,
     on_change_ctx: ?*anyopaque,
+) !*Self {
+    return initWithOptions(allocator, on_change, on_change_ctx, .{});
+}
+
+/// Agent watches reconcile devices already present at registration;
+/// grabber watches keep the default silent initial drain because their
+/// caller already owns the initial seize.
+pub fn initWithOptions(
+    allocator: std.mem.Allocator,
+    on_change: ChangeCallback,
+    on_change_ctx: ?*anyopaque,
+    options: struct { report_existing: bool = false },
 ) !*Self {
     const self = try allocator.create(Self);
     errdefer allocator.destroy(self);
@@ -131,11 +143,15 @@ pub fn init(
     }
     errdefer _ = c.IOObjectRelease(self.terminated_iter);
 
-    // Drain the initial iterators to ARM the notifications. These are the
-    // keyboards already present at startup, which the normal seize path
-    // already grabbed — so drain silently, do NOT call on_change.
-    drainSilently(self.matched_iter);
+    // Draining arms notifications. The agent must reconcile this batch:
+    // a keyboard may have arrived after its initial presence snapshot.
+    // Do this after all fallible setup, since the callback can arm work.
     drainSilently(self.terminated_iter);
+    if (options.report_existing) {
+        matchedCallback(self, self.matched_iter);
+    } else {
+        drainSilently(self.matched_iter);
+    }
 
     log.info("registered for keyboard enumeration notifications", .{});
     return self;

@@ -41,7 +41,6 @@ pub const version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
 /// comptime so the seize hot path pays nothing for it.
 const profile_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 
-
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
         .Debug => .debug,
@@ -1166,7 +1165,6 @@ const Daemon = struct {
     }
 };
 
-
 /// Arm a one-shot timer on the current run loop into `slot`, replacing any
 /// timer already there. False when CF can't create it.
 fn armOneShot(slot: *c.CFRunLoopTimerRef, delay_s: f64, callback: c.CFRunLoopTimerCallBack, info: *anyopaque) bool {
@@ -1573,6 +1571,7 @@ const EngineSlot = struct {
 /// a struct and pass its address as the void* context.
 const SeizeCtx = struct {
     state: KbState,
+    dispatch_sequence: u64 = 0,
     /// Per-page snapshot state for the non-keyboard HID pages we
     /// forward through vhidd. Apple's built-in keyboard reports
     /// media keys (volume, brightness, play/pause, …) on these pages
@@ -1694,7 +1693,7 @@ fn layerPushSink(ctx_ptr: ?*anyopaque, layer: []const u8, entering: bool) void {
     var wbuf: [256]u8 = undefined;
     var sw = stream.writer(lctx.io, &wbuf);
     protocol.writeMessage(&sw.interface, lctx.allocator, .{
-        .@"type" = "mode_change",
+        .type = "mode_change",
         .mode = target,
     }) catch |err| {
         log.warn("mode_change push failed: {s}", .{@errorName(err)});
@@ -1705,35 +1704,24 @@ fn layerPushSink(ctx_ptr: ?*anyopaque, layer: []const u8, entering: bool) void {
     };
 }
 
-/// TapHold arbitration hook. Invoked from a slot's
-/// `doHoldCommit` (permissive_hold / hold_on_other_key_press /
-/// timer-fire). Repro: holding space (→ fn_layer, layer rule) AND
-/// caps_lock (→ lctrl, permissive_hold) and tapping h would
-/// occasionally land a bare ctrl-h at the OS — caps's
-/// permissive_hold fires on h-up while space is still in pending
-/// and pushes the modifier replay before the layer ever gets
-/// pushed. Here we look for any other slot that is in pending and
-/// is a layer rule, and force it to push its layer first. The
-/// layer slot's buffered events are split: events that the
-/// committing slot also has are dropped (its flushBuffer will
-/// replay them under the modifier), and any unique prefix
-/// (events that arrived before the committing slot started
-/// pending) is replayed now under the layer.
+/// Enter pending layers before a peer's modifier commit. Ordinary input
+/// has a single replay owner, so no duplicated suffixes need discarding.
+/// Keep the layer buffer until the dispatcher/timer finishes committing
+/// modifiers, then replay under the completed layer and modifier state.
 fn arbitrateHoldCommit(ctx_ptr: ?*anyopaque, committing: *TapHold) void {
     const cx: *SeizeCtx = @ptrCast(@alignCast(ctx_ptr orelse return));
-    const committing_buf = committing.bufferedCount();
     for (cx.slots) |*slot| {
         if (&slot.engine == committing) continue;
-        if (slot.engine.state != .pending) continue;
-        if (!slot.engine.isLayer()) continue;
-
-        const layer_len = slot.engine.bufferedCount();
-        const unique_prefix = if (layer_len > committing_buf) layer_len - committing_buf else 0;
-
-        slot.engine.forceLayerEnter();
-        cancelTapHoldTimer(slot);
-        slot.engine.flushPrefixAndDiscardRest(unique_prefix);
+        if (slot.engine.state == .pending and slot.engine.isLayer()) {
+            slot.engine.forceLayerEnter();
+            cancelTapHoldTimer(slot);
+        }
+        slot.engine.flushBefore(committing.pending_sequence);
     }
+}
+
+fn flushDecidedSlots(slots: []EngineSlot) void {
+    for (slots) |*slot| slot.engine.flushDecided();
 }
 
 /// Sink for both real HID events and TapHold-synthesized events.
@@ -1834,6 +1822,7 @@ fn tapHoldTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) 
         slot.timer = null;
     }
     applyTapHoldTimer(slot, action);
+    flushDecidedSlots(slot.seize_ctx.slots);
 }
 
 fn makeTapHoldTimer(after_ms: u32, slot: *EngineSlot) c.CFRunLoopTimerRef {
@@ -2025,40 +2014,10 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
         .usage_page = 0x07,
         .usage = usage16,
         .pressed = ev.pressed,
+        .device = ev.device,
     };
 
-    // If this event is the source of some slot's tap-hold rule,
-    // only deliver it to that slot — never to other slots. Letting
-    // a foreign slot buffer a fellow source leads to double-emit
-    // pathologies: user presses caps+space, caps_slot (still
-    // pending) snapshots space-down into its buffer, and on caps's
-    // hold-commit replays space-down to the OS, which then sees
-    // space held under ctrl and autorepeats.
-    //
-    // The check has to be "is this any slot's source?", not "is
-    // this a *currently-pending* slot's source?": at the moment
-    // space-down arrives, space_slot hasn't yet transitioned to
-    // pending (this event is what triggers it), so the pending-
-    // state-filtered version of the check would miss this case.
-    //
-    // Both loops only consider slots bound to the device that sent the
-    // event. Rules are per device: without this, two keyboards each with
-    // a caps_lock rule both ran on one caps tap and emitted the tap twice.
-    const event_is_some_slot_source = blk: for (cx.slots) |*slot| {
-        if (!HidSeize.sameDevice(slot.device, ev.device)) continue;
-        if (slot.engine.rule.src_usage == usage16) break :blk true;
-    } else false;
-
-    var any_consumed = false;
-    for (cx.slots) |*slot| {
-        if (!HidSeize.sameDevice(slot.device, ev.device)) continue;
-        if (event_is_some_slot_source and slot.engine.rule.src_usage != usage16) {
-            continue;
-        }
-        const r = slot.engine.feed(taphold_event);
-        applyTapHoldTimer(slot, r.timer);
-        if (r.disposition == .consumed) any_consumed = true;
-    }
+    const any_consumed = feedTapHoldSlots(cx, taphold_event, ev.device);
 
     // Apple firmware caps_lock neutralization. The proper fix
     // (HIDKeyboardCapsLockDelayOverride=0 via IOHIDServiceClient or
@@ -2085,6 +2044,89 @@ fn seizeInputCallback(ctx: ?*anyopaque, ev: HidSeize.Event) void {
     if (any_consumed) return;
 
     emitToVhidd(@ptrCast(cx), taphold_event);
+}
+
+fn feedTapHoldSlots(cx: *SeizeCtx, input: TapHold.Event, device: ?u8) bool {
+    const slots = cx.slots;
+    cx.dispatch_sequence += 1;
+    var event = input;
+    event.sequence = cx.dispatch_sequence;
+    // Source events activate/release only their owning keyboard's rule.
+    // Never let another engine buffer a fellow source and replay it.
+    var source = false;
+    var source_consumed = false;
+    for (slots) |*slot| {
+        if (!HidSeize.sameDevice(slot.device, device) or slot.engine.rule.src_usage != event.usage) continue;
+        source = true;
+        const result = slot.engine.feed(event);
+        source_consumed = source_consumed or result.disposition == .consumed;
+        applyTapHoldTimer(slot, result.timer);
+    }
+    if (source) {
+        flushDecidedSlots(slots);
+        return source_consumed;
+    }
+
+    // A release belongs only to the engine still buffering its down.
+    // Once that engine has flushed, the release goes straight through.
+    var owner: ?usize = null;
+    for (slots, 0..) |*slot, i| {
+        if (slot.engine.hasBufferedDown(event)) {
+            owner = i;
+            break;
+        }
+    }
+    if (event.pressed and owner == null) {
+        // Keep existing buffered input in order, even if a lower-index
+        // rule has since entered pending.
+        for (slots, 0..) |*slot, i| {
+            if (slot.engine.wantsBuffer() and slot.engine.bufferedCount() > 0) {
+                owner = i;
+                break;
+            }
+        }
+        if (owner == null) {
+            for (slots, 0..) |*slot, i| {
+                if (slot.engine.wantsBuffer()) {
+                    owner = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Commit hold decisions in source-press order before replaying input.
+    // Only the owner buffers; every peer observes down/up pairs. Deferring
+    // replay lets later modifiers take effect before a shared suffix,
+    // while arbitration replays earlier prefixes before each modifier.
+    for (slots) |*slot| slot.engine.defer_replay = true;
+    defer {
+        for (slots) |*slot| slot.engine.defer_replay = false;
+    }
+    var consumed = false;
+    // Process peers in source-press order. Earlier modifiers must be
+    // committed before a later modifier replays its preceding prefix.
+    var previous: ?usize = null;
+    while (true) {
+        var next: ?usize = null;
+        for (slots, 0..) |*slot, i| {
+            if (previous) |prev| {
+                const before = slots[prev].engine.pending_sequence;
+                if (slot.engine.pending_sequence < before or (slot.engine.pending_sequence == before and i <= prev)) continue;
+            }
+            if (next == null or slot.engine.pending_sequence < slots[next.?].engine.pending_sequence) next = i;
+        }
+        const i = next orelse break;
+        const result = if (owner == i)
+            slots[i].engine.feedFromDevice(event, false)
+        else
+            slots[i].engine.observeOther(event);
+        applyTapHoldTimer(&slots[i], result.timer);
+        consumed = consumed or result.disposition == .consumed;
+        previous = i;
+    }
+    flushDecidedSlots(slots);
+    return consumed;
 }
 
 /// Open the vhidd virtual keyboard, seize the matched physical
@@ -2319,4 +2361,239 @@ fn printHelp() void {
         \\Install it with: skhd --install-grabber
         \\
     , .{});
+}
+
+const dispatch_testing = struct {
+    const Capture = struct {
+        events: [16]TapHold.Event = undefined,
+        len: usize = 0,
+
+        fn emit(ctx: ?*anyopaque, event: TapHold.Event) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.events[self.len] = event;
+            self.len += 1;
+        }
+    };
+
+    fn layer(ctx: ?*anyopaque, _: []const u8, entering: bool) void {
+        Capture.emit(ctx, .{ .usage_page = 0, .usage = 0xffff, .pressed = entering });
+    }
+
+    fn key(slots: []EngineSlot, device: u8, usage: u16, pressed: bool) bool {
+        const cx = slots[0].seize_ctx;
+        cx.slots = slots;
+        return feedTapHoldSlots(cx, .{ .usage_page = 7, .usage = usage, .pressed = pressed, .device = device }, device);
+    }
+
+    fn slot(cx: *SeizeCtx, capture: *Capture, device: u8) EngineSlot {
+        return .{
+            .seize_ctx = cx,
+            .device = device,
+            .engine = TapHold.init(.{
+                .src_usage = 0x39,
+                .tap_usage = 0x29,
+                .hold = .{ .hid_usage = 0xe0 },
+                .hold_on_other_key_press = true,
+            }, Capture.emit, capture),
+        };
+    }
+};
+
+test "dispatcher: other keyboard commits pending hold" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{h.slot(&cx, &capture, 0)};
+    defer cancelTapHoldTimer(&slots[0]);
+    try t.expect(h.key(&slots, 0, 0x39, true));
+    try t.expect(!h.key(&slots, 1, 0x04, true));
+    try t.expect(h.key(&slots, 0, 0x39, false));
+    try t.expectEqual(@as(usize, 2), capture.len);
+    try t.expectEqual(@as(u32, 0xe0), capture.events[0].usage);
+    try t.expect(capture.events[0].pressed);
+    try t.expect(!capture.events[1].pressed);
+}
+
+test "dispatcher: only the sending device activates a source rule" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{ h.slot(&cx, &capture, 0), h.slot(&cx, &capture, 1) };
+    defer for (&slots) |*slot| cancelTapHoldTimer(slot);
+    try t.expect(h.key(&slots, 1, 0x39, true));
+    try t.expect(h.key(&slots, 1, 0x39, false));
+    try t.expectEqual(@as(usize, 2), capture.len);
+    try t.expectEqual(@as(u32, 0x29), capture.events[0].usage);
+    try t.expect(slots[0].timer == null);
+}
+
+test "dispatcher: foreign source usage cannot release the owning keyboard's hold" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{h.slot(&cx, &capture, 0)};
+    defer cancelTapHoldTimer(&slots[0]);
+    _ = h.key(&slots, 0, 0x39, true);
+    _ = slots[0].engine.timerFired();
+    _ = h.key(&slots, 1, 0x39, false);
+    try t.expectEqual(@as(usize, 1), capture.len);
+    _ = h.key(&slots, 0, 0x39, false);
+    try t.expectEqual(@as(usize, 2), capture.len);
+    try t.expectEqual(@as(u32, 0xe0), capture.events[1].usage);
+    try t.expect(!capture.events[1].pressed);
+}
+
+test "dispatcher: cross-keyboard typing suppresses retro tap" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{h.slot(&cx, &capture, 0)};
+    slots[0].engine.rule.retro_tap = true;
+    defer cancelTapHoldTimer(&slots[0]);
+    _ = h.key(&slots, 0, 0x39, true);
+    _ = slots[0].engine.timerFired();
+    _ = h.key(&slots, 1, 0x04, true);
+    _ = h.key(&slots, 1, 0x04, false);
+    _ = h.key(&slots, 0, 0x39, false);
+    try t.expectEqual(@as(usize, 2), capture.len);
+    try t.expectEqual(@as(u32, 0xe0), capture.events[1].usage);
+    try t.expect(!capture.events[1].pressed);
+}
+
+test "dispatcher: permissive hold replays a foreign keyboard tap under control" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{h.slot(&cx, &capture, 0)};
+    slots[0].engine.rule.hold_on_other_key_press = false;
+    slots[0].engine.rule.permissive_hold = true;
+    defer cancelTapHoldTimer(&slots[0]);
+    try t.expect(h.key(&slots, 0, 0x39, true));
+    try t.expect(h.key(&slots, 1, 0x04, true));
+    try t.expect(h.key(&slots, 1, 0x04, false));
+    try t.expect(h.key(&slots, 0, 0x39, false));
+    try t.expectEqual(@as(usize, 4), capture.len);
+    const usages = [_]u32{ 0xe0, 0x04, 0x04, 0xe0 };
+    const pressed = [_]bool{ true, true, false, false };
+    for (usages, pressed, 0..) |usage, down, i| {
+        try t.expectEqual(usage, capture.events[i].usage);
+        try t.expectEqual(down, capture.events[i].pressed);
+    }
+}
+
+test "dispatcher: two pending keyboards replay an ordinary tap once" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{ h.slot(&cx, &capture, 0), h.slot(&cx, &capture, 1) };
+    cx.slots = &slots;
+    for (&slots) |*slot| {
+        slot.engine.rule.hold_on_other_key_press = false;
+        slot.engine.rule.permissive_hold = true;
+        slot.engine.arbitration_hook = arbitrateHoldCommit;
+        slot.engine.arbitration_ctx = &cx;
+    }
+    defer for (&slots) |*slot| cancelTapHoldTimer(slot);
+    _ = h.key(&slots, 0, 0x39, true);
+    _ = h.key(&slots, 1, 0x39, true);
+    _ = h.key(&slots, 0, 0x04, true);
+    _ = h.key(&slots, 0, 0x04, false);
+    _ = h.key(&slots, 0, 0x39, false);
+    _ = h.key(&slots, 1, 0x39, false);
+    var letter_events: usize = 0;
+    for (capture.events[0..capture.len]) |event| {
+        if (event.usage == 0x04) letter_events += 1;
+        try t.expect(event.usage != 0x29);
+    }
+    try t.expectEqual(@as(usize, 2), letter_events);
+}
+
+test "dispatcher: unmatched source release passes through for stuck-key recovery" {
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{h.slot(&cx, &capture, 0)};
+    try std.testing.expect(!h.key(&slots, 0, 0x39, false));
+    try std.testing.expectEqual(@as(usize, 0), capture.len);
+}
+
+test "dispatcher: layer prefix preceding a modifier remains unmodified" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{ h.slot(&cx, &capture, 0), h.slot(&cx, &capture, 1) };
+    cx.slots = &slots;
+    slots[0].engine.rule.hold_on_other_key_press = false;
+    slots[0].engine.rule.permissive_hold = true;
+    slots[1].engine.rule.src_usage = 0x2c;
+    slots[1].engine.rule.hold = .{ .layer = "nav" };
+    slots[1].engine.rule.hold_on_other_key_press = false;
+    slots[1].engine.layer_sink = h.layer;
+    slots[1].engine.layer_sink_ctx = &capture;
+    for (&slots) |*slot| {
+        slot.engine.arbitration_hook = arbitrateHoldCommit;
+        slot.engine.arbitration_ctx = &cx;
+    }
+    defer for (&slots) |*slot| cancelTapHoldTimer(slot);
+    _ = h.key(&slots, 1, 0x2c, true);
+    _ = h.key(&slots, 0, 0x04, true);
+    _ = h.key(&slots, 0, 0x04, false);
+    _ = h.key(&slots, 0, 0x39, true);
+    _ = h.key(&slots, 0, 0x0b, true);
+    const consumed_up = h.key(&slots, 0, 0x0b, false);
+    if (!consumed_up) h.Capture.emit(&capture, .{ .usage_page = 7, .usage = 0x0b, .pressed = false });
+    const usages = [_]u32{ 0xffff, 0x04, 0x04, 0xe0, 0x0b, 0x0b };
+    const pressed = [_]bool{ true, true, false, true, true, false };
+    try t.expectEqual(usages.len, capture.len);
+    for (usages, pressed, 0..) |usage, down, i| {
+        try t.expectEqual(usage, capture.events[i].usage);
+        try t.expectEqual(down, capture.events[i].pressed);
+    }
+}
+
+test "dispatcher: an unmatched foreign keyup cannot commit permissive hold" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{h.slot(&cx, &capture, 0)};
+    slots[0].engine.rule.hold_on_other_key_press = false;
+    slots[0].engine.rule.permissive_hold = true;
+    defer cancelTapHoldTimer(&slots[0]);
+    _ = h.key(&slots, 0, 0x39, true);
+    try t.expect(h.key(&slots, 0, 0x04, true));
+    try t.expect(!h.key(&slots, 1, 0x04, false));
+    try t.expectEqual(@as(usize, 0), capture.len);
+    try t.expect(h.key(&slots, 0, 0x04, false));
+    try t.expectEqual(@as(usize, 3), capture.len);
+    try t.expectEqual(@as(u32, 0xe0), capture.events[0].usage);
+}
+
+test "dispatcher: replayed prefix still participates in a pending permissive hold" {
+    const t = std.testing;
+    const h = dispatch_testing;
+    var cx: SeizeCtx = .{ .state = .{}, .vhidd = undefined };
+    var capture: h.Capture = .{};
+    var slots = [_]EngineSlot{ h.slot(&cx, &capture, 0), h.slot(&cx, &capture, 1) };
+    slots[0].engine.rule.hold_on_other_key_press = false;
+    slots[0].engine.rule.permissive_hold = true;
+    for (&slots) |*slot| {
+        slot.engine.arbitration_hook = arbitrateHoldCommit;
+        slot.engine.arbitration_ctx = &cx;
+    }
+    defer for (&slots) |*slot| cancelTapHoldTimer(slot);
+    _ = h.key(&slots, 0, 0x39, true);
+    _ = h.key(&slots, 0, 0x04, true);
+    _ = h.key(&slots, 1, 0x39, true);
+    _ = h.key(&slots, 1, 0x05, true);
+    _ = h.key(&slots, 0, 0x04, false);
+    _ = h.key(&slots, 0, 0x39, false);
+    for (capture.events[0..capture.len]) |event| try t.expect(event.usage != 0x29);
 }

@@ -418,6 +418,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&check_constants_cmd.step);
 
+    // Exercise the production tap-hold dispatcher as well as its engines.
+    const grabber_tests = b.addTest(.{ .root_module = grabber_mod });
+    const run_grabber_tests = b.addRunArtifact(grabber_tests);
+    test_step.dependOn(&run_grabber_tests.step);
+    const test_grabber_step = b.step("test-grabber", "Run grabber dispatcher and module tests");
+    test_grabber_step.dependOn(&run_grabber_tests.step);
+
     // Benchmark executable
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/benchmark.zig"),

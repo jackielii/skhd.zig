@@ -34,6 +34,10 @@ pub const Event = struct {
     usage_page: u32,
     usage: u32,
     pressed: bool,
+    /// Identity is needed when matching buffered/observed down-up pairs.
+    device: ?u8 = null,
+    /// Dispatcher order, used to replay input preceding a modifier first.
+    sequence: u64 = 0,
 };
 
 /// What to do when a tap-hold rule commits its hold action.
@@ -97,9 +101,20 @@ const State = enum {
 /// few slots — most users don't pile up keys faster than the
 /// timeout.
 const max_buffered_events = 16;
+const Key = struct {
+    usage: u32,
+    device: ?u8,
+
+    fn of(ev: Event) Key {
+        return .{ .usage = ev.usage, .device = ev.device };
+    }
+};
 
 rule: Rule,
 state: State = .idle,
+pending_sequence: u64 = 0,
+/// The dispatcher stages all hold decisions before replaying shared input.
+defer_replay: bool = false,
 sink: Sink,
 sink_ctx: ?*anyopaque,
 /// Optional layer sink — required if rule.hold is a layer; ignored
@@ -129,7 +144,10 @@ buffer_len: usize = 0,
 /// down was emitted before the pending window — buffering the up
 /// would let the OS see the key as held for the entire pending
 /// window and autorepeat it).
-buffered_downs_storage: [max_buffered_events]u16 = undefined,
+buffered_downs_storage: [max_buffered_events]Key = undefined,
+/// Down-up pairs seen without owning their replay, for permissive hold.
+observed_downs: [max_buffered_events]Key = undefined,
+observed_downs_len: usize = 0,
 buffered_downs_len: usize = 0,
 /// Whether any non-source key event has been seen since this rule
 /// last entered pending. Drives `retro_tap` (emit tap on release if
@@ -142,7 +160,7 @@ inline fn bufferItems(self: *Self) []Event {
     return self.buffer_storage[0..self.buffer_len];
 }
 
-inline fn bufferedDownsItems(self: *Self) []u16 {
+inline fn bufferedDownsItems(self: *Self) []Key {
     return self.buffered_downs_storage[0..self.buffered_downs_len];
 }
 
@@ -152,9 +170,9 @@ inline fn pushBuffer(self: *Self, ev: Event) error{OutOfMemory}!void {
     self.buffer_len += 1;
 }
 
-inline fn pushBufferedDown(self: *Self, usage: u16) error{OutOfMemory}!void {
+inline fn pushBufferedDown(self: *Self, key: Key) error{OutOfMemory}!void {
     if (self.buffered_downs_len >= self.buffered_downs_storage.len) return error.OutOfMemory;
-    self.buffered_downs_storage[self.buffered_downs_len] = usage;
+    self.buffered_downs_storage[self.buffered_downs_len] = key;
     self.buffered_downs_len += 1;
 }
 
@@ -178,14 +196,24 @@ pub fn initWithLayerSink(
     };
 }
 
-pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: TimerAction } {
-    const is_source = ev.usage_page == 0x07 and ev.usage == self.rule.src_usage;
+const FeedResult = struct { disposition: Disposition, timer: TimerAction };
+
+pub fn feed(self: *Self, ev: Event) FeedResult {
+    return self.feedFromDevice(ev, true);
+}
+
+/// Other keyboards can affect hold decisions, but cannot press or
+/// release this rule's source key, even when the HID usage is identical.
+pub fn feedFromDevice(self: *Self, ev: Event, source_device: bool) FeedResult {
+    const is_source = source_device and ev.usage_page == 0x07 and ev.usage == self.rule.src_usage;
 
     switch (self.state) {
         .idle => {
             if (is_source and ev.pressed) {
                 self.state = .pending;
+                self.pending_sequence = ev.sequence;
                 self.other_key_seen = false;
+                self.observed_downs_len = 0;
                 return .{ .disposition = .consumed, .timer = .{ .start_in_ms = self.rule.timeout_ms } };
             }
             // Source key-up while idle (e.g. stuck-key recovery): nothing
@@ -207,11 +235,13 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                 return .{ .disposition = .consumed, .timer = .none };
             }
 
-            // Track for retro_tap.
+            // Track decisions separately from buffered replay, including
+            // keys whose down is later replayed before a peer modifier.
             self.other_key_seen = true;
+            const completed = self.trackOther(ev);
 
             // Other key arrived while pending.
-            if (self.rule.hold_on_other_key_press and ev.pressed) {
+            if ((self.rule.hold_on_other_key_press or completed) and ev.pressed) {
                 // Eager commit: the moment another key is pressed,
                 // we know the user is using the source as a hold.
                 self.doHoldCommit();
@@ -224,7 +254,6 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
             // treats a nested tap as proof of intent-to-hold (used by
             // modifier-style rules; doesn't fit layer holds well).
             if (self.isLayer() or self.rule.permissive_hold) {
-                const ev_usage16: u16 = std.math.cast(u16, ev.usage) orelse 0;
                 if (!ev.pressed) {
                     // For an UP event, only buffer if the matching
                     // DOWN was also buffered. Otherwise the down is
@@ -236,7 +265,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                     var down_was_buffered = false;
                     var i: usize = 0;
                     while (i < self.buffered_downs_len) : (i += 1) {
-                        if (self.buffered_downs_storage[i] == ev_usage16) {
+                        if (std.meta.eql(self.buffered_downs_storage[i], Key.of(ev))) {
                             // swap-remove
                             self.buffered_downs_len -= 1;
                             self.buffered_downs_storage[i] = self.buffered_downs_storage[self.buffered_downs_len];
@@ -245,6 +274,10 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                         }
                     }
                     if (!down_was_buffered) {
+                        if (completed) {
+                            self.doHoldCommit();
+                            return .{ .disposition = .pass, .timer = .cancel };
+                        }
                         log.debug("pass-through up: src=0x{X:0>2} usage=0x{X:0>2} (down was external)", .{ self.rule.src_usage, ev.usage });
                         return .{ .disposition = .pass, .timer = .none };
                     }
@@ -255,7 +288,7 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
                     return .{ .disposition = .pass, .timer = .cancel };
                 };
                 if (ev.pressed) {
-                    self.pushBufferedDown(ev_usage16) catch {};
+                    self.pushBufferedDown(Key.of(ev)) catch {};
                 }
                 log.debug("buffer: slot src=0x{X:0>2} +usage=0x{X:0>2} pressed={} (depth={d})", .{ self.rule.src_usage, ev.usage, ev.pressed, self.buffer_len });
                 if (self.rule.permissive_hold and !self.isLayer() and !ev.pressed) {
@@ -306,6 +339,101 @@ pub fn feed(self: *Self, ev: Event) struct { disposition: Disposition, timer: Ti
     }
 }
 
+/// Decision pairing is independent of replay ownership: a down may be
+/// replayed early as a prefix while this engine remains pending.
+fn trackOther(self: *Self, ev: Event) bool {
+    var completed = false;
+    if (self.rule.permissive_hold and !self.isLayer()) {
+        const key = Key.of(ev);
+        if (ev.pressed) {
+            var known = false;
+            for (self.observed_downs[0..self.observed_downs_len]) |down| {
+                if (std.meta.eql(down, key)) known = true;
+            }
+            if (!known) {
+                if (self.observed_downs_len == self.observed_downs.len) {
+                    // As with event-buffer overflow, resolve the pending
+                    // decision rather than silently losing a transition.
+                    completed = true;
+                } else {
+                    self.observed_downs[self.observed_downs_len] = key;
+                    self.observed_downs_len += 1;
+                }
+            }
+        } else {
+            for (self.observed_downs[0..self.observed_downs_len], 0..) |down, i| {
+                if (!std.meta.eql(down, key)) continue;
+                self.observed_downs_len -= 1;
+                self.observed_downs[i] = self.observed_downs[self.observed_downs_len];
+                completed = true;
+                break;
+            }
+        }
+    }
+    return completed;
+}
+
+/// Observe ordinary input whose replay belongs to another engine (or the
+/// dispatcher). This never consumes or buffers ordinary events.
+pub fn observeOther(self: *Self, ev: Event) FeedResult {
+    if (self.state == .idle) return .{ .disposition = .pass, .timer = .none };
+    self.other_key_seen = true;
+    if (self.state != .pending) return .{ .disposition = .pass, .timer = .none };
+    const completed = self.trackOther(ev);
+    const commit = (self.rule.hold_on_other_key_press and ev.pressed) or completed;
+    if (commit) {
+        self.doHoldCommit();
+        return .{ .disposition = .pass, .timer = .cancel };
+    }
+    return .{ .disposition = .pass, .timer = .none };
+}
+
+/// Only one pending engine owns ordinary input replay. Keep that owner
+/// while it has buffered input so chronological order is preserved.
+pub fn wantsBuffer(self: *const Self) bool {
+    return self.state == .pending and (self.isLayer() or self.rule.permissive_hold) and !self.rule.hold_on_other_key_press;
+}
+
+pub fn hasBufferedDown(self: *const Self, ev: Event) bool {
+    for (self.buffered_downs_storage[0..self.buffered_downs_len]) |key| {
+        if (std.meta.eql(key, Key.of(ev))) return true;
+    }
+    return false;
+}
+
+/// Replay input that preceded a peer's source press before that peer's
+/// modifier takes effect. Sequence numbers preserve this boundary even
+/// when another engine observes events without duplicating the buffer.
+pub fn flushBefore(self: *Self, sequence: u64) void {
+    var count: usize = 0;
+    while (count < self.buffer_len and self.buffer_storage[count].sequence < sequence) : (count += 1) {
+        self.sink(self.sink_ctx, self.buffer_storage[count]);
+    }
+    if (count == 0) return;
+    std.mem.copyForwards(Event, self.buffer_storage[0 .. self.buffer_len - count], self.buffer_storage[count..self.buffer_len]);
+    self.buffer_len -= count;
+    self.buffered_downs_len = 0;
+    for (self.buffer_storage[0..self.buffer_len]) |event| {
+        const key = Key.of(event);
+        if (event.pressed) {
+            self.pushBufferedDown(key) catch unreachable;
+        } else {
+            for (self.buffered_downs_storage[0..self.buffered_downs_len], 0..) |down, i| {
+                if (!std.meta.eql(down, key)) continue;
+                self.buffered_downs_len -= 1;
+                self.buffered_downs_storage[i] = self.buffered_downs_storage[self.buffered_downs_len];
+                break;
+            }
+        }
+    }
+}
+
+/// Arbitration may enter a layer before a peer emits its modifier.
+/// Replay only after all observers have committed their hold actions.
+pub fn flushDecided(self: *Self) void {
+    if (self.state == .decided_hold) self.flushBuffer();
+}
+
 pub fn timerFired(self: *Self) TimerAction {
     if (self.state != .pending) return .none;
     self.doHoldCommit();
@@ -323,7 +451,7 @@ fn doHoldCommit(self: *Self) void {
     if (self.arbitration_hook) |h| h(self.arbitration_ctx, self);
     self.emitHoldDown();
     self.state = .decided_hold;
-    self.flushBuffer();
+    if (!self.defer_replay) self.flushBuffer();
 }
 
 /// Number of events currently buffered (used by arbitration
@@ -723,7 +851,7 @@ test "retro_tap: source held past timeout with no other key, on release emits ta
     }, TestSink.callback, &sink);
 
     _ = eng.feed(kbev(0x39, true)); // source down → pending
-    _ = eng.timerFired();             // → decided_hold, hold_down emitted
+    _ = eng.timerFired(); // → decided_hold, hold_down emitted
     try std.testing.expectEqual(@as(usize, 1), sink.out.items.len);
     try std.testing.expectEqual(@as(u32, 0xE0), sink.out.items[0].usage);
     try std.testing.expect(sink.out.items[0].pressed);
@@ -751,7 +879,7 @@ test "retro_tap: other key seen during hold suppresses retro tap on release" {
 
     _ = eng.feed(kbev(0x39, true));
     _ = eng.timerFired();
-    _ = eng.feed(kbev(0x04, true));  // 'a' down — observed during hold
+    _ = eng.feed(kbev(0x04, true)); // 'a' down — observed during hold
     _ = eng.feed(kbev(0x04, false));
     _ = eng.feed(kbev(0x39, false));
 
@@ -856,7 +984,8 @@ test "bench: pure-tap loop (modifier rule, no buffering)" {
         _ = eng.feed(kbev(0x39, true));
         _ = eng.feed(kbev(0x39, false));
     }
-    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake); const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
+    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
     const events = iterations * 2;
     benchReport("pure-tap", total_ns, events);
     // Each iteration produces 2 emitted events (tap_down + tap_up).
@@ -894,7 +1023,8 @@ test "bench: layer rule, fast typing burst (5 keys per hold)" {
         }
         _ = eng.feed(kbev(0x2C, false));
     }
-    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake); const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
+    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
     const events = iterations * (2 + inner_keys * 2);
     benchReport("layer-roll-5keys", total_ns, events);
 }
@@ -929,7 +1059,8 @@ test "bench: hold-on-other-key-press eager commit" {
         }
         _ = eng.feed(kbev(0x39, false));
     }
-    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake); const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
+    const t1 = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+    const total_ns: u64 = @intCast(t0.durationTo(t1).raw.nanoseconds);
     const events = iterations * (2 + inner_keys * 2);
     benchReport("hold-on-other-key-press", total_ns, events);
 }
@@ -1061,9 +1192,9 @@ test "multi-slot race: arbitration pushes layer before peer's permissive_hold co
     // Fast user keystroke order: space ↓, caps ↓, h ↓, h ↑, caps ↑,
     // space ↑ — all inside space's 200ms timeout window (timers
     // never fire in this test).
-    dispatch(&slot_list, kbev(0x2C, true));  // space down
-    dispatch(&slot_list, kbev(0x39, true));  // caps down
-    dispatch(&slot_list, kbev(0x0B, true));  // h down
+    dispatch(&slot_list, kbev(0x2C, true)); // space down
+    dispatch(&slot_list, kbev(0x39, true)); // caps down
+    dispatch(&slot_list, kbev(0x0B, true)); // h down
     dispatch(&slot_list, kbev(0x0B, false)); // h up   ← caps fires, arbitration kicks in
     dispatch(&slot_list, kbev(0x39, false)); // caps up
     dispatch(&slot_list, kbev(0x2C, false)); // space up
@@ -1178,7 +1309,7 @@ test "multi-slot race: arbitration replays layer-unique prefix before peer commi
     // caps ↓                ← caps now pending
     // h ↓, h ↑              ← both buffer these
     dispatch(&slot_list, kbev(0x2C, true));
-    dispatch(&slot_list, kbev(0x04, true));  // 'a' down — space-only
+    dispatch(&slot_list, kbev(0x04, true)); // 'a' down — space-only
     dispatch(&slot_list, kbev(0x04, false)); // 'a' up   — space-only
     dispatch(&slot_list, kbev(0x39, true));
     dispatch(&slot_list, kbev(0x0B, true));

@@ -93,9 +93,11 @@ EOF
     # itself isn't password-protected once in the keychain.
     P12_PASS="skhd-cert-import"
 
-    # OpenSSL 3+ uses a stronger PKCS12 MAC by default that older `security`
-    # tools can't read. -legacy falls back to the algorithm macOS understands.
-    openssl pkcs12 -export -legacy -out "$TEMP_P12" -inkey "$TEMP_KEY" -in "$TEMP_CERT" \
+    # Explicit algorithms work with both stock macOS LibreSSL and OpenSSL 3+.
+    # Avoid -legacy (LibreSSL rejects it) and OpenSSL 3 defaults that older
+    # macOS security import cannot read. 3DES also avoids the RC2 provider.
+    openssl pkcs12 -export -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+        -out "$TEMP_P12" -inkey "$TEMP_KEY" -in "$TEMP_CERT" \
         -passout "pass:$P12_PASS" 2>/dev/null
 
     if security import "$TEMP_P12" -k ~/Library/Keychains/login.keychain-db -P "$P12_PASS" \

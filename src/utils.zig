@@ -76,7 +76,7 @@ test indentPrint {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
 
-    try indentPrint(alloc, &aw.writer, " " ** 2, "{s}", "Hello, World!");
+    try indentPrint(alloc, &aw.writer, "  ", "{s}", "Hello, World!");
 
     try std.testing.expectEqualStrings("  Hello, World!", aw.written());
 }

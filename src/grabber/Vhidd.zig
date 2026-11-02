@@ -127,17 +127,19 @@ pub const Frame = union(enum) {
 pub fn parseFrame(buf: []const u8) Frame {
     if (buf.len == 0) return .other;
     switch (buf[0]) {
-        @intFromEnum(FrameType.heartbeat) => {
+        @backingInt(FrameType.heartbeat) => {
             if (buf.len < 5) return .{ .heartbeat = 0 };
             return .{ .heartbeat = std.mem.readInt(u32, buf[1..5], .little) };
         },
-        @intFromEnum(FrameType.user_data) => {
+        @backingInt(FrameType.user_data) => {
             if (buf.len < 2) return .other;
-            return .{ .response = .{
-                // Response is non-exhaustive — any u8 is representable.
-                .resp = @enumFromInt(buf[1]),
-                .body_first = if (buf.len > 2) buf[2] else null,
-            } };
+            return .{
+                .response = .{
+                    // Response is non-exhaustive — any u8 is representable.
+                    .resp = @fromBackingInt(@intCast(buf[1])),
+                    .body_first = if (buf.len > 2) buf[2] else null,
+                },
+            };
         },
         else => return .other,
     }
@@ -186,7 +188,7 @@ pub const Client = struct {
 
         // Stale file from a prior crash would make bind() fail with EADDRINUSE.
         // libc unlink returns -1 / sets errno on failure; ENOENT is expected.
-        const path_z = try allocator.dupeZ(u8, client_path);
+        const path_z = try allocator.dupeSentinel(u8, client_path, 0);
         defer allocator.free(path_z);
         const rc = std.c.unlink(path_z.ptr);
         const ue = std.c.errno(rc);
@@ -220,7 +222,7 @@ pub const Client = struct {
 
     pub fn close(self: *Client) void {
         _ = std.c.close(self.fd);
-        const path_z = self.allocator.dupeZ(u8, self.bound_path) catch null;
+        const path_z = self.allocator.dupeSentinel(u8, self.bound_path, 0) catch null;
         if (path_z) |p| {
             defer self.allocator.free(p);
             _ = std.c.unlink(p.ptr);
@@ -343,7 +345,7 @@ pub const Client = struct {
             // Wire frame: [type:u8] [body…].
             // type=0 (heartbeat) → body is `[next_heartbeat_deadline:u32 LE]`.
             // type=1 (user_data) → body is `[response:u8] [response_body…]`.
-            const frame_type: FrameType = @enumFromInt(buf[0]);
+            const frame_type: FrameType = @fromBackingInt(@intCast(buf[0]));
             switch (frame_type) {
                 .heartbeat => {
                     log.debug("recv heartbeat ({d} body bytes)", .{n - 1});
@@ -351,7 +353,7 @@ pub const Client = struct {
                 },
                 .user_data => {
                     if (n < 2) continue;
-                    const resp: Response = @enumFromInt(buf[1]);
+                    const resp: Response = @fromBackingInt(@intCast(buf[1]));
                     const resp_body_len = n - 2;
                     log.debug("recv response={d} body_len={d} body[0]={any}", .{
                         buf[1],
@@ -371,7 +373,7 @@ pub const Client = struct {
     fn sendUserData(self: *Client, body: []const u8) !void {
         var buf: [1024]u8 = undefined;
         if (body.len + 1 > buf.len) return error.PayloadTooLarge;
-        buf[0] = @intFromEnum(FrameType.user_data);
+        buf[0] = @backingInt(FrameType.user_data);
         @memcpy(buf[1..][0..body.len], body);
         const sent = std.c.send(self.fd, buf[0 .. body.len + 1].ptr, body.len + 1, 0);
         if (sent < 0) return error.SendFailed;
@@ -383,7 +385,7 @@ fn encodeHeader(buf: []u8, req: Request) usize {
     buf[0] = magic[0];
     buf[1] = magic[1];
     std.mem.writeInt(u16, buf[2..4], protocol_version, .little);
-    buf[4] = @intFromEnum(req);
+    buf[4] = @backingInt(req);
     return 5;
 }
 
@@ -458,7 +460,7 @@ fn bindUnix(fd: posix.fd_t, path: []const u8) !void {
     if (path.len >= addr.path.len) return error.PathTooLong;
     @memcpy(addr.path[0..path.len], path);
     if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) {
-        log.warn("bind {s} failed: errno={d}", .{ path, @intFromEnum(std.c.errno(@as(c_int, -1))) });
+        log.warn("bind {s} failed: errno={d}", .{ path, @backingInt(std.c.errno(@as(c_int, -1))) });
         return error.ClientSocketBindFailed;
     }
 }

@@ -38,7 +38,7 @@ pub fn deinit(self: *Mode) void {
 
 pub fn set_command(self: *Mode, command: []const u8) !void {
     if (self.command) |cmd| self.allocator.free(cmd);
-    self.command = try self.allocator.dupeZ(u8, command);
+    self.command = try self.allocator.dupeSentinel(u8, command, 0);
 }
 
 pub fn format(self: Mode, writer: *std.Io.Writer) std.Io.Writer.Error!void {

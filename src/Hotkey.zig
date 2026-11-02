@@ -324,7 +324,7 @@ pub const ProcessCommand = union(enum) {
 
     /// Create a command variant with a duplicated null-terminated string
     pub fn initCommand(allocator: std.mem.Allocator, cmd: []const u8) !ProcessCommand {
-        return ProcessCommand{ .command = try allocator.dupeZ(u8, cmd) };
+        return ProcessCommand{ .command = try allocator.dupeSentinel(u8, cmd, 0) };
     }
 
     /// Create a forwarded variant
@@ -341,7 +341,7 @@ pub const ProcessCommand = union(enum) {
     pub fn initActivation(allocator: std.mem.Allocator, mode_name: []const u8, cmd: ?[]const u8) !ProcessCommand {
         return ProcessCommand{ .activation = .{
             .mode_name = try allocator.dupe(u8, mode_name),
-            .command = if (cmd) |c| try allocator.dupeZ(u8, c) else null,
+            .command = if (cmd) |c| try allocator.dupeSentinel(u8, c, 0) else null,
         } };
     }
 

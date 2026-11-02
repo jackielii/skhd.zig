@@ -85,9 +85,9 @@ pub const TapHoldDecl = struct {
 pub fn init(alloc: std.mem.Allocator, io: std.Io) !Mappings {
     const default_shell = "/bin/bash";
     const shell = if (@import("utils.zig").getenv("SHELL")) |env|
-        try alloc.dupeZ(u8, env)
+        try alloc.dupeSentinel(u8, env, 0)
     else
-        try alloc.dupeZ(u8, default_shell);
+        try alloc.dupeSentinel(u8, default_shell, 0);
 
     return Mappings{
         .shell = shell,
@@ -159,7 +159,7 @@ pub fn add_hotkey(self: *Mappings, hotkey: *Hotkey) !void {
 
 pub fn set_shell(self: *Mappings, shell: []const u8) !void {
     self.allocator.free(self.shell);
-    self.shell = try self.allocator.dupeZ(u8, shell);
+    self.shell = try self.allocator.dupeSentinel(u8, shell, 0);
 }
 
 pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
@@ -170,7 +170,7 @@ pub fn add_blacklist(self: *Mappings, key: []const u8) !void {
     if (self.blacklist.contains(owned)) {
         return error.BlacklistEntryAlreadyExists;
     }
-    try self.blacklist.put(self.allocator, owned, void{});
+    try self.blacklist.put(self.allocator, owned, {});
 }
 
 pub fn add_device_alias(self: *Mappings, name: []const u8, vendor: u32, product: u32) !void {

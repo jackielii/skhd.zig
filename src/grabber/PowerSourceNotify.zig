@@ -29,7 +29,7 @@ const log = std.log.scoped(.power_source);
 
 /// Verbose per-change state logging compiles in only where .info is
 /// visible (mirrors `power_diagnostics_supported` reasoning in main.zig).
-const diagnostics_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+const diagnostics_supported = builtin.mode == .debug or builtin.mode == .safe;
 
 /// Master restore: 4 AC<->battery transitions (unplug+replug twice)
 /// within 10s. Deliberate and physical — never happens by accident.

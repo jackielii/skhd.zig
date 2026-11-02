@@ -44,7 +44,7 @@ pub fn init(enabled: bool) Tracer {
 }
 
 inline fn add(self: *Tracer, comptime field: []const u8, n: u64) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
+    if (comptime builtin.mode != .debug and builtin.mode != .safe) return;
     if (!self.enabled) return;
     _ = @field(self.stats, field).fetchAdd(n, .monotonic);
 }
@@ -82,7 +82,7 @@ pub fn traceHotkeyComparison(self: *Tracer) void {
 
 // Linear search tracking
 pub fn traceLinearSearchIterations(self: *Tracer, iterations: u64) void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
+    if (comptime builtin.mode != .debug and builtin.mode != .safe) return;
     if (!self.enabled) return;
     _ = self.stats.linear_search_iterations.fetchAdd(iterations, .monotonic);
     // Bump max_linear_search_depth using a CAS loop. Two tracer threads
@@ -122,7 +122,7 @@ pub fn traceSelfGeneratedExit(self: *Tracer) void {
 
 // Print summary statistics
 pub fn printSummary(self: *Tracer, w: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (comptime builtin.mode != .Debug and builtin.mode != .ReleaseSafe) return;
+    if (comptime builtin.mode != .debug and builtin.mode != .safe) return;
     if (!self.enabled) return;
 
     const s = &self.stats;

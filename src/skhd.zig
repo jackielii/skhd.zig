@@ -1522,7 +1522,7 @@ inline fn processHotkey(self: *Skhd, eventkey: *const Hotkey.KeyPress, event: c.
             // is written. Default mode prints just the key (no `default <`
             // prefix in user configs). Compile out entirely in release
             // builds (log.debug is filtered there anyway).
-            if (comptime builtin.mode == .Debug) {
+            if (comptime builtin.mode == .debug) {
                 if (self.verbose) {
                     var key_buf: [256]u8 = undefined;
                     const key_str = try Keycodes.formatKeyPressBuffer(&key_buf, eventkey.flags, eventkey.key);
@@ -1821,7 +1821,7 @@ fn hotloadCallback(path: []const u8) void {
 /// even ReleaseSafe sets `log_level = .info`, so the format work
 /// would be wasted there.
 inline fn logKeyPress(self: *Skhd, comptime fmt: []const u8, key: Hotkey.KeyPress, rest: anytype) !void {
-    if (comptime builtin.mode != .Debug) return;
+    if (comptime builtin.mode != .debug) return;
     if (!self.verbose) return;
 
     var buf: [256]u8 = undefined;

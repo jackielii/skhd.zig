@@ -22,9 +22,9 @@ const log = std.log.scoped(.main);
 /// chatter in user terminals. Mirrors the policy used by skhd-grabber.
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
-        .Debug => .debug,
-        .ReleaseSafe => .info,
-        .ReleaseFast, .ReleaseSmall => .warn,
+        .debug => .debug,
+        .safe => .info,
+        .fast, .small => .warn,
     },
 };
 
@@ -322,7 +322,7 @@ fn logSessionStart(io: std.Io) void {
     log.info("=== skhd {s} started at {d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z (PID {d}) ===", .{
         version,
         @as(u32, year_day.year),
-        @intFromEnum(month_day.month),
+        @backingInt(month_day.month),
         @as(u32, month_day.day_index) + 1,
         day_secs.getHoursIntoDay(),
         day_secs.getMinutesIntoHour(),
@@ -339,12 +339,12 @@ fn logSessionStart(io: std.Io) void {
 /// uses and is reliable under launchd.
 fn detectLoginShell(allocator: std.mem.Allocator) ?[:0]const u8 {
     if (@import("utils.zig").getenv("SHELL")) |shell| {
-        if (shell.len > 0) return allocator.dupeZ(u8, shell) catch null;
+        if (shell.len > 0) return allocator.dupeSentinel(u8, shell, 0) catch null;
     }
     if (c.getpwuid(c.getuid())) |pw| {
         if (pw.*.pw_shell) |shell_ptr| {
             const slice = std.mem.sliceTo(shell_ptr, 0);
-            if (slice.len > 0) return allocator.dupeZ(u8, slice) catch null;
+            if (slice.len > 0) return allocator.dupeSentinel(u8, slice, 0) catch null;
         }
     }
     return null;
@@ -411,7 +411,7 @@ fn inheritUserPath(allocator: std.mem.Allocator, io: std.Io) void {
     const captured = capturePath(allocator, io, shell) orelse return;
     defer allocator.free(captured);
 
-    const path_z = allocator.dupeZ(u8, captured) catch return;
+    const path_z = allocator.dupeSentinel(u8, captured, 0) catch return;
     defer allocator.free(path_z);
 
     if (c.setenv("PATH", path_z.ptr, 1) != 0) {

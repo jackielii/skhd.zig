@@ -234,7 +234,7 @@ pub fn installGrabber(allocator: std.mem.Allocator, io: std.Io) !void {
     defer allocator.free(binary);
 
     const binary_abs = std.Io.Dir.cwd().realPathFileAlloc(io, binary, allocator) catch
-        try allocator.dupeZ(u8, binary);
+        try allocator.dupeSentinel(u8, binary, 0);
     defer allocator.free(binary_abs);
 
     // The plist's ProgramArguments path is critical for bundle-keyed TCC:
@@ -795,7 +795,6 @@ fn isDextEnabled(allocator: std.mem.Allocator, io: std.Io) ?bool {
     }
     return null;
 }
-
 
 fn launchdServiceRegistered(allocator: std.mem.Allocator, io: std.Io, target: []const u8) !bool {
     const result = std.process.run(allocator, io, .{

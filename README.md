@@ -152,6 +152,14 @@ Then grant accessibility (see [Granting Accessibility](#granting-accessibility) 
 
 ### Build from Source
 
+Requires Zig 0.17.0. With zigup and direnv installed, `.envrc` selects
+the project version:
+
+```bash
+zigup fetch 0.17.0
+direnv allow
+```
+
 ```bash
 # Clone the repository
 git clone https://github.com/jackielii/skhd.zig

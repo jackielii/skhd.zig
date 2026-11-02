@@ -12,12 +12,14 @@
 # because the local skhd-cert keypair differs from CI's; subsequent installs
 # reuse the same local cert so the TCC entry stays valid.
 #
+# Set SKHD_CERT to reuse a different existing signing identity.
 # usage: install-local.sh <built-binary>
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_BINARY="${1:?usage: install-local.sh <built-binary>}"
 
+CERT_NAME="${SKHD_CERT:-skhd-cert}"
 PROD_LABEL="com.jackielii.skhd"
 DOMAIN="gui/$(id -u)"
 
@@ -75,13 +77,13 @@ if [ -f "$GRABBER_SRC" ]; then
     echo "  + overlaid skhd-grabber"
 fi
 
-echo "Signing with skhd-cert (prod bundle id)..."
-SKHD_CERT="skhd-cert" SKHD_BUNDLE_ID="$PROD_LABEL" \
+echo "Signing with $CERT_NAME (prod bundle id)..."
+SKHD_CERT="$CERT_NAME" SKHD_BUNDLE_ID="$PROD_LABEL" \
     bash "$REPO_ROOT/scripts/codesign.sh" "$APP_PATH" >/dev/null
 
 echo
 echo "Deployed locally-built skhd → $APP_PATH"
 echo "Service was not restarted — run 'skhd --start-service' when ready."
-echo "If hotkeys stop working, the local skhd-cert is fresh and differs from"
+echo "If hotkeys stop working, the signing identity may differ from"
 echo "the cert TCC has on file. Open System Settings → Privacy & Security →"
 echo "Accessibility and toggle skhd off and back on (one-time re-grant)."

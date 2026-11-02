@@ -39,13 +39,13 @@ pub const version = std.mem.trimEnd(u8, @embedFile("VERSION"), "\n\r\t ");
 /// ReleaseSafe only — matching `Tracer.zig` in the user-agent. In
 /// ReleaseFast/ReleaseSmall every profile branch folds away at
 /// comptime so the seize hot path pays nothing for it.
-const profile_supported = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+const profile_supported = builtin.mode == .debug or builtin.mode == .safe;
 
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
-        .Debug => .debug,
-        .ReleaseSafe => .info,
-        .ReleaseFast, .ReleaseSmall => .warn,
+        .debug => .debug,
+        .safe => .info,
+        .fast, .small => .warn,
     },
     .logFn = grabberLog,
 };
@@ -1410,7 +1410,7 @@ fn subscriptionCallback(
         // covers both per recv(2). Anything else means the connection is
         // gone and we drop the subscription.
         const errno = std.c._errno().*;
-        if (errno == @intFromEnum(std.c.E.AGAIN)) {
+        if (errno == @backingInt(std.c.E.AGAIN)) {
             c.CFFileDescriptorEnableCallBacks(cf_fd, c.kCFFileDescriptorReadCallBack);
             return;
         }

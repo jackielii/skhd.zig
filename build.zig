@@ -64,10 +64,10 @@ fn linkGrabberFrameworks(b: *std.Build, mod: *std.Build.Module) void {
 
 fn addVersionImport(b: *std.Build, mod: *std.Build.Module) void {
     const mode_str = switch (mod.optimize.?) {
-        .Debug => "debug",
-        .ReleaseSafe => "safe",
-        .ReleaseFast => "fast",
-        .ReleaseSmall => "small",
+        .debug => "debug",
+        .safe => "safe",
+        .fast => "fast",
+        .small => "small",
     };
 
     const version_step = b.addSystemCommand(&[_][]const u8{
@@ -237,14 +237,14 @@ pub fn build(b: *std.Build) void {
     //   sudo zig-out/skhd-grabber-dev.app/Contents/MacOS/skhd-grabber [args]
     const grabber_dev_cert = "skhd-dev-cert";
     const grabber_dev_bundle_id = "com.jackielii.skhd.grabber.dev";
-    const installed_grabber_app = b.getInstallPath(.prefix, "skhd-grabber-dev.app");
+    const installed_grabber_app = b.graph.path(.install_prefix, "skhd-grabber-dev.app");
 
     const grabber_app_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
         "scripts/make-grabber-app.sh",
     });
-    grabber_app_cmd.addArg(b.getInstallPath(.bin, grabber_exe.name));
-    grabber_app_cmd.addArg(installed_grabber_app);
+    grabber_app_cmd.addFileArg(b.graph.path(.install_bin, grabber_exe.name));
+    grabber_app_cmd.addFileArg(installed_grabber_app);
     grabber_app_cmd.addArg(grabber_dev_bundle_id);
     grabber_app_cmd.step.dependOn(b.getInstallStep());
 
@@ -252,7 +252,7 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/codesign.sh",
     });
-    sign_grabber_app_cmd.addArg(installed_grabber_app);
+    sign_grabber_app_cmd.addFileArg(installed_grabber_app);
     sign_grabber_app_cmd.setEnvironmentVariable("SKHD_CERT", grabber_dev_cert);
     sign_grabber_app_cmd.setEnvironmentVariable("SKHD_BUNDLE_ID", grabber_dev_bundle_id);
     sign_grabber_app_cmd.step.dependOn(&grabber_app_cmd.step);
@@ -266,16 +266,18 @@ pub fn build(b: *std.Build) void {
     // gets denied silently after the next rebuild invalidates its cdhash.
     // Extra args after `--` flow through (e.g. `zig build run-grabber --
     // --socket-path /tmp/x.sock`).
-    const grabber_inner_exe = b.pathJoin(&.{ installed_grabber_app, "Contents", "MacOS", "skhd-grabber" });
-    const run_grabber_cmd = b.addSystemCommand(&[_][]const u8{ "sudo", grabber_inner_exe, "--foreground" });
+    const grabber_inner_exe = installed_grabber_app.path(b, "Contents/MacOS/skhd-grabber");
+    const run_grabber_cmd = b.addSystemCommand(&.{"sudo"});
+    run_grabber_cmd.addFileArg(grabber_inner_exe);
+    run_grabber_cmd.addArg("--foreground");
     run_grabber_cmd.step.dependOn(&sign_grabber_app_cmd.step);
-    if (b.args) |args| run_grabber_cmd.addArgs(args);
+    run_grabber_cmd.addPassthruArgs();
 
     const run_grabber_step = b.step("run-grabber", "Build skhd-grabber-dev.app and run it under sudo --foreground");
     run_grabber_step.dependOn(&run_grabber_cmd.step);
 
-    const installed_exe = b.getInstallPath(.bin, exe.name);
-    const installed_app = b.getInstallPath(.prefix, "skhd.app");
+    const installed_exe = b.graph.path(.install_bin, exe.name);
+    const installed_app = b.graph.path(.install_prefix, "skhd.app");
 
     // .app bundle step. Wraps the binary into skhd.app so macOS Tahoe's
     // Accessibility picker accepts it and TCC keys entries by bundle ID
@@ -288,8 +290,8 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/make-app.sh",
     });
-    app_cmd.addArg(installed_exe);
-    app_cmd.addArg(installed_app);
+    app_cmd.addFileArg(installed_exe);
+    app_cmd.addFileArg(installed_app);
     app_cmd.step.dependOn(b.getInstallStep());
 
     const app_step = b.step("app", "Build the skhd.app bundle wrapper");
@@ -304,7 +306,7 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/codesign.sh",
     });
-    sign_cmd.addArg(installed_exe);
+    sign_cmd.addFileArg(installed_exe);
     sign_cmd.step.dependOn(b.getInstallStep());
 
     const sign_step = b.step("sign", "Code sign the bare binary");
@@ -314,7 +316,7 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/codesign.sh",
     });
-    sign_app_cmd.addArg(installed_app);
+    sign_app_cmd.addFileArg(installed_app);
     sign_app_cmd.step.dependOn(&app_cmd.step);
 
     const sign_app_step = b.step("sign-app", "Build and code sign the skhd.app bundle (Tahoe-compatible)");
@@ -328,7 +330,7 @@ pub fn build(b: *std.Build) void {
     // bundle ID and a signature matching the granted entry — the bare binary
     // at zig-out/bin/skhd is adhoc-signed and unbundled, so it can't be
     // granted accessibility on Tahoe.
-    const installed_dev_app = b.getInstallPath(.prefix, "skhd-dev.app");
+    const installed_dev_app = b.graph.path(.install_prefix, "skhd-dev.app");
     const dev_bundle_id = "com.jackielii.skhd.dev";
     const dev_cert_name = "skhd-dev-cert";
 
@@ -336,8 +338,8 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/make-app.sh",
     });
-    dev_app_cmd.addArg(installed_exe);
-    dev_app_cmd.addArg(installed_dev_app);
+    dev_app_cmd.addFileArg(installed_exe);
+    dev_app_cmd.addFileArg(installed_dev_app);
     dev_app_cmd.addArg(dev_bundle_id);
     dev_app_cmd.step.dependOn(b.getInstallStep());
 
@@ -345,18 +347,17 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/codesign.sh",
     });
-    sign_dev_app_cmd.addArg(installed_dev_app);
+    sign_dev_app_cmd.addFileArg(installed_dev_app);
     sign_dev_app_cmd.setEnvironmentVariable("SKHD_CERT", dev_cert_name);
     sign_dev_app_cmd.setEnvironmentVariable("SKHD_BUNDLE_ID", dev_bundle_id);
     sign_dev_app_cmd.step.dependOn(&dev_app_cmd.step);
 
-    const inner_exe = b.pathJoin(&.{ installed_dev_app, "Contents", "MacOS", "skhd" });
-    const run_cmd = b.addSystemCommand(&[_][]const u8{inner_exe});
+    const inner_exe = installed_dev_app.path(b, "Contents/MacOS/skhd");
+    const run_cmd = std.Build.Step.Run.create(b, "run_cmd");
+    run_cmd.addFileArg(inner_exe);
     run_cmd.step.dependOn(&sign_dev_app_cmd.step);
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -373,7 +374,7 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/install-local.sh",
     });
-    install_local_cmd.addArg(installed_exe);
+    install_local_cmd.addFileArg(installed_exe);
     install_local_cmd.step.dependOn(b.getInstallStep());
 
     const install_local_step = b.step("install-local", "Install the local build into /Applications/skhd.app (test the packaged path without releasing; does not start the service)");
@@ -385,7 +386,8 @@ pub fn build(b: *std.Build) void {
     // and prod stay in lockstep. Cached under ~/.cache/skhd so re-runs
     // skip the download; pqrs's installer is a no-op when the same
     // version is already installed.
-    const install_dext_cmd = b.addSystemCommand(&[_][]const u8{installed_exe});
+    const install_dext_cmd = std.Build.Step.Run.create(b, "install_dext_cmd");
+    install_dext_cmd.addFileArg(installed_exe);
     install_dext_cmd.addArg("--install-dext");
     install_dext_cmd.has_side_effects = true;
     install_dext_cmd.step.dependOn(b.getInstallStep());
@@ -429,14 +431,17 @@ pub fn build(b: *std.Build) void {
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/benchmark.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
     linkAgentFrameworks(b, bench_mod);
     addVersionImport(b, bench_mod);
+    addGrabberPlistImports(b, bench_mod);
+    bench_mod.addOptions("build_options", exe_options);
+    bench_mod.addImport("grabber_protocol", grabber_protocol_mod);
 
     const zbench = b.dependency("zbench", .{
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
     bench_mod.addImport("zbench", zbench.module("zbench"));
 
@@ -444,6 +449,9 @@ pub fn build(b: *std.Build) void {
         .name = "benchmark",
         .root_module = bench_mod,
     });
+
+    const build_bench_step = b.step("build-bench", "Build benchmarks without running them");
+    build_bench_step.dependOn(&bench_exe.step);
 
     const bench_cmd = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run benchmarks");
@@ -472,14 +480,14 @@ pub fn build(b: *std.Build) void {
         .root_module = alloc_mod,
     });
     b.installArtifact(alloc_exe);
-    const installed_alloc_exe = b.getInstallPath(.bin, alloc_exe.name);
+    const installed_alloc_exe = b.graph.path(.install_bin, alloc_exe.name);
 
     const alloc_app_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
         "scripts/make-app.sh",
     });
-    alloc_app_cmd.addArg(installed_alloc_exe);
-    alloc_app_cmd.addArg(installed_dev_app);
+    alloc_app_cmd.addFileArg(installed_alloc_exe);
+    alloc_app_cmd.addFileArg(installed_dev_app);
     alloc_app_cmd.addArg(dev_bundle_id);
     alloc_app_cmd.step.dependOn(b.getInstallStep());
 
@@ -487,16 +495,15 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/codesign.sh",
     });
-    sign_alloc_app_cmd.addArg(installed_dev_app);
+    sign_alloc_app_cmd.addFileArg(installed_dev_app);
     sign_alloc_app_cmd.setEnvironmentVariable("SKHD_CERT", dev_cert_name);
     sign_alloc_app_cmd.setEnvironmentVariable("SKHD_BUNDLE_ID", dev_bundle_id);
     sign_alloc_app_cmd.step.dependOn(&alloc_app_cmd.step);
 
-    const alloc_cmd = b.addSystemCommand(&[_][]const u8{inner_exe});
+    const alloc_cmd = std.Build.Step.Run.create(b, "alloc_cmd");
+    alloc_cmd.addFileArg(inner_exe);
     alloc_cmd.step.dependOn(&sign_alloc_app_cmd.step);
-    if (b.args) |args| {
-        alloc_cmd.addArgs(args);
-    }
+    alloc_cmd.addPassthruArgs();
     const alloc_step = b.step("alloc", "Run skhd with allocation logging (signed dev .app)");
     alloc_step.dependOn(&alloc_cmd.step);
 

@@ -68,9 +68,8 @@ pub const ModifierFlag = packed struct(u32) {
     }
     pub fn format(self: ModifierFlag, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         var i: u32 = 0;
-        inline for (@typeInfo(@This()).@"struct".fields) |field| {
-            const name = field.name;
-            if (field.type != bool) continue;
+        inline for (@typeInfo(@This()).@"struct".field_names) |name| {
+            if (@FieldType(@This(), name) != bool) continue;
             const value = @field(self, name);
             if (value) {
                 if (i != 0) try writer.writeAll(", ");
@@ -114,8 +113,8 @@ test "is_modifier" {
 }
 
 pub const literal_keycode_str = [_][]const u8{
-    "return",          "tab",             "space",
-    "backspace",       "escape",          "backtick",
+    "return",    "tab",    "space",
+    "backspace", "escape", "backtick",
 
     // zig fmt: off
 
@@ -161,8 +160,8 @@ pub inline fn isMouseButton(keycode: u32) bool {
 }
 
 pub const literal_keycode_value = [_]u32{
-    c.kVK_Return,                 c.kVK_Tab,                  c.kVK_Space,
-    c.kVK_Delete,                 c.kVK_Escape,               c.kVK_ANSI_Grave,
+    c.kVK_Return, c.kVK_Tab,    c.kVK_Space,
+    c.kVK_Delete, c.kVK_Escape, c.kVK_ANSI_Grave,
 
     // zig fmt: off
 
@@ -196,19 +195,19 @@ keymap_table: std.StringArrayHashMapUnmanaged(u32) = .empty,
 const Keycodes = @This();
 
 pub fn init(alloc: std.mem.Allocator) !Keycodes {
-    var self =  Keycodes{ .alloc = alloc };
+    var self = Keycodes{ .alloc = alloc };
 
     const keyboard = c.TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
     const uchr: c.CFDataRef = @ptrCast(c.TISGetInputSourceProperty(keyboard, c.kTISPropertyUnicodeKeyLayoutData));
     defer c.CFRelease(keyboard);
 
-    const keyboard_layout: ?*c.UCKeyboardLayout = @constCast(@ptrCast(@alignCast(c.CFDataGetBytePtr(uchr))));
+    const keyboard_layout: ?*c.UCKeyboardLayout = @ptrCast(@alignCast(@constCast(c.CFDataGetBytePtr(uchr))));
     if (keyboard_layout == null) {
         return error.@"Failed to get keyboard layout";
     }
 
     var len: c.UniCharCount = 0;
-    var chars = [_]c.UniChar{0} ** 255;
+    var chars: [255]c.UniChar = @splat(0);
     var state: c.UInt32 = 0;
 
     for (layout_dependent_keycodes) |keycode| {
@@ -287,12 +286,12 @@ test "init_keycode_map" {
     const alloc = std.testing.allocator;
     var self = try init(alloc);
     defer self.deinit();
-    
+
     // Just verify the keymap was initialized with some expected values
     try std.testing.expect(self.keymap_table.contains("a"));
     try std.testing.expect(self.keymap_table.contains("1"));
     try std.testing.expect(self.keymap_table.count() > 20); // Should have many keys
-    
+
     // Verify literal keycodes exist in the arrays
     try std.testing.expect(literal_keycode_str.len > 0);
     try std.testing.expect(literal_keycode_value.len == literal_keycode_str.len);
@@ -383,7 +382,7 @@ pub fn formatKeyPressBuffer(buf: []u8, flags: ModifierFlag, keyCode: u32) ![]con
     const writer = &stream;
 
     var has_modifiers = false;
-    
+
     // Add modifiers in a consistent order
     if (flags.lcmd or flags.cmd) {
         try writer.print("lcmd", .{});
@@ -429,17 +428,17 @@ pub fn formatKeyPressBuffer(buf: []u8, flags: ModifierFlag, keyCode: u32) ![]con
         try writer.print("fn", .{});
         has_modifiers = true;
     }
-    
+
     // Get the key
     const key = getKeyString(keyCode);
-    
+
     // Add the key with proper separator
     if (has_modifiers) {
         try writer.print(" - {s}", .{key});
     } else {
         try writer.print("{s}", .{key});
     }
-    
+
     return stream.buffered();
 }
 

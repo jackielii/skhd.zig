@@ -15,13 +15,16 @@ jobs:
     - name: Setup Zig
       uses: jackielii/setup-zig@v2
       with:
-        version: 0.16.0
+        version: 0.17.0
 
     - name: Run tests
       run: zig build test
 
     - name: Build Debug
       run: zig build
+
+    - name: Build benchmarks
+      run: zig build build-bench
 
     - name: Lint shell scripts
       run: bash -n scripts/make-app.sh && bash -n scripts/codesign.sh && bash -n scripts/release.sh
@@ -38,7 +41,7 @@ jobs:
     - name: Setup Zig
       uses: jackielii/setup-zig@v2
       with:
-        version: 0.16.0
+        version: 0.17.0
 
     - name: Setup Code Signing Certificate
       # Mirrors release.yml: imports skhd-cert from MACOS_CERTIFICATE so the

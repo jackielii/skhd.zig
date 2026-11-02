@@ -6,8 +6,6 @@ const HotkeyOriginal = @import("Hotkey.zig");
 const c = @import("c.zig");
 const ModifierFlag = @import("Keycodes.zig").ModifierFlag;
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-
 // Global context for benchmarks
 var g_skhd: ?*Skhd = null;
 var g_esc_key: Hotkey.KeyPress = undefined;
@@ -113,17 +111,17 @@ fn benchProcessMappingOriginal(allocator: std.mem.Allocator) void {
     }
 }
 
-pub fn main() !void {
-    const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     std.debug.print("\n=== Benchmarking skhd hot path ===\n\n", .{});
 
-    // Load the actual user config
-    const config_path = "/Users/jackieli/.config/skhd/skhdrc";
+    // Use a checked-in fixture so benchmarks work on development and CI machines.
+    const config_path = "testdata/test-process.skhdrc";
 
     // Initialize skhd with profiling disabled
-    var skhd = try Skhd.init(allocator, config_path, false, false);
+    var skhd = try Skhd.init(allocator, io, config_path, false, false);
     defer skhd.deinit();
 
     // Set global context
@@ -179,5 +177,5 @@ pub fn main() !void {
     try bench.add("Process Mapping (Original)", benchProcessMappingOriginal, .{});
 
     // Run benchmarks
-    try bench.run(std.io.getStdOut().writer());
+    try bench.run(io, .stdout());
 }

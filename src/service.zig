@@ -318,7 +318,6 @@ pub fn getServicePath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents/com.jackielii.skhd.plist", .{home});
 }
 
-
 /// Register the bundled LaunchAgent with macOS Background Tasks Manager via
 /// SMAppService and clean up any pre-0.0.21 plist installed at
 /// ~/Library/LaunchAgents/. With the SMAppService flow, BTM auto-tracks the
@@ -488,7 +487,9 @@ pub fn restartService(allocator: std.mem.Allocator, io: std.Io) !void {
             std.debug.print("Service restarted (registration preserved).\n", .{});
             return;
         }
-        log.warn("kickstart failed; falling back to bootout + re-register", .{});
+        std.debug.print("Failed to restart service; existing registration preserved.\n", .{});
+        std.debug.print("Check --status and ~/Library/Logs/skhd.log. If the job is not loaded, try --start-service.\n", .{});
+        return error.RestartFailed;
     }
 
     try stopService(allocator, io);
@@ -503,8 +504,8 @@ pub fn restartService(allocator: std.mem.Allocator, io: std.Io) !void {
 /// touched, so this path cannot hit SMAppService's codesign trust
 /// validation and cannot leave the user without a registered service
 /// (#53). Returns false when launchd doesn't know the job — e.g.
-/// registration reported enabled but the job isn't loaded — in which
-/// case the caller falls back to the bootout + register path.
+/// registration reported enabled but the job isn't loaded. The caller
+/// reports failure without booting out or re-registering the service.
 fn kickstartService(allocator: std.mem.Allocator, io: std.Io) bool {
     const uid = getuid();
     const target = std.fmt.allocPrint(allocator, "gui/{d}/" ++ BUNDLE_ID, .{uid}) catch return false;
@@ -815,4 +816,3 @@ fn runQuiet(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) 
         else => -1,
     };
 }
-

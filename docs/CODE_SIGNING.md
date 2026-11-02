@@ -115,10 +115,46 @@ Code signing is **optional** for CI environments:
 
 ## Homebrew Installation
 
-For users installing via Homebrew:
-1. The formula will attempt to create a certificate and sign the binary automatically
-2. Users will be prompted to grant accessibility permissions once
-3. Permissions will persist across Homebrew updates
+Homebrew installs a prebuilt, self-signed app bundle. It does not create a
+local certificate during installation. A self-signed certificate is not a
+Developer ID signature or notarization, and macOS may reject service
+registration even if the bundle's signature is intact.
+
+### macOS 27 signing transition (issue #53)
+
+On the macOS 27 beta, a reporter recovered from a service-registration signing
+failure by building and signing locally with Zig 0.16:
+
+```bash
+zig build install-local -Doptimize=ReleaseFast
+skhd --start-service
+```
+
+Run this from the source checkout after installing the Homebrew app.
+`install-local` replaces the installed binaries and signs the bundle with
+`skhd-cert`, creating that local identity automatically if needed. This
+workaround did not require a paid Developer ID in the reported case; it is
+not a guarantee that every macOS version will accept self-signed services.
+A later Homebrew upgrade replaces the locally signed bundle.
+
+Changing from the release certificate to a local certificate can require
+fresh Accessibility and Input Monitoring approval for `/Applications/skhd.app`.
+The reporter also needed logout/login after launchd reported `78: EX_CONFIG`
+and `needs LWCR update`. If physical hotkeys still fail, reset Input Monitoring,
+re-add the app in System Settings → Privacy & Security → Input Monitoring,
+and restart the service:
+
+```bash
+tccutil reset ListenEvent com.jackielii.skhd
+skhd --restart-service
+```
+
+Confirm with a physical hotkey. An active event tap and a granted permission
+in `--status`, or a successful synthetic keypress, do not prove physical-event
+delivery after a signing transition.
+
+`--restart-service` uses an in-place restart for enabled registrations. If
+that fails, it reports an error without booting out or re-registering the job.
 
 ## Troubleshooting
 

@@ -340,6 +340,14 @@ const Daemon = struct {
     /// capped at vhidd_recovery_backoff_max_ms.
     vhidd_recovery_backoff_ms: u32 = 0,
 
+    /// Pending seize-rebuild retry, non-null while the last rebuild failed
+    /// on a transient seize-open error (e.g. kIOReturnNotReady from a
+    /// device still re-enumerating). Without it nothing re-seizes until the
+    /// next agent reload. One-shot; any successful rebuild cancels it.
+    seize_retry_timer: c.CFRunLoopTimerRef = null,
+    /// Backoff and attempt budget since the last successful rebuild.
+    seize_retry: HidSeize.StartRetry = .{},
+
     /// vhidd heartbeat watchdog. The server heartbeats every connected
     /// client (frame type=0 carrying the next-heartbeat deadline). A
     /// wedged server session — the confirmed mid-session dead-keyboard
@@ -430,6 +438,7 @@ const Daemon = struct {
         self.stopConsoleUserTimer();
         self.stopPostWakeVerify();
         self.cancelVhiddRecoveryTimer();
+        self.cancelSeizeRetry();
         self.stopVhiddWatch();
         self.teardownSeize();
         if (self.vhidd) |v| {
@@ -674,8 +683,23 @@ const Daemon = struct {
     /// subscription's rules. Called whenever the active state
     /// changes: a new agent connected, an existing one disconnected,
     /// or the console user switched. The active subscription's
-    /// stream becomes the layer-push target.
+    /// stream becomes the layer-push target. A transient seize failure
+    /// arms a backoff retry; any success cancels it.
     fn applyLatestRules(self: *Daemon) !void {
+        self.rebuildFromActiveSubscription() catch |err| {
+            // Only seize-open failures retry here: a vhidd connect or
+            // handshake failure waits for the next device change or agent
+            // reload, as before. And while a vhidd recovery is in flight it
+            // reschedules itself on any failure, so a second timer would
+            // only race it.
+            if (HidSeize.isTransientStartError(err) and !self.seize_ctx.vhidd_broken) self.scheduleSeizeRetry();
+            return err;
+        };
+        self.cancelSeizeRetry();
+        self.seize_retry = .{};
+    }
+
+    fn rebuildFromActiveSubscription(self: *Daemon) !void {
         // While the system is asleep the seize must stay torn down: the
         // device is powering down/up and a seize taken across that
         // transition goes stale. onSystemWake re-runs this after clearing
@@ -919,37 +943,13 @@ const Daemon = struct {
     fn schedulePostWakeVerify(self: *Daemon) void {
         self.stopPostWakeVerify();
         if (self.post_wake_attempt >= post_wake_verify_gaps_s.len) return;
-        var ctx: c.CFRunLoopTimerContext = .{
-            .version = 0,
-            .info = self,
-            .retain = null,
-            .release = null,
-            .copyDescription = null,
-        };
-        const fire_at = c.CFAbsoluteTimeGetCurrent() + post_wake_verify_gaps_s[self.post_wake_attempt];
-        const timer = c.CFRunLoopTimerCreate(
-            c.kCFAllocatorDefault,
-            fire_at,
-            0, // one-shot
-            0,
-            0,
-            postWakeVerifyCallback,
-            &ctx,
-        );
-        if (timer == null) {
+        if (!armOneShot(&self.post_wake_timer, post_wake_verify_gaps_s[self.post_wake_attempt], postWakeVerifyCallback, self)) {
             log.warn("post-wake verify timer create failed; a dead wake seize won't self-heal", .{});
-            return;
         }
-        self.post_wake_timer = timer;
-        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopDefaultMode);
     }
 
     fn stopPostWakeVerify(self: *Daemon) void {
-        if (self.post_wake_timer) |t| {
-            c.CFRunLoopTimerInvalidate(t);
-            c.CFRelease(t);
-            self.post_wake_timer = null;
-        }
+        disarm(&self.post_wake_timer);
     }
 
     /// Entry point from the seize callback when a vhidd send fails.
@@ -1109,38 +1109,29 @@ const Daemon = struct {
     }
 
     fn scheduleVhiddRecovery(self: *Daemon, delay_ms: u32) void {
-        self.cancelVhiddRecoveryTimer();
-        var ctx: c.CFRunLoopTimerContext = .{
-            .version = 0,
-            .info = self,
-            .retain = null,
-            .release = null,
-            .copyDescription = null,
-        };
-        const fire_at = c.CFAbsoluteTimeGetCurrent() + @as(f64, @floatFromInt(delay_ms)) / 1000.0;
-        const timer = c.CFRunLoopTimerCreate(
-            c.kCFAllocatorDefault,
-            fire_at,
-            0, // one-shot
-            0,
-            0,
-            vhiddRecoveryTimerCallback,
-            &ctx,
-        );
-        if (timer == null) {
+        if (!armOneShot(&self.vhidd_recovery_timer, msToSeconds(delay_ms), vhiddRecoveryTimerCallback, self)) {
             log.err("vhidd recovery timer create failed — manual restart required", .{});
-            return;
         }
-        self.vhidd_recovery_timer = timer;
-        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopDefaultMode);
     }
 
     fn cancelVhiddRecoveryTimer(self: *Daemon) void {
-        if (self.vhidd_recovery_timer) |t| {
-            c.CFRunLoopTimerInvalidate(t);
-            c.CFRelease(t);
-            self.vhidd_recovery_timer = null;
+        disarm(&self.vhidd_recovery_timer);
+    }
+
+    fn scheduleSeizeRetry(self: *Daemon) void {
+        const delay_ms = self.seize_retry.next() orelse {
+            log.err("seize rebuild still failing after {d} retries — giving up until the next device change or reload", .{self.seize_retry.attempts});
+            return;
+        };
+        if (!armOneShot(&self.seize_retry_timer, msToSeconds(delay_ms), seizeRetryTimerCallback, self)) {
+            log.err("seize retry timer create failed — re-seize waits for the next reload or device change", .{});
+            return;
         }
+        log.warn("seize rebuild failed — retrying in {d}ms", .{delay_ms});
+    }
+
+    fn cancelSeizeRetry(self: *Daemon) void {
+        disarm(&self.seize_retry_timer);
     }
 
     /// Body of the recovery timer callback. Release seize (so real
@@ -1163,7 +1154,7 @@ const Daemon = struct {
         }
         self.applyLatestRules() catch |err| {
             const next = Vhidd.nextBackoffMs(self.vhidd_recovery_backoff_ms);
-            log.warn("vhidd reconnect failed: {s} — retrying in {d}ms", .{ @errorName(err), next });
+            log.warn("rebuild after vhidd recovery failed: {s} — retrying in {d}ms", .{ @errorName(err), next });
             self.vhidd_recovery_backoff_ms = next;
             self.scheduleVhiddRecovery(next);
             return;
@@ -1174,6 +1165,31 @@ const Daemon = struct {
     }
 };
 
+
+/// Arm a one-shot timer on the current run loop into `slot`, replacing any
+/// timer already there. False when CF can't create it.
+fn armOneShot(slot: *c.CFRunLoopTimerRef, delay_s: f64, callback: c.CFRunLoopTimerCallBack, info: *anyopaque) bool {
+    disarm(slot);
+    var ctx: c.CFRunLoopTimerContext = .{ .info = info };
+    const timer = c.CFRunLoopTimerCreate(c.kCFAllocatorDefault, c.CFAbsoluteTimeGetCurrent() + delay_s, 0, 0, 0, callback, &ctx);
+    if (timer == null) return false;
+    slot.* = timer;
+    c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, c.kCFRunLoopDefaultMode);
+    return true;
+}
+
+/// Invalidate and release the timer in `slot`, if any. Also what a one-shot
+/// callback calls first, so a re-arm from inside it starts clean.
+fn disarm(slot: *c.CFRunLoopTimerRef) void {
+    const t = slot.* orelse return;
+    c.CFRunLoopTimerInvalidate(t);
+    c.CFRelease(t);
+    slot.* = null;
+}
+
+fn msToSeconds(ms: u32) f64 {
+    return @as(f64, @floatFromInt(ms)) / 1000.0;
+}
 
 fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const d: *Daemon = @ptrCast(@alignCast(info orelse return));
@@ -1202,7 +1218,9 @@ fn consoleUserTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(
 fn onDeviceChange(ctx: ?*anyopaque) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
     if (d.sleeping) return; // seize stays released until wake
-    if (d.seize == null) return; // nothing seized yet → first apply_rules will
+    // Gate on wanting a seize, not on having one: a failed rebuild leaves
+    // `seize` null, and a device change is the best moment to retry it.
+    if (d.activeSubscription() == null) return; // no rules yet → first apply_rules will
     // info: routine recovery, fires on every wake/plug — compiled out of
     // ReleaseFast. The FAILURE below stays warn (a real anomaly).
     log.info("keyboard enumeration changed — re-seizing", .{});
@@ -1221,7 +1239,7 @@ fn onDeviceChange(ctx: ?*anyopaque) void {
 fn onRestoreKeyTrigger(ctx: ?*anyopaque) void {
     const d: *Daemon = @ptrCast(@alignCast(ctx orelse return));
     if (d.sleeping) return; // wake path re-seizes anyway
-    if (d.seize == null) return; // nothing seized → nothing to restore
+    if (d.activeSubscription() == null) return; // no rules → nothing to restore
     log.warn("master restore triggered — rebuilding vhidd connection and seize", .{});
     d.markVhiddBroken();
 }
@@ -1289,11 +1307,7 @@ fn onSystemWake(ctx: ?*anyopaque) void {
 fn postWakeVerifyCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
     const d: *Daemon = @ptrCast(@alignCast(info orelse return));
     // One-shot: release this timer before doing work.
-    if (d.post_wake_timer) |t| {
-        c.CFRunLoopTimerInvalidate(t);
-        c.CFRelease(t);
-        d.post_wake_timer = null;
-    }
+    disarm(&d.post_wake_timer);
     if (d.sleeping or d.seize == null) return; // slept again / nothing seized
 
     if (d.seize_ctx.input_seen) {
@@ -1320,12 +1334,20 @@ fn vhiddRecoveryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callcon
     const d: *Daemon = @ptrCast(@alignCast(info orelse return));
     // The timer is one-shot — release its ref before doing work so a
     // re-schedule from attemptVhiddRecovery doesn't fight with it.
-    if (d.vhidd_recovery_timer) |t| {
-        c.CFRunLoopTimerInvalidate(t);
-        c.CFRelease(t);
-        d.vhidd_recovery_timer = null;
-    }
+    disarm(&d.vhidd_recovery_timer);
     d.attemptVhiddRecovery();
+}
+
+fn seizeRetryTimerCallback(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const d: *Daemon = @ptrCast(@alignCast(info orelse return));
+    // One-shot: release before the rebuild, which may re-arm it.
+    disarm(&d.seize_retry_timer);
+    if (d.sleeping) return; // onSystemWake rebuilds
+    if (d.seize_ctx.vhidd_broken) return; // vhidd broke since arming; attemptVhiddRecovery owns the rebuild
+    log.info("retrying seize rebuild", .{});
+    d.applyLatestRules() catch |err| {
+        log.warn("seize retry failed: {s}", .{@errorName(err)});
+    };
 }
 
 /// vhidd watchdog read source: frames arrived on the client socket.

@@ -18,6 +18,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c.zig");
+const Vhidd = @import("Vhidd.zig");
 
 const log = std.log.scoped(.hid_seize);
 
@@ -272,8 +273,13 @@ pub fn start(self: *Self, mode: Mode) !void {
     };
     const r = c.IOHIDManagerOpen(self.manager, self.open_options);
     if (r != c.kIOReturnSuccess) {
-        c.IOHIDManagerUnscheduleFromRunLoop(self.manager, c.CFRunLoopGetCurrent(), c.kCFRunLoopDefaultMode);
-        log.err("IOHIDManagerOpen seize failed: 0x{X:0>8}", .{@as(u32, @bitCast(r))});
+        // A failed open still marks the manager open and keeps every device
+        // that did open seized. Close explicitly: CFRelease won't, because
+        // scheduling took a retain that only the (now never-firing) initial
+        // enumeration callback gives back, so the finalizer never runs.
+        // Close also unschedules from the run loop.
+        _ = c.IOHIDManagerClose(self.manager, self.open_options);
+        log.warn("IOHIDManagerOpen seize failed: 0x{X:0>8}", .{@as(u32, @bitCast(r))});
         return switch (r) {
             c.kIOReturnNotPrivileged => error.NotPrivileged,
             // kIOReturnNotPermitted: macOS TCC layer denied the
@@ -313,6 +319,37 @@ pub fn start(self: *Self, mode: Mode) !void {
         self.disableCapsLockDelayOnMatches(self.owned_matches);
     }
 }
+
+/// Whether a `start` failure can clear without user action and so is
+/// worth retrying. Device-state failures (not ready mid-re-enumeration,
+/// briefly held elsewhere) clear on their own; root/TCC denials don't.
+pub fn isTransientStartError(err: anyerror) bool {
+    return switch (err) {
+        error.IOHIDManagerOpenFailed, error.DeviceAlreadySeized => true,
+        else => false,
+    };
+}
+
+/// Backoff for re-running a failed `start`. Bounded, because
+/// IOHIDManagerOpenFailed is a catch-all and not every failure it covers
+/// clears; the caller gives up loudly when `next` returns null.
+pub const StartRetry = struct {
+    backoff_ms: u32 = 0,
+    attempts: u32 = 0,
+
+    /// 1+2+4+8s then 10s each: about 1.5 minutes, long enough for a device
+    /// that is re-enumerating (replugged, or switched by a KVM or dock) to
+    /// settle.
+    pub const max_attempts: u32 = 12;
+
+    /// Delay before the next retry, or null once the budget is spent.
+    pub fn next(self: *StartRetry) ?u32 {
+        if (self.attempts >= max_attempts) return null;
+        self.attempts += 1;
+        self.backoff_ms = Vhidd.nextBackoffMs(self.backoff_ms);
+        return self.backoff_ms;
+    }
+};
 
 /// Log the IORegistry entry id of each device in the seized set.
 /// Best-effort — bails on any allocation/IOKit hiccup.
@@ -473,6 +510,35 @@ test "matchPredicate: FIFO built-in (0,0) scopes to internal transports, omits V
     try testing.expectEqualSlices([:0]const u8, &builtin_transports, p.transports);
 }
 
+test "isTransientStartError: device-state failures retry, permission failures don't" {
+    // A device still re-enumerating fails the open with e.g. kIOReturnNotReady
+    // (→ IOHIDManagerOpenFailed) and is usable a moment later.
+    try testing.expect(isTransientStartError(error.IOHIDManagerOpenFailed));
+    try testing.expect(isTransientStartError(error.DeviceAlreadySeized));
+    // Root/TCC denials persist until the user acts; retrying only spams the log.
+    try testing.expect(!isTransientStartError(error.NotPrivileged));
+    try testing.expect(!isTransientStartError(error.NotPermitted));
+    try testing.expect(!isTransientStartError(error.MissingDevice));
+}
+
+test "StartRetry: backs off 1s, 2s, 4s, 8s, then 10s, and gives up after max_attempts" {
+    var r: StartRetry = .{};
+    const expected = [_]u32{ 1000, 2000, 4000, 8000, 10_000, 10_000 };
+    for (expected) |ms| try testing.expectEqual(@as(?u32, ms), r.next());
+    var n: u32 = expected.len;
+    while (n < StartRetry.max_attempts) : (n += 1) try testing.expectEqual(@as(?u32, 10_000), r.next());
+    try testing.expectEqual(@as(?u32, null), r.next());
+    try testing.expectEqual(@as(?u32, null), r.next());
+}
+
+test "StartRetry: a fresh value after success starts the backoff over" {
+    var r: StartRetry = .{};
+    _ = r.next();
+    _ = r.next();
+    r = .{};
+    try testing.expectEqual(@as(?u32, 1000), r.next());
+}
+
 test "matchPredicate: external device matches VID/PID, no transport constraint" {
     // NEO ERGO WIRED — the keyboard that was wrongly seized. An explicit
     // (vendor,product) alias targets that exact device and sets no
@@ -481,6 +547,36 @@ test "matchPredicate: external device matches VID/PID, no transport constraint" 
     try testing.expectEqual(@as(?u32, 0x4e45), p.vendor);
     try testing.expectEqual(@as(?u32, 0x4552), p.product);
     try testing.expectEqual(@as(usize, 0), p.transports.len);
+}
+
+// Live check that a failed seize start leaves the manager closed. When one
+// device refuses the open, IOHIDManagerOpen keeps the others seized, so a
+// manager left open would hold keyboards nobody reads. Run unprivileged so
+// the seize open fails (NotPrivileged/NotPermitted) without a real grab:
+//
+//     SKHD_HID_LIVE=1 zig build test
+test "live: failed seize start closes the manager" {
+    if (std.c.getenv("SKHD_HID_LIVE") == null) return error.SkipZigTest;
+    if (std.c.geteuid() == 0) return error.SkipZigTest; // root would really seize
+
+    const noop = struct {
+        fn cb(_: ?*anyopaque, _: Event) void {}
+    };
+    const self = try init(testing.allocator, noop.cb, null);
+    defer self.deinit();
+
+    try self.setMatches(&.{.{ .vendor = 0, .product = 0 }});
+    if (self.start(.seize)) |_| {
+        std.debug.print("seize open succeeded unprivileged — cannot exercise the failure path\n", .{});
+        return error.CannotVerify;
+    } else |_| {}
+
+    try testing.expect(!self.running);
+    // IOHIDManagerOpen on a manager still marked open is a no-op that
+    // returns success. A closed one retries its devices and fails again.
+    const reopen = c.IOHIDManagerOpen(self.manager, c.kIOHIDOptionsTypeSeizeDevice);
+    defer _ = c.IOHIDManagerClose(self.manager, c.kIOHIDOptionsTypeSeizeDevice);
+    try testing.expect(reopen != c.kIOReturnSuccess);
 }
 
 // Live check that the production (0,0) match excludes externals on real

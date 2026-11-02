@@ -80,7 +80,7 @@ jobs:
 
     - name: Code sign skhd.app
       env:
-        SKHD_CERT: skhd-cert
+        SKHD_CERT: ${{ vars.MACOS_CERTIFICATE_NAME || 'skhd-cert' }}
         SKHD_BUNDLE_ID: com.jackielii.skhd
         SKHD_NO_AUTO_GENERATE_CERT: "1"
       run: |

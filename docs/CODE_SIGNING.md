@@ -113,6 +113,18 @@ Code signing is **optional** for CI environments:
 - GitHub Actions and other CI systems don't need certificates
 - Local development requires signing for accessibility permissions to persist
 
+### GitHub Actions signing identity
+
+CI and release builds import the encrypted PKCS12 identity from
+`MACOS_CERTIFICATE` (base64) using `MACOS_CERTIFICATE_PASSWORD`.
+Set the repository Actions variable `MACOS_CERTIFICATE_NAME` to the certificate's
+Common Name; it defaults to `skhd-cert` when unset. Update both secrets and
+this variable when rotating the signing certificate. `KEYCHAIN_PASSWORD` is
+separate and does not need to change when the certificate changes.
+
+A certificate rotation can require users to re-grant Accessibility and Input
+Monitoring permissions because the signing identity changes.
+
 ## Homebrew Installation
 
 Homebrew installs a prebuilt, self-signed app bundle. It does not create a

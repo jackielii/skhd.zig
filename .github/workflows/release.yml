@@ -169,7 +169,7 @@ jobs:
         # uses locally — keeps the inner-Mach-O signing order (helpers
         # first, principal last) and the bundle ID identifier consistent
         # between dev iteration and release builds.
-        SKHD_CERT: skhd-cert
+        SKHD_CERT: ${{ vars.MACOS_CERTIFICATE_NAME || 'skhd-cert' }}
         SKHD_BUNDLE_ID: com.jackielii.skhd
         # CI imports the cert from the MACOS_CERTIFICATE secret; if it's
         # not in the keychain, that's a deployment misconfiguration —

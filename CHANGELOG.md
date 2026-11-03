@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.0...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.1...HEAD)
+
+## [0.2.1](https://github.com/jackielii/skhd.zig/compare/v0.2.0...v0.2.1) - 2026-11-03
+
+### Fixed
+- **Keyboard recovery after KVM switches and reconnects.** The grabber releases partially seized devices and retries failed rebuilds instead of leaving the keyboard unresponsive (#57). The agent now reapplies remaps and forwards grabber rules when a keyboard re-enumerates, including keyboards already present when its device watch starts (#58).
+- **Device-specific tap-hold rules.** Events are matched only against the sending keyboard's rules, preventing one device's remaps from affecting another (#59). Cross-device tap-hold decisions are preserved, and buffered events are replayed once by a single owner (#62).
+- **Service startup with a missing user environment.** SMAppService launches now restore missing `HOME` and `USER` values from the current user's account, so configuration discovery, logging, and PID-file naming work correctly (#56).
+- **Service restart preserves registration.** `--restart-service` uses `launchctl kickstart` for an enabled service. If that fails, it reports the failure and keeps the existing registration instead of removing it and attempting to register again (#53, #64).
+- **Signing compatibility and identity selection.** Local certificate generation works with both macOS LibreSSL and OpenSSL 3. Local installation honors the signing identity override, and CI and release builds select their signing identity through the `MACOS_CERTIFICATE_NAME` repository variable (#64–#66).
+
+### Changed
+- **Upgrade the build toolchain to Zig 0.17.0.** Source, tests, benchmarks, and CI/release workflows have been updated for the new compiler. Building from source now requires Zig 0.17.0 (#65).
 
 ## [0.2.0](https://github.com/jackielii/skhd.zig/compare/v0.1.11...v0.2.0) - 2026-07-20
 

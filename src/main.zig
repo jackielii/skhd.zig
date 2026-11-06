@@ -140,6 +140,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[i], "--restart-service")) {
             try service.restartService(gpa, io);
             return;
+        } else if (std.mem.eql(u8, args[i], service.check_im_flag)) {
+            // Internal: spawned by --status with TCC responsibility
+            // disclaimed, so this checks skhd's own grant.
+            std.process.exit(service.exitCodeForInputMonitoring(service.checkInputMonitoringAccess()));
         } else if (std.mem.eql(u8, args[i], "--status")) {
             try service.checkServiceStatus(gpa, io);
             return;

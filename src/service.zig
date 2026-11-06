@@ -544,6 +544,19 @@ pub fn restartService(allocator: std.mem.Allocator, io: std.Io) !void {
             std.debug.print("Service restarted (registration preserved).\n", .{});
             return;
         }
+        // Registered and enabled, but launchd doesn't have the job loaded —
+        // e.g. the Homebrew cask's `uninstall launchctl:` booted it out
+        // during `brew upgrade`. Re-load it via the same register call
+        // --start-service uses. Nothing was booted out or unregistered
+        // here, so a failing register still leaves the registration intact.
+        if (chooseKickstartFallback(getDaemonState(allocator, io)) == .register) {
+            std.debug.print("Service registered but not loaded; loading it.\n", .{});
+            registerWithBTM() catch |err| {
+                std.debug.print("Failed to load service; existing registration preserved.\n", .{});
+                return err;
+            };
+            return;
+        }
         std.debug.print("Failed to restart service; existing registration preserved.\n", .{});
         std.debug.print("Check --status and ~/Library/Logs/skhd.log. If the job is not loaded, try --start-service.\n", .{});
         return error.RestartFailed;
@@ -562,7 +575,8 @@ pub fn restartService(allocator: std.mem.Allocator, io: std.Io) !void {
 /// validation and cannot leave the user without a registered service
 /// (#53). Returns false when launchd doesn't know the job — e.g.
 /// registration reported enabled but the job isn't loaded. The caller
-/// reports failure without booting out or re-registering the service.
+/// then re-loads an unloaded job via register (no bootout first) and
+/// otherwise just reports the failure.
 fn kickstartService(allocator: std.mem.Allocator, io: std.Io) bool {
     const uid = getuid();
     const target = std.fmt.allocPrint(allocator, "gui/{d}/" ++ BUNDLE_ID, .{uid}) catch return false;
@@ -858,6 +872,30 @@ test "chooseRestartStrategy: unregistered or broken states take the register pat
     try std.testing.expectEqual(RestartStrategy.reregister, chooseRestartStrategy(.not_found));
     // Unknown future status values must not be treated as "safe to kickstart".
     try std.testing.expectEqual(RestartStrategy.reregister, chooseRestartStrategy(@enumFromInt(99)));
+}
+
+/// What to do when `launchctl kickstart` fails for an enabled agent.
+/// `.register` only when launchd has no job loaded: registering is the
+/// only way to get an SMAppService-managed job back into launchd, and it
+/// doesn't tear anything down first. If the job *is* loaded, kickstart
+/// failed for some other reason and we report it rather than poke the
+/// registration (#53).
+const KickstartFallback = enum { register, report };
+
+fn chooseKickstartFallback(state: DaemonState) KickstartFallback {
+    return switch (state) {
+        .not_loaded => .register,
+        .loaded_idle, .running => .report,
+    };
+}
+
+test "chooseKickstartFallback: unloaded job is re-loaded via register" {
+    try std.testing.expectEqual(KickstartFallback.register, chooseKickstartFallback(.not_loaded));
+}
+
+test "chooseKickstartFallback: loaded job only reports the failure" {
+    try std.testing.expectEqual(KickstartFallback.report, chooseKickstartFallback(.loaded_idle));
+    try std.testing.expectEqual(KickstartFallback.report, chooseKickstartFallback(.{ .running = 123 }));
 }
 
 /// Run `argv` with stdio captured (to avoid noise in the terminal) and

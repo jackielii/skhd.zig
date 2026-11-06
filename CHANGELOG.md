@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.2...HEAD)
 
+### Fixed
+- **Agent left stopped after `brew upgrade`.** The cask unloads the LaunchAgent during upgrade, and the post-install `--restart-service` then failed because `launchctl kickstart` cannot start a job launchd no longer has loaded. `--restart-service` now loads a registered-but-unloaded agent again the same way `--start-service` does. It never boots out or unregisters first, so the registration is still kept if that fails (#53).
+
 ## [0.2.2](https://github.com/jackielii/skhd.zig/compare/v0.2.1...v0.2.2) - 2026-11-06
 
 ### Fixed

@@ -66,6 +66,27 @@ pub extern fn chmod(path: [*:0]const u8, mode: mode_t) c_int;
 // sys/wait.h
 pub extern fn waitpid(pid: pid_t, status: ?*c_int, options: c_int) pid_t;
 
+// spawn.h. On Darwin `posix_spawnattr_t` is an opaque pointer.
+pub const posix_spawnattr_t = ?*anyopaque;
+pub extern fn posix_spawnattr_init(attr: *posix_spawnattr_t) c_int;
+pub extern fn posix_spawnattr_destroy(attr: *posix_spawnattr_t) c_int;
+pub extern fn posix_spawn(
+    pid: *pid_t,
+    path: [*:0]const u8,
+    file_actions: ?*const anyopaque,
+    attrp: ?*const posix_spawnattr_t,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+) c_int;
+/// Private libSystem SPI (macOS 10.14+, used by Chromium / LLDB): make the
+/// spawned child its own "responsible process" for TCC instead of
+/// inheriting the caller's (typically the terminal app).
+pub extern fn responsibility_spawnattrs_setdisclaim(attr: *posix_spawnattr_t, disclaim: c_int) c_int;
+pub extern var environ: [*:null]?[*:0]u8;
+
+// mach-o/dyld.h
+pub extern fn _NSGetExecutablePath(buf: [*]u8, bufsize: *u32) c_int;
+
 // sys/sysctl.h. (We only call this via `std.c.sysctl` in service.zig,
 // so we don't actually need our own decl, but listed in inventory.)
 

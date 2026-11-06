@@ -47,6 +47,53 @@ pub fn checkInputMonitoringAccess() InputMonitoringAccess {
     };
 }
 
+/// Hidden CLI flag: run `checkInputMonitoringAccess` and report the result
+/// as the exit code. Only meant to be spawned by
+/// `checkInputMonitoringForBundle`.
+pub const check_im_flag = "--check-input-monitoring";
+
+pub fn exitCodeForInputMonitoring(access: InputMonitoringAccess) u8 {
+    return switch (access) {
+        .granted => 0,
+        .denied => 1,
+        .unknown => 2,
+    };
+}
+
+/// Input Monitoring state for com.jackielii.skhd itself, as opposed to
+/// `checkInputMonitoringAccess`, which reports the *responsible process*.
+/// Run from a terminal, TCC charges the check to the terminal app, so
+/// `skhd --status` used to print the terminal's grant ("Denied" in one
+/// terminal, "Unknown" in another, for the same daemon). Re-exec ourselves
+/// with responsibility disclaimed so the child is checked as skhd.
+pub fn checkInputMonitoringForBundle() InputMonitoringAccess {
+    var path_buf: [4096]u8 = undefined;
+    var path_len: u32 = path_buf.len - 1;
+    if (c._NSGetExecutablePath(&path_buf, &path_len) != 0) return .unknown;
+    const path: [*:0]const u8 = @ptrCast(&path_buf);
+
+    var attr: c.posix_spawnattr_t = null;
+    if (c.posix_spawnattr_init(&attr) != 0) return .unknown;
+    defer _ = c.posix_spawnattr_destroy(&attr);
+    if (c.responsibility_spawnattrs_setdisclaim(&attr, 1) != 0) return .unknown;
+
+    const argv = [_:null]?[*:0]const u8{ path, check_im_flag };
+    var pid: c.pid_t = 0;
+    if (c.posix_spawn(&pid, path, null, &attr, &argv, @ptrCast(c.environ)) != 0) return .unknown;
+
+    var status: c_int = 0;
+    while (c.waitpid(pid, &status, 0) < 0) {
+        if (std.posix.errno(-1) != .INTR) return .unknown;
+    }
+    // WIFEXITED: low 7 bits are zero; WEXITSTATUS: next 8 bits.
+    if (status & 0x7f != 0) return .unknown;
+    return switch ((status >> 8) & 0xff) {
+        0 => .granted,
+        1 => .denied,
+        else => .unknown,
+    };
+}
+
 /// Trigger the Input Monitoring approval dialog for this bundle. Same
 /// auto-pop UX as `promptForAccessibility` — first call shows the system
 /// prompt; subsequent calls just return the current grant state. Used to
@@ -668,18 +715,23 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
     };
     std.debug.print("  Hotkeys functional:   {s}\n", .{tap_label});
 
-    // Input Monitoring is the smoking gun for the silent cdHash-mismatch
-    // case: tap_health says working, daemon log shows no errors, but no
-    // events flow because the kTCCServiceListenEvent grant's csreq is
-    // anchored on a stale cdHash. IOHIDCheckAccess returns Denied for that
-    // case. Surface it as a separate status line.
-    const im_access = checkInputMonitoringAccess();
-    const im_label = switch (im_access) {
-        .granted => "Granted",
-        .denied => "Denied (events suppressed — see remediation below)",
-        .unknown => "Unknown (will prompt on first key event)",
-    };
-    std.debug.print("  Input Monitoring:     {s}\n", .{im_label});
+    // Input Monitoring: the agent doesn't need it — its event tap is an
+    // active (kCGEventTapOptionDefault) tap, which macOS gates on
+    // Accessibility only. skhd-grabber does need it (it opens/seizes HID
+    // devices), and inherits skhd.app's bundle grant. So only report it
+    // when the grabber is installed, and check it as skhd itself rather
+    // than as the terminal running `--status`.
+    const grabber_installed = grabber_cli.isGrabberInstalled(io);
+    const im_access: ?InputMonitoringAccess =
+        if (grabber_installed) checkInputMonitoringForBundle() else null;
+    if (im_access) |im| {
+        const im_label = switch (im) {
+            .granted => "Granted",
+            .denied => "Denied (skhd-grabber can't read keyboards — see remediation below)",
+            .unknown => "Not yet granted (run skhd --install-grabber to prompt)",
+        };
+        std.debug.print("  Input Monitoring:     {s}\n", .{im_label});
+    }
 
     // Grabber: only surfaced when the user's config actually needs it
     // (block-form `.remap` / tap-hold rules targeting a connected device).
@@ -737,25 +789,19 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
             \\
         , .{});
     } else if (im_access == .denied) {
-        // Reached when Accessibility is fine and the daemon looks healthy
-        // — but the IM grant's csreq is still stale (the most common
-        // post-`brew upgrade` failure mode, and the one tap_health can't
-        // see because the tap creates successfully).
+        // Only reachable with the grabber installed. A grant anchored on a
+        // stale cdHash (after brew upgrade / rebuild) still shows as on in
+        // System Settings but reads as denied here.
         std.debug.print(
             \\
-            \\Input Monitoring is denied for com.jackielii.skhd, so key-down
-            \\events are silently dropped before reaching skhd's event tap.
-            \\This usually means TCC's stored grant is anchored on a stale
-            \\cdHash from a previous build (every brew upgrade / rebuild
-            \\changes the cdHash). System Settings still shows it granted.
+            \\Input Monitoring is denied for com.jackielii.skhd, which
+            \\skhd-grabber needs for .remap / .taphold rules. (Plain
+            \\hotkeys only need Accessibility.) If System Settings still
+            \\shows skhd as granted, the grant is anchored on a previous
+            \\build's cdHash. Reset and re-grant:
             \\
-            \\Reset and re-grant:
             \\  tccutil reset ListenEvent com.jackielii.skhd
-            \\  skhd --restart-service
-            \\  # press any hotkey — macOS prompts for Input Monitoring; approve
-            \\
-            \\The fresh grant anchors on the cert root and survives future
-            \\upgrades.
+            \\  skhd --install-grabber   # prompts for Input Monitoring
             \\
         , .{});
     }
@@ -765,7 +811,7 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
     // first. Only print it when the grabber is actually installed —
     // for users who never set up `.remap` / `.taphold`, "Not installed"
     // is an informational line, not an actionable problem.
-    if (grabber_cli.isGrabberInstalled(io)) {
+    if (grabber_installed) {
         if (hid_state != .running) {
             grabber_cli.printHidDaemonRemediation(hid_state);
         } else if (grabber_cli.readHidDaemonVersion(allocator, io)) |installed_dext| {

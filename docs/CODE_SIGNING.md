@@ -71,7 +71,7 @@ Permissions will now **persist across rebuilds** as long as you sign each new bu
 | Prod (`sign-app`) | `zig-out/skhd.app` | `com.jackielii.skhd` | `skhd-cert` |
 | Dev (`run`) | `zig-out/skhd-dev.app` | `com.jackielii.skhd.dev` | `skhd-dev-cert` |
 
-The dev cert is auto-created on first `zig build run`. One-time setup: add `zig-out/skhd-dev.app` in **System Settings → Privacy & Security → Accessibility** and toggle it on. Permissions persist across rebuilds because every `zig build run` re-signs with the same `skhd-dev-cert`.
+The dev cert is auto-created on first `zig build run`. One-time setup: add `zig-out/skhd-dev.app` in **System Settings → Privacy & Security → Accessibility** (**Device Control and Data Access** on macOS 27+) and toggle it on. Permissions persist across rebuilds because every `zig build run` re-signs with the same `skhd-dev-cert`.
 
 The two bundles never overlap, so debugging never disturbs the prod TCC entry that the Homebrew-installed daemon relies on. If you want to debug without the prod daemon also receiving keypresses, stop it first: `skhd --stop-service`.
 

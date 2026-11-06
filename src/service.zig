@@ -234,6 +234,35 @@ pub fn tryAutoResetStaleTcc(
     return .reset_now;
 }
 
+/// Name of the System Settings → Privacy & Security pane that holds the
+/// Accessibility grant. macOS 27 renamed it "Device Control and Data
+/// Access"; earlier versions call it "Accessibility". Input Monitoring kept
+/// its name.
+pub fn accessibilityPaneName() []const u8 {
+    var buf: [32]u8 = undefined;
+    var len: usize = buf.len;
+    if (std.c.sysctlbyname("kern.osproductversion", &buf, &len, null, 0) != 0) return paneNameForMajor(0);
+    return paneNameForMajor(parseMajorVersion(std.mem.sliceTo(buf[0..len], 0)));
+}
+
+/// "27.2" → 27, "15.8.2" → 15; 0 when unparseable.
+fn parseMajorVersion(version: []const u8) u32 {
+    const end = std.mem.indexOfScalar(u8, version, '.') orelse version.len;
+    return std.fmt.parseInt(u32, version[0..end], 10) catch 0;
+}
+
+fn paneNameForMajor(major: u32) []const u8 {
+    return if (major >= 27) "Device Control and Data Access" else "Accessibility";
+}
+
+test "accessibilityPaneName: renamed on macOS 27" {
+    try std.testing.expectEqualStrings("Device Control and Data Access", paneNameForMajor(parseMajorVersion("27.2")));
+    try std.testing.expectEqualStrings("Device Control and Data Access", paneNameForMajor(parseMajorVersion("28")));
+    try std.testing.expectEqualStrings("Accessibility", paneNameForMajor(parseMajorVersion("26.4")));
+    try std.testing.expectEqualStrings("Accessibility", paneNameForMajor(parseMajorVersion("15.8.2")));
+    try std.testing.expectEqualStrings("Accessibility", paneNameForMajor(parseMajorVersion("garbage")));
+}
+
 /// Drop com.jackielii.skhd's Accessibility entry (Input Monitoring is left
 /// alone). Used by the daemon when it isn't trusted at startup: the entry
 /// is then missing, off, or anchored on a previous build's signature
@@ -793,7 +822,7 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
         std.debug.print("\nTo start the service, run: skhd --start-service\n", .{});
     } else if (tap_health == .denied) {
         std.debug.print("\nTo grant accessibility permissions:\n", .{});
-        std.debug.print("1. Open System Settings → Privacy & Security → Accessibility\n", .{});
+        std.debug.print("1. Open System Settings → Privacy & Security → {s}\n", .{accessibilityPaneName()});
         std.debug.print("2. Click '+' and add /Applications/skhd.app (the .app shows\n", .{});
         std.debug.print("   up in the list, unlike a bare binary)\n", .{});
         std.debug.print("3. Toggle the entry on\n", .{});

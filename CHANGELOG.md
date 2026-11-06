@@ -5,10 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.2...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.3...HEAD)
+
+## [0.2.3](https://github.com/jackielii/skhd.zig/compare/v0.2.2...v0.2.3) - 2026-11-06
 
 ### Fixed
-- **Agent left stopped after `brew upgrade`.** The cask unloads the LaunchAgent during upgrade, and the post-install `--restart-service` then failed because `launchctl kickstart` cannot start a job launchd no longer has loaded. `--restart-service` now loads a registered-but-unloaded agent again the same way `--start-service` does. It never boots out or unregisters first, so the registration is still kept if that fails (#53).
+- **Repeated Accessibility dialogs.** Without Accessibility, the agent prompted, failed to start its event tap, and exited, so launchd restarted it and macOS showed a new dialog every ~15 seconds. The agent now prompts once and waits, and starts within a second of the grant with no restart. Before prompting it clears skhd's Accessibility entry, so a stale entry from a differently signed build (shown as on in System Settings but rejected by macOS) can't swallow the toggle (#68).
+- **Agent left stopped after `brew upgrade`.** The cask unloads the LaunchAgent during upgrade, and the post-install `--restart-service` then failed because `launchctl kickstart` cannot start a job launchd no longer has loaded. `--restart-service` now loads a registered-but-unloaded agent again the same way `--start-service` does. It never boots out or unregisters first, so the registration is still kept if that fails (#69).
+- **Accessibility pane name on macOS 27.** macOS 27 renamed Privacy & Security → Accessibility to **Device Control and Data Access**. skhd's messages and `--status` now name the right pane for the running macOS version, and the docs mention both (#70).
 
 ## [0.2.2](https://github.com/jackielii/skhd.zig/compare/v0.2.1...v0.2.2) - 2026-11-06
 

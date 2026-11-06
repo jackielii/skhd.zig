@@ -706,17 +706,12 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
     // a `com.jackielii.skhd*` identifier prefix.
     const main = @import("main.zig");
     const is_daemon = main.isLaunchdManaged();
-    const trusted = if (is_daemon)
-        service.promptForAccessibility()
-    else
-        service.hasAccessibilityPermissions();
-    if (!trusted) {
-        log.warn("Accessibility not granted for this bundle. {s}", .{
-            if (is_daemon)
-                "System Settings should now show the prompt."
-            else
-                "Foreground run — grant manually in System Settings → Privacy & Security → Accessibility, or run the daemon (install-local) to get the prompt.",
-        });
+    if (!service.hasAccessibilityPermissions()) {
+        if (is_daemon) {
+            waitForAccessibility(self.allocator, self.io);
+        } else {
+            log.warn("Accessibility not granted for this bundle. Foreground run — grant manually in System Settings → Privacy & Security → Accessibility, or run the daemon (install-local) to get the prompt.", .{});
+        }
     }
     // Note: Input Monitoring prompt deliberately NOT triggered here.
     // IOHIDRequestAccess blocks the calling thread until the user clicks
@@ -841,6 +836,45 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
 
     // If we get here, the run loop has exited
     log.info("Run loop exited", .{});
+}
+
+/// How often the daemon re-checks Accessibility while waiting for a grant.
+const accessibility_poll_ms = 1000;
+
+/// Daemon-only: prompt for Accessibility once, then stay alive and poll
+/// until it is granted.
+///
+/// The previous flow prompted on every launch, failed to create the event
+/// tap, and exited; launchd's KeepAlive (ThrottleInterval 10) respawned it,
+/// so the user got a fresh system dialog every ~15s until they granted
+/// access, and then waited up to 10s more for the next respawn.
+/// The running process sees a new grant as long as its run loop runs (see
+/// below), so waiting here means one dialog and recovery within a second
+/// of the toggle, with no `--restart-service`.
+fn waitForAccessibility(allocator: std.mem.Allocator, io: std.Io) void {
+    // Not trusted means the entry is missing, off, or anchored on a
+    // previous build's signature — the last one still shows as on in
+    // System Settings but never validates, so toggling it does nothing.
+    // Drop it so the prompt below creates a fresh entry the toggle acts on.
+    if (service.resetAccessibilityGrant(allocator, io)) {
+        log.info("Cleared the Accessibility entry for com.jackielii.skhd before prompting.", .{});
+    }
+
+    if (service.promptForAccessibility()) return;
+    log.warn(
+        "Accessibility not granted. Turn on skhd in System Settings → Privacy & Security → Accessibility (re-add /Applications/skhd.app if it's missing). Waiting — skhd starts as soon as it's granted, no restart needed.",
+        .{},
+    );
+
+    // Spin the run loop between checks instead of sleeping: the process
+    // caches AXIsProcessTrusted() and only refreshes it on a system
+    // notification delivered through the run loop. With a plain sleep the
+    // cached "not trusted" never changes (verified: tccd saw the grant,
+    // the daemon never re-queried).
+    while (!service.hasAccessibilityPermissions()) {
+        _ = c.CFRunLoopRunInMode(c.kCFRunLoopDefaultMode, @as(f64, accessibility_poll_ms) / 1000.0, 0);
+    }
+    log.warn("Accessibility granted — starting event tap.", .{});
 }
 
 fn keyHandler(proxy: c.CGEventTapProxy, typ: c.CGEventType, event: c.CGEventRef, user_info: ?*anyopaque) callconv(.c) c.CGEventRef {

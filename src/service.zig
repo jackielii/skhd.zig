@@ -234,6 +234,16 @@ pub fn tryAutoResetStaleTcc(
     return .reset_now;
 }
 
+/// Drop com.jackielii.skhd's Accessibility entry (Input Monitoring is left
+/// alone). Used by the daemon when it isn't trusted at startup: the entry
+/// is then missing, off, or anchored on a previous build's signature
+/// (shows as on in System Settings but never validates), and in every
+/// case a fresh entry from the next prompt is what the user's toggle
+/// needs to act on.
+pub fn resetAccessibilityGrant(allocator: std.mem.Allocator, io: std.Io) bool {
+    return runTccutilReset(allocator, io, "Accessibility");
+}
+
 /// `/usr/bin/tccutil reset <service> com.jackielii.skhd`. Returns true
 /// on exit code 0. Logs a warning on failure but doesn't propagate the
 /// error — partial success is still a meaningful state for the caller
@@ -710,7 +720,7 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
     const tap_label = switch (tap_health) {
         .working => "Yes (event tap active)",
         .disabled => "No (event tap registered but disabled — try --restart-service)",
-        .denied => "No (accessibility denied — see remediation below)",
+        .denied => "No (waiting for Accessibility grant — see below)",
         .unknown => "Unknown (daemon not running or window server unavailable)",
     };
     std.debug.print("  Hotkeys functional:   {s}\n", .{tap_label});
@@ -773,7 +783,8 @@ pub fn checkServiceStatus(allocator: std.mem.Allocator, io: std.Io) !void {
         std.debug.print("2. Click '+' and add /Applications/skhd.app (the .app shows\n", .{});
         std.debug.print("   up in the list, unlike a bare binary)\n", .{});
         std.debug.print("3. Toggle the entry on\n", .{});
-        std.debug.print("4. Run: skhd --restart-service\n", .{});
+        std.debug.print("   skhd is waiting for the grant and starts within a second\n", .{});
+        std.debug.print("   of the toggle — no restart needed.\n", .{});
         std.debug.print(
             \\
             \\If the entry already shows as granted in System Settings but

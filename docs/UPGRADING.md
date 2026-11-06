@@ -46,7 +46,7 @@ On macOS 15+ (Tahoe), TCC stores Input Monitoring grants with a **csreq anchored
 
 Symptoms:
 - `skhd --status` shows the daemon running, but hotkeys don't fire.
-- System Settings → Privacy & Security → Accessibility (and/or Input Monitoring) shows skhd as enabled.
+- System Settings → Privacy & Security → Accessibility (**Device Control and Data Access** on macOS 27+) and/or Input Monitoring shows skhd as enabled.
 - `~/Library/Logs/skhd.log` shows the event tap was created but no key activity.
 
 **Since 0.1.2 the daemon does this automatically** when it's launchd-managed: on the first event-tap creation failure it calls `tccutil reset` itself, writes a marker at `~/Library/Caches/com.jackielii.skhd/tcc_auto_reset_at` to avoid reset loops on subsequent respawns, and emits a single short "go re-toggle in Settings" line in the log. You only need to perform step 2 below.
@@ -60,6 +60,7 @@ tccutil reset Accessibility com.jackielii.skhd
 skhd --restart-service
 
 # 2. Re-toggle the entry in System Settings → Privacy & Security → Accessibility
+#    (named "Device Control and Data Access" on macOS 27+)
 #    (or accept the prompt if one appears). The first hotkey press triggers the
 #    Input Monitoring prompt — approve it.
 ```

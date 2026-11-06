@@ -710,7 +710,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
         if (is_daemon) {
             waitForAccessibility(self.allocator, self.io);
         } else {
-            log.warn("Accessibility not granted for this bundle. Foreground run — grant manually in System Settings → Privacy & Security → Accessibility, or run the daemon (install-local) to get the prompt.", .{});
+            log.warn("Accessibility not granted for this bundle. Foreground run — grant manually in System Settings → Privacy & Security → {s}, or run the daemon (install-local) to get the prompt.", .{service.accessibilityPaneName()});
         }
     }
     // Note: Input Monitoring prompt deliberately NOT triggered here.
@@ -741,19 +741,19 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
                         \\Auto-reset Accessibility and Input Monitoring for com.jackielii.skhd.
                         \\
                         \\Action required (one time per upgrade):
-                        \\  1. Open System Settings → Privacy & Security → Accessibility
+                        \\  1. Open System Settings → Privacy & Security → {s}
                         \\  2. Re-toggle the skhd entry on (re-add /Applications/skhd.app if it disappeared)
                         \\  3. The first hotkey press will trigger the Input Monitoring prompt — approve it
                         \\
                         \\No need to run anything else — launchd will respawn the daemon and it will recover.
                         \\
-                    , .{});
+                    , .{service.accessibilityPaneName()});
                     return err;
                 },
                 .skipped_recent => {
                     log.err(
-                        "Stale TCC grant already auto-reset within the last 10 minutes — still waiting for re-grant in System Settings → Privacy & Security → Accessibility for com.jackielii.skhd.",
-                        .{},
+                        "Stale TCC grant already auto-reset within the last 10 minutes — still waiting for re-grant in System Settings → Privacy & Security → {s} for com.jackielii.skhd.",
+                        .{service.accessibilityPaneName()},
                     );
                     return err;
                 },
@@ -785,7 +785,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
                 \\=====================================================
                 \\skhd needs accessibility permissions to capture hotkeys.
                 \\
-                \\1. Open System Settings → Privacy & Security → Accessibility
+                \\1. Open System Settings → Privacy & Security → {s}
                 \\2. Click '+' and add: {s}
                 \\3. Toggle the entry on
                 \\4. Run: skhd --restart-service
@@ -806,7 +806,7 @@ pub fn run(self: *Skhd, enable_hotload: bool) !void {
                 \\  section.
                 \\=====================================================
                 \\
-            , .{display_path});
+            , .{ service.accessibilityPaneName(), display_path });
         }
         return err;
     };
@@ -862,8 +862,8 @@ fn waitForAccessibility(allocator: std.mem.Allocator, io: std.Io) void {
 
     if (service.promptForAccessibility()) return;
     log.warn(
-        "Accessibility not granted. Turn on skhd in System Settings → Privacy & Security → Accessibility (re-add /Applications/skhd.app if it's missing). Waiting — skhd starts as soon as it's granted, no restart needed.",
-        .{},
+        "Accessibility not granted. Turn on skhd in System Settings → Privacy & Security → {s} (re-add /Applications/skhd.app if it's missing). Waiting — skhd starts as soon as it's granted, no restart needed.",
+        .{service.accessibilityPaneName()},
     );
 
     // Spin the run loop between checks instead of sleeping: the process

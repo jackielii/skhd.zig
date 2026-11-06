@@ -184,7 +184,8 @@ skhd captures keyboard events via macOS Core Graphics, which requires Accessibil
 
 1. In the dialog, click **Open System Settings**
 2. Toggle the **skhd** entry on
-3. Run `skhd --restart-service` (or `skhd --start-service` if not yet running)
+
+The running agent waits for the grant and starts within a second of the toggle; no restart needed. If you don't see the dialog, open **System Settings → Privacy & Security → Accessibility** yourself; on macOS 27 and later this pane is called **Device Control and Data Access**.
 
 You only need to do this once. The bundle's stable identifier (`com.jackielii.skhd`) means TCC entries persist across rebuilds and `brew upgrade`.
 

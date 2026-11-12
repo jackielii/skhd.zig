@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.3...HEAD)
+## [Unreleased](https://github.com/jackielii/skhd.zig/compare/v0.2.4...HEAD)
+
+## [0.2.4](https://github.com/jackielii/skhd.zig/compare/v0.2.3...v0.2.4) - 2026-11-12
+
+### Fixed
+- **`->` passthrough on mode activations.** A binding such as `escape -> ; default` switched mode but swallowed the key, so applications never received it (for example, Escape no longer left Insert mode in Vim). Mode activations now honor `->` like command bindings do, matching the original skhd: the mode switches and the key is still delivered, including in capture (`@`) modes (#71, #72).
 
 ## [0.2.3](https://github.com/jackielii/skhd.zig/compare/v0.2.2...v0.2.3) - 2026-11-06
 

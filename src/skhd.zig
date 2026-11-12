@@ -1660,7 +1660,10 @@ inline fn processMatchedHotkey(self: *Skhd, hotkey: *Hotkey, eventkey: *const Ho
                     self.current_mode = self.mappings.mode_map.getPtr("default");
                 }
 
-                return .consumed;
+                // `key -> ; mode` switches mode and still delivers the key,
+                // as in the original skhd, which applies the `->` flag to
+                // every matched hotkey, activations included (#71).
+                return if (hotkey.passthrough) .passthrough else .consumed;
             },
         }
     }
@@ -2038,6 +2041,44 @@ test "processHotkey respects passthrough in capture mode" {
         const result = try skhd.processHotkey(&keypress, mock_event, "test");
         try std.testing.expectEqual(HotkeyResult.not_found, result);
     }
+}
+
+test "processHotkey: mode activation honors -> passthrough (#71)" {
+    const alloc = std.testing.allocator;
+
+    // The reporter's binding: Escape leaves every mode, default included,
+    // and must still reach the application (e.g. Vim leaving Insert mode).
+    const config =
+        \\:: passthrough
+        \\:: capture @
+        \\capture, passthrough, default < escape -> ; default
+        \\default < cmd - b ; capture
+    ;
+
+    var threaded: std.Io.Threaded = .init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var skhd = try createTestSkhdFromConfig(alloc, io, config);
+    defer skhd.deinit();
+
+    const mock_event: c.CGEventRef = @ptrFromInt(0x1234);
+    const escape = Hotkey.KeyPress{ .key = 0x35, .flags = ModifierFlag{} };
+    const default_mode = skhd.mappings.mode_map.getPtr("default");
+
+    // Already in default: switching to the current mode still passes Escape.
+    skhd.current_mode = default_mode;
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&escape, mock_event, "Vim"));
+    try std.testing.expectEqual(default_mode, skhd.current_mode);
+
+    // From a capture mode: the mode switches AND Escape is delivered.
+    skhd.current_mode = skhd.mappings.mode_map.getPtr("capture");
+    try std.testing.expectEqual(HotkeyResult.passthrough, try skhd.processHotkey(&escape, mock_event, "Vim"));
+    try std.testing.expectEqual(default_mode, skhd.current_mode);
+
+    // An activation without `->` still consumes the key.
+    const cmd_b = Hotkey.KeyPress{ .key = 0x0B, .flags = ModifierFlag{ .cmd = true } };
+    try std.testing.expectEqual(HotkeyResult.consumed, try skhd.processHotkey(&cmd_b, mock_event, "Vim"));
+    try std.testing.expectEqual(skhd.mappings.mode_map.getPtr("capture"), skhd.current_mode);
 }
 
 test "shorter binding defers while a longer sequence is applicable" {
